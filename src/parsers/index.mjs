@@ -18,8 +18,12 @@ export class FixtureParser {
   pageType() { return this.type; }
   version() { return this.rev; }
   parse(snapshot) {
-    const document = JSON.parse(Buffer.from(snapshot.body).toString('utf8'));
-    if (document.layoutShift) return { kind: 'structural_failure', error: 'fixture layout changed; column meaning is uncertain', warnings: [] };
-    return { kind: 'valid', document, warnings: document.warnings ?? [] };
+    try {
+      const document = JSON.parse(Buffer.from(snapshot.body).toString('utf8'));
+      if (document.layoutShift) return { kind: 'structural_failure', error: 'fixture layout changed; column meaning is uncertain', warnings: [] };
+      return { kind: 'valid', document, warnings: document.warnings ?? [] };
+    } catch (error) {
+      return { kind: 'structural_failure', error: `document could not be parsed: ${error.message}`, warnings: [] };
+    }
   }
 }
