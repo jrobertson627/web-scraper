@@ -7,7 +7,12 @@ export const PAGE_TYPES = Object.freeze([
 ]);
 
 export const TARGET_ENDING_YEARS = Object.freeze([2022, 2023, 2024, 2025, 2026]);
-export const REQUIRED_ELIGIBILITY_PREDICATE = 'To == 2026';
+export const REQUIRED_ELIGIBILITY_ENDING_YEAR = 2026;
+export const REQUIRED_ELIGIBILITY_PREDICATE = `To == ${REQUIRED_ELIGIBILITY_ENDING_YEAR}`;
+
+export function isEligibleSchool(school) {
+  return school?.to === REQUIRED_ELIGIBILITY_ENDING_YEAR;
+}
 
 export function assertPageType(pageType) {
   if (!PAGE_TYPES.includes(pageType)) {

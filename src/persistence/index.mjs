@@ -92,7 +92,6 @@ export function createRawStore(kind, root = '.raw') {
   throw new Error(`unsupported raw store: ${kind}. Expected memory or filesystem.`);
 }
 
-
 export class InMemoryPersistence {
   constructor(clock = () => new Date()) {
     this.clock = clock;
@@ -124,9 +123,8 @@ export class InMemoryPersistence {
   }
 
   claimNextJob(now, workerId) {
-    this.recoverExpiredClaims(now);
-    const current = [...this.jobs.values()].find((job) =>
-      (job.state === 'pending' || (job.state === 'retry_wait' && job.nextAllowedAt && new Date(job.nextAllowedAt) <= now)) && !job.claim);
+    let current = this.#findClaimableJob(now);
+    if (!current && this.recoverExpiredClaims(now) > 0) current = this.#findClaimableJob(now);
     if (!current) return null;
     const generation = (current.generation ?? 0) + 1;
     const lease = { workerId, generation, value: `${workerId}:${generation}` };
@@ -161,7 +159,6 @@ export class InMemoryPersistence {
   getRequestSchedule(host, now = this.clock()) {
     const current = this.requestSchedules.get(host) ?? { lastStartedAt: null, starts: [] };
     const starts = current.starts.filter((at) => now.getTime() - at.getTime() < 60_000);
-    this.requestSchedules.set(host, { lastStartedAt: current.lastStartedAt, starts });
     return { lastStartedAt: current.lastStartedAt, starts: [...starts] };
   }
 
@@ -270,7 +267,13 @@ export class InMemoryPersistence {
     const games = [];
     for (const page of this.pages.values()) {
       if (page.kind === 'school_index') {
-        for (const school of page.data.schools ?? []) schools.push({ ...school, eligible: school.to === 2026, provenance: page.provenance });
+        for (const [rowIndex, school] of (page.data.schools ?? []).entries()) {
+          const observation = this.observations.get(`school:${page.jobKey}:${rowIndex}`);
+          if (typeof observation?.eligible !== 'boolean') {
+            throw new Error(`school eligibility observation is missing for ${page.jobKey} row ${rowIndex}`);
+          }
+          schools.push({ ...school, eligible: observation.eligible, provenance: page.provenance });
+        }
       }
       if (page.kind === 'season') seasons.push({ ...page.data, provenance: page.provenance });
       if (page.kind === 'game') games.push({ ...page.data, gameKey: page.identity, provenance: page.provenance });
@@ -289,6 +292,14 @@ export class InMemoryPersistence {
         observations: this.observations.size,
       },
     };
+  }
+
+  #findClaimableJob(now) {
+    for (const job of this.jobs.values()) {
+      const retryReady = job.state === 'retry_wait' && job.nextAllowedAt && new Date(job.nextAllowedAt) <= now;
+      if (!job.claim && (job.state === 'pending' || retryReady)) return job;
+    }
+    return null;
   }
 
   #applyTransition(job, nextState, details, at = this.clock()) {

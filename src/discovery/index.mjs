@@ -2,6 +2,7 @@ import {
   assertPageType,
   canonicalizeSourceUrl,
   isAllowedSourceUrl,
+  isEligibleSchool,
   serializeCanonicalPath,
   sourceKey,
 } from '../contracts/source.mjs';
@@ -43,7 +44,7 @@ export class Discovery {
 
     if (pageType === 'school_index') {
       for (const [rowIndex, school] of (page.schools ?? []).entries()) {
-        const eligible = school.to === 2026;
+        const eligible = isEligibleSchool(school);
         observations.push({ kind: 'school', school, eligible, parentKey: snapshot.jobKey, rowIndex });
         if (!eligible || !school.historyUrl) continue;
         if (!school.path) {

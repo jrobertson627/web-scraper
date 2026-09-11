@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
+import { IngestionOrchestrator } from '../src/application/orchestrator.mjs';
 import { validateConfiguration } from '../src/config/configuration.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
 import { Discovery } from '../src/discovery/index.mjs';
+import { Normalizer } from '../src/domain/index.mjs';
 import { FixtureParser } from '../src/parsers/index.mjs';
 import { FixtureTransport, Fetcher } from '../src/fetcher/index.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
@@ -114,6 +116,57 @@ test('expired fetched jobs return to retryable state', () => {
   assert.equal(persistence.claimNextJob(later, 'worker-2').key, job.key);
 });
 
+test('missing post-fetch snapshots stop for operator review without stranding the job', async () => {
+  const now = new Date('2026-01-01T00:00:00.000Z');
+  const persistence = new InMemoryPersistence(() => now);
+  persistence.addJob(makeJob());
+  const orchestrator = new IngestionOrchestrator({
+    fetcher: { fetch: async () => ({ kind: 'fetched', sourceFetchId: 'fetch-1', checksum: 'missing' }) },
+    discovery: {},
+    parsers: {},
+    normalizer: {},
+    persistence,
+    rawStore: { get: () => null },
+    clock: () => now,
+  });
+
+  await orchestrator.runOnce('worker');
+
+  const job = persistence.getJob(makeJob().key);
+  assert.equal(job.state, 'operator_stop');
+  assert.equal(job.claim, null);
+  assert.match(job.lastError, /raw snapshot missing is unavailable/);
+});
+
+test('a frozen throttle clock crashes the worker instead of permanently failing the page', async () => {
+  const now = new Date('2026-01-01T00:00:00.000Z');
+  const persistence = new InMemoryPersistence(() => now);
+  persistence.recordRequestStart('allowed.example', now);
+  persistence.addJob(makeJob());
+  const rawStore = new MemoryRawStore();
+  const fetcher = new Fetcher({
+    transport: new FixtureTransport(),
+    rawStore,
+    persistence,
+    clock: () => now,
+    sleep: async () => {},
+    allowedHosts: ['allowed.example'],
+    policy: validPolicy,
+  });
+  const orchestrator = new IngestionOrchestrator({
+    fetcher,
+    discovery: {},
+    parsers: {},
+    normalizer: {},
+    persistence,
+    rawStore,
+    clock: () => now,
+  });
+
+  await assert.rejects(orchestrator.runOnce('worker'), /throttle sleep did not advance/);
+  assert.equal(persistence.getJob(makeJob().key).state, 'fetching');
+});
+
 test('link-less game-log rows remain distinct observations', () => {
   const now = new Date('2026-01-01T00:00:00.000Z');
   const persistence = new InMemoryPersistence(() => now);
@@ -126,6 +179,25 @@ test('link-less game-log rows remain distinct observations', () => {
     { kind: 'game_log', parentKey: 'log', rowIndex: 1, game: { opponent: 'B' } },
   ] }, { providerId: 'p' }, job.lease);
   assert.equal(persistence.observations.size, 2);
+});
+
+test('school projections use the persisted eligibility decision', () => {
+  const now = new Date('2026-01-01T00:00:00.000Z');
+  const persistence = new InMemoryPersistence(() => now);
+  const sourceUrl = createSourceUrl('p', 'https://allowed.example/cbb/schools/');
+  persistence.addJob({ key: 'index', pageType: 'school_index', sourceUrl, canonicalPath: canonicalizeSourceUrl(sourceUrl) });
+  const job = persistence.claimNextJob(now, 'worker');
+  persistence.transitionJob(job.key, 'fetched', job.lease);
+  persistence.commitPage({
+    jobKey: job.key,
+    kind: 'school_index',
+    identity: job.key,
+    data: { schools: [{ name: 'Recorded Decision', to: 2025 }] },
+    observations: [{ kind: 'school', parentKey: job.key, rowIndex: 0, eligible: true }],
+  }, { providerId: 'p' }, job.lease);
+  persistence.transitionJob(job.key, 'parsed', job.lease);
+
+  assert.equal(persistence.queryModels().schools[0].eligible, true);
 });
 
 test('fetcher renews claims while waiting for request rate limits and reuses 304 bodies', async () => {
@@ -150,6 +222,22 @@ test('malformed parser input becomes a structural failure', () => {
   const result = new FixtureParser('season').parse({ body: Buffer.from('<not-json>') });
   assert.equal(result.kind, 'structural_failure');
   assert.match(result.error, /could not be parsed/);
+});
+
+test('normalization retains parsed box-score fields alongside normalized projections', () => {
+  const canonicalPath = canonicalizeSourceUrl(createSourceUrl('p', 'https://allowed.example/box/one'));
+  const result = new Normalizer().normalize('box_score', {
+    date: '2026-01-02',
+    status: 'final',
+    context: 'home',
+    venue: 'Fixture Arena',
+    playerStats: [{ name: 'Player', points: 10 }],
+    teams: [{ side: 'home', name: 'Fixture', stats: { rebounds: 30 } }],
+  }, { jobKey: 'box', canonicalPath, observations: [] });
+
+  assert.equal(result.data.venue, 'Fixture Arena');
+  assert.deepEqual(result.data.playerStats, [{ name: 'Player', points: 10 }]);
+  assert.deepEqual(result.data.teams, [{ side: 'home', name: 'Fixture', stats: { rebounds: 30 } }]);
 });
 
 test('read-only API handles query strings, trailing slashes, and mutation rejection', async () => {

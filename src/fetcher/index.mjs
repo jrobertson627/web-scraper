@@ -24,7 +24,6 @@ export class Fetcher {
     this.policy = policy;
     this.allowedHosts = allowedHosts;
     this.sleep = sleep;
-    this.localSchedules = new Map();
   }
 
   async fetch(job, lease) {
@@ -107,6 +106,7 @@ export class Fetcher {
         : 0;
       const delay = Math.max(intervalDelay, rateDelay);
       if (delay === 0) return;
+      this.persistence.renewClaim(job.key, lease, now);
       const before = this.clock().getTime();
       await this.sleep(Math.min(delay, 10_000));
       const after = this.clock().getTime();
@@ -116,20 +116,11 @@ export class Fetcher {
   }
 
   #getSchedule(host, now) {
-    if (this.persistence.getRequestSchedule) return this.persistence.getRequestSchedule(host, now);
-    const current = this.localSchedules.get(host) ?? { lastStartedAt: null, starts: [] };
-    const starts = current.starts.filter((at) => now.getTime() - at.getTime() < 60_000);
-    return { lastStartedAt: current.lastStartedAt, starts };
+    return this.persistence.getRequestSchedule(host, now);
   }
 
   #recordRequestStart(host, at) {
-    if (this.persistence.recordRequestStart) {
-      this.persistence.recordRequestStart(host, at);
-      return;
-    }
-    const current = this.#getSchedule(host, at);
-    current.starts.push(at);
-    this.localSchedules.set(host, { lastStartedAt: at, starts: current.starts });
+    this.persistence.recordRequestStart(host, at);
   }
 
   #retry(job, reason) {

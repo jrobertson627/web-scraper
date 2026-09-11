@@ -29,7 +29,6 @@ export function createFixtureApplication() {
     fixture('/box/one.html', { date: '2026-01-02', home: 'Fixture A', away: 'Opponent', homeScore: 70, awayScore: 65, context: 'neutral', status: 'final', playerSourceId: null }),
   ];
   const transport = new FixtureTransport(new Map(fixtureData.map((item) => [item.url, item])));
-  const rawStore = createRawStore('memory');
   const persistence = new InMemoryPersistence(clock);
   const config = validateConfiguration({
     mode: 'local', providerId: PROVIDER, allowedHosts: [HOST], rawStore: 'memory',
@@ -37,6 +36,7 @@ export function createFixtureApplication() {
     eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
     publication: 'private',
   });
+  const rawStore = createRawStore(config.rawStore);
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
   const discovery = new Discovery({ providerId: PROVIDER, allowedHosts: [HOST], targetEndingYears: config.targetEndingYears });

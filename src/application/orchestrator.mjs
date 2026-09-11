@@ -1,6 +1,8 @@
 import { createProvenance } from '../contracts/provenance.mjs';
 import { createSourceUrl } from '../contracts/source.mjs';
 
+const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
+
 export class IngestionOrchestrator {
   constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock }) {
     this.fetcher = fetcher;
@@ -43,8 +45,14 @@ export class IngestionOrchestrator {
         return;
       }
       this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
+      phase = 'snapshot';
       const stored = this.rawStore.get(result.checksum);
-      if (!stored) throw new Error(`raw snapshot ${result.checksum} is unavailable after fetch`);
+      if (!stored) {
+        this.persistence.transitionJob(job.key, 'operator_stop', job.lease, {
+          lastError: `raw snapshot ${result.checksum} is unavailable after fetch`,
+        });
+        return;
+      }
       const snapshot = {
         jobKey: job.key,
         parentKey: job.parentKey,
@@ -91,23 +99,27 @@ export class IngestionOrchestrator {
       this.persistence.commitPage(page, provenance, job.lease);
       this.persistence.transitionJob(job.key, 'parsed', job.lease);
     } catch (error) {
+      if (phase === 'fetch' || phase === 'snapshot') throw error;
       const current = this.persistence.getJob(job.key);
       if (current?.claim && ['fetching', 'fetched'].includes(current.state)) {
         try {
-          this.persistence.transitionJob(
-            job.key,
-            phase === 'fetch' ? 'permanently_failed' : 'parse_failed',
-            job.lease,
-            { failureReason: error.message, failurePhase: phase },
-          );
+          this.persistence.transitionJob(job.key, 'parse_failed', job.lease, {
+            failureReason: error.message,
+            failurePhase: phase,
+          });
         } catch (transitionError) {
           this.persistence.recoverExpiredClaims(this.clock());
-          if (this.persistence.getJob(job.key)?.state === 'fetching') throw transitionError;
+          const recovered = this.persistence.getJob(job.key);
+          if (!FAILURE_SETTLED_STATES.has(recovered?.state)) {
+            throw new AggregateError(
+              [error, transitionError],
+              `failed to classify ${phase} failure for job ${job.key}`,
+            );
+          }
         }
-      } else if (current?.state === 'fetching' || current?.state === 'fetched') {
+      } else {
         this.persistence.recoverExpiredClaims(this.clock());
-      } else if (current?.state !== 'retry_wait' && current?.state !== 'operator_stop') {
-        throw error;
+        if (!FAILURE_SETTLED_STATES.has(this.persistence.getJob(job.key)?.state)) throw error;
       }
     }
   }

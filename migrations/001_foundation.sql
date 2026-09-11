@@ -92,11 +92,13 @@ CREATE INDEX IF NOT EXISTS school_seasons_school_idx ON school_seasons (school_i
 CREATE TABLE IF NOT EXISTS season_rosters (
   id BIGSERIAL PRIMARY KEY,
   school_season_id BIGINT NOT NULL REFERENCES school_seasons(id),
+  source_row_index INTEGER NOT NULL CHECK (source_row_index >= 0),
   player_source_path TEXT,
   player_name TEXT NOT NULL,
   provenance JSONB NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS season_rosters_identity_idx ON season_rosters (school_season_id, COALESCE(player_source_path, ''), player_name);
+CREATE UNIQUE INDEX IF NOT EXISTS season_rosters_linked_identity_idx ON season_rosters (school_season_id, player_source_path) WHERE player_source_path IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS season_rosters_unlinked_row_identity_idx ON season_rosters (school_season_id, source_row_index) WHERE player_source_path IS NULL;
 
 CREATE TABLE IF NOT EXISTS players (
   id BIGSERIAL PRIMARY KEY,
@@ -148,31 +150,36 @@ CREATE INDEX IF NOT EXISTS team_game_stats_team_idx ON team_game_stats (game_tea
 CREATE TABLE IF NOT EXISTS player_game_basic_stats (
   id BIGSERIAL PRIMARY KEY,
   game_id BIGINT NOT NULL REFERENCES games(id),
+  source_row_index INTEGER NOT NULL CHECK (source_row_index >= 0),
   player_id BIGINT REFERENCES players(id),
   player_name TEXT NOT NULL,
   stats JSONB NOT NULL,
   provenance JSONB NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS player_game_basic_linked_identity_idx ON player_game_basic_stats (game_id, player_id) WHERE player_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS player_game_basic_unlinked_row_identity_idx ON player_game_basic_stats (game_id, source_row_index) WHERE player_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS player_game_advanced_stats (
   id BIGSERIAL PRIMARY KEY,
   game_id BIGINT NOT NULL REFERENCES games(id),
+  source_row_index INTEGER NOT NULL CHECK (source_row_index >= 0),
   player_id BIGINT REFERENCES players(id),
   player_name TEXT NOT NULL,
   stats JSONB NOT NULL,
   provenance JSONB NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS player_game_advanced_linked_identity_idx ON player_game_advanced_stats (game_id, player_id) WHERE player_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS player_game_advanced_unlinked_row_identity_idx ON player_game_advanced_stats (game_id, source_row_index) WHERE player_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS game_observations (
   id BIGSERIAL PRIMARY KEY,
   provider_id TEXT NOT NULL,
-  canonical_box_score_path TEXT NOT NULL,
+  canonical_box_score_path TEXT,
   parent_job_id BIGINT NOT NULL REFERENCES crawl_jobs(id),
+  source_row_index INTEGER NOT NULL CHECK (source_row_index >= 0),
   source_fetch_id BIGINT REFERENCES source_fetches(id),
   observation JSONB NOT NULL,
-  UNIQUE (provider_id, canonical_box_score_path, parent_job_id)
+  UNIQUE (provider_id, parent_job_id, source_row_index)
 );
 CREATE INDEX IF NOT EXISTS game_observations_game_idx ON game_observations (provider_id, canonical_box_score_path);
 
@@ -212,12 +219,12 @@ CREATE TABLE IF NOT EXISTS in_flight_requests (
   released_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_request_per_host ON in_flight_requests(host) WHERE released_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS host_request_schedule (
   host TEXT PRIMARY KEY,
   last_request_started_at TIMESTAMPTZ,
   recent_request_starts TIMESTAMPTZ[] NOT NULL DEFAULT ARRAY[]::TIMESTAMPTZ[]
 );
-
 
 CREATE TABLE IF NOT EXISTS operator_dispositions (
   id BIGSERIAL PRIMARY KEY,

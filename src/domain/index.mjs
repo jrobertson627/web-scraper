@@ -26,6 +26,7 @@ export class Normalizer {
         kind: 'game',
         identity,
         data: {
+          ...document,
           gameDate: document.date ?? null,
           status: document.status,
           gameType: document.gameType ?? null,
@@ -33,7 +34,7 @@ export class Normalizer {
           overtime: document.overtime ?? null,
           lineScores: document.lineScores ?? {},
           playerSourceId: document.playerSourceId ?? null,
-          teams: [
+          teams: document.teams ?? [
             { side: 'home', name: document.home ?? null, finalScore: document.homeScore ?? null },
             { side: 'away', name: document.away ?? null, finalScore: document.awayScore ?? null },
           ],
