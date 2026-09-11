@@ -1,0 +1,16 @@
+{
+  "name": "web-scraper-foundation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start:local": "node src/application/cli.mjs local",
+    "start:worker": "node src/application/cli.mjs worker",
+    "start:api": "node src/application/cli.mjs api",
+    "check": "node --check src/application/cli.mjs && node --test",
+    "test": "node --test"
+  }
+}
