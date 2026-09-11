@@ -3,7 +3,7 @@
 ## Stack decision
 
 - **Runtime:** Node.js 20 or newer.
-- **Language:** ECMAScript modules (`.mjs`) with runtime contracts and JSDoc types where useful; no runtime framework.
+- **Language:** ECMAScript modules (`.mjs`) with explicit runtime contracts; no runtime framework.
 - **Package convention:** one deployable application, grouped by the six internal boundaries: `fetcher`, `discovery`, `parsers`, `domain`, `persistence`, and `api`. `application` is the composition root, lifecycle shell, and ingestion orchestrator.
 - **Testing:** Node's built-in `node:test` runner.
 - **Production persistence seam:** PostgreSQL migration contract in `migrations/`; fixture/local mode uses deterministic in-memory adapters and never opens a network connection.

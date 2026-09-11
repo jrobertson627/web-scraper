@@ -4,7 +4,7 @@ import { FixtureTransport, Fetcher } from '../fetcher/index.mjs';
 import { Discovery } from '../discovery/index.mjs';
 import { FixtureParser, ParserRegistry } from '../parsers/index.mjs';
 import { Normalizer } from '../domain/index.mjs';
-import { InMemoryPersistence, MemoryRawStore } from '../persistence/index.mjs';
+import { InMemoryPersistence, createRawStore } from '../persistence/index.mjs';
 import { createQueryService, createApiServer } from '../api/index.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
@@ -29,7 +29,7 @@ export function createFixtureApplication() {
     fixture('/box/one.html', { date: '2026-01-02', home: 'Fixture A', away: 'Opponent', homeScore: 70, awayScore: 65, context: 'neutral', status: 'final', playerSourceId: null }),
   ];
   const transport = new FixtureTransport(new Map(fixtureData.map((item) => [item.url, item])));
-  const rawStore = new MemoryRawStore();
+  const rawStore = createRawStore('memory');
   const persistence = new InMemoryPersistence(clock);
   const config = validateConfiguration({
     mode: 'local', providerId: PROVIDER, allowedHosts: [HOST], rawStore: 'memory',

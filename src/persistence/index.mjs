@@ -1,11 +1,22 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertTransition, sameLease } from '../contracts/jobs.mjs';
-import { canonicalPathString } from '../contracts/source.mjs';
+import { assertTransition, createOperatorDisposition, sameLease } from '../contracts/jobs.mjs';
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value;
+}
 
 function jsonEqual(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right));
+}
+
+function cloneClaim(claim) {
+  return claim ? { ...claim, lease: claim.lease ? { ...claim.lease } : claim.lease } : null;
 }
 
 export class MemoryRawStore {
@@ -40,35 +51,47 @@ export class FileRawStore {
     const checksum = createHash('sha256').update(body).digest('hex');
     const path = this.#path(checksum);
     mkdirSync(dirname(path), { recursive: true });
-    try {
-      const existing = readFileSync(path);
-      if (!existing.equals(body)) throw new Error(`raw checksum collision: ${checksum}`);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      writeFileSync(path, body, { flag: 'wx' });
+    let existing = this.#read(path);
+    if (!existing) {
+      const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        writeFileSync(temporaryPath, body, { flag: 'wx' });
+        try {
+          linkSync(temporaryPath, path);
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+        }
+      } finally {
+        try { unlinkSync(temporaryPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      existing = this.#read(path);
     }
+    if (!existing || !existing.equals(body)) throw new Error(`raw checksum collision or incomplete write: ${checksum}`);
     return Object.freeze({ checksum, objectPath: `file://${path}`, size: body.length });
   }
 
   get(checksum) {
-    try {
-      const body = readFileSync(this.#path(checksum));
-      return Object.freeze({ checksum, objectPath: `file://${this.#path(checksum)}`, body });
-    } catch (error) {
-      if (error.code === 'ENOENT') return null;
-      throw error;
-    }
+    const body = this.#read(this.#path(checksum));
+    return body ? Object.freeze({ checksum, objectPath: `file://${this.#path(checksum)}`, body }) : null;
   }
 
-  has(checksum) {
-    try { readFileSync(this.#path(checksum)); return true; } catch (error) {
-      if (error.code === 'ENOENT') return false;
+  has(checksum) { return Boolean(this.#read(this.#path(checksum))); }
+
+  #read(path) {
+    try { return readFileSync(path); } catch (error) {
+      if (error.code === 'ENOENT') return null;
       throw error;
     }
   }
 
   #path(checksum) { return join(this.root, checksum.slice(0, 2), checksum); }
 }
+export function createRawStore(kind, root = '.raw') {
+  if (kind === 'memory') return new MemoryRawStore();
+  if (kind === 'filesystem') return new FileRawStore(root);
+  throw new Error(`unsupported raw store: ${kind}. Expected memory or filesystem.`);
+}
+
 
 export class InMemoryPersistence {
   constructor(clock = () => new Date()) {
@@ -77,12 +100,12 @@ export class InMemoryPersistence {
     this.sourceFetches = [];
     this.parseRuns = [];
     this.pages = new Map();
-    this.pageHistory = new Map();
     this.observations = new Map();
     this.unavailableCoverage = new Map();
     this.reconciliationIssues = [];
     this.operatorDispositions = [];
     this.inFlight = new Map();
+    this.requestSchedules = new Map();
   }
 
   addJob(job) {
@@ -94,8 +117,11 @@ export class InMemoryPersistence {
     return stored;
   }
 
-  listJobs() { return [...this.jobs.values()].map((job) => ({ ...job, claim: job.claim ? { ...job.claim } : null })); }
-  getJob(key) { return this.jobs.get(key); }
+  listJobs() { return [...this.jobs.values()].map((job) => ({ ...job, claim: cloneClaim(job.claim) })); }
+  getJob(key) {
+    const job = this.jobs.get(key);
+    return job ? { ...job, claim: cloneClaim(job.claim) } : null;
+  }
 
   claimNextJob(now, workerId) {
     this.recoverExpiredClaims(now);
@@ -121,26 +147,39 @@ export class InMemoryPersistence {
   recoverExpiredClaims(now) {
     let recovered = 0;
     for (const job of this.jobs.values()) {
-      if (job.claim && new Date(job.claim.expiresAt) <= now && !this.inFlight.has(job.key)) {
-        job.claim = null;
-        if (job.state === 'fetching') job.state = 'retry_wait';
-        job.nextAllowedAt = now.toISOString();
-        job.updatedAt = now.toISOString();
+      if (!job.claim || new Date(job.claim.expiresAt) > now || this.inFlight.has(job.key)) continue;
+      if (job.state === 'fetching' || job.state === 'fetched') {
+        this.#applyTransition(job, 'retry_wait', { nextAllowedAt: now.toISOString(), lastError: 'claim expired before completion' }, now);
         recovered += 1;
+      } else {
+        job.claim = null;
       }
     }
     return recovered;
+  }
+
+  getRequestSchedule(host, now = this.clock()) {
+    const current = this.requestSchedules.get(host) ?? { lastStartedAt: null, starts: [] };
+    const starts = current.starts.filter((at) => now.getTime() - at.getTime() < 60_000);
+    this.requestSchedules.set(host, { lastStartedAt: current.lastStartedAt, starts });
+    return { lastStartedAt: current.lastStartedAt, starts: [...starts] };
+  }
+
+  recordRequestStart(host, at) {
+    const current = this.getRequestSchedule(host, at);
+    current.starts.push(at);
+    this.requestSchedules.set(host, { lastStartedAt: at, starts: current.starts });
   }
 
   recordFetch(metadata, lease) {
     this.#requireLease(metadata.jobKey, lease);
     const id = `fetch-${this.sourceFetches.length + 1}`;
     const record = Object.freeze({
+      ...metadata,
       id,
       fetchedAt: metadata.fetchedAt ?? this.clock().toISOString(),
       etag: metadata.etag ?? null,
       lastModified: metadata.lastModified ?? null,
-      ...metadata,
       recordedAt: this.clock().toISOString(),
     });
     this.sourceFetches.push(record);
@@ -155,11 +194,11 @@ export class InMemoryPersistence {
     this.#requireLease(run.jobKey, lease);
     const id = `parse-${this.parseRuns.length + 1}`;
     const record = Object.freeze({
-      warnings: [],
-      failureDetails: null,
-      parsedAt: this.clock().toISOString(),
-      id,
       ...run,
+      id,
+      warnings: run.warnings ?? [],
+      failureDetails: run.failureDetails ?? null,
+      parsedAt: run.parsedAt ?? this.clock().toISOString(),
       recordedAt: this.clock().toISOString(),
     });
     this.parseRuns.push(record);
@@ -180,11 +219,8 @@ export class InMemoryPersistence {
       }));
     }
     this.pages.set(key, record);
-    const history = this.pageHistory.get(key) ?? [];
-    history.push(record);
-    this.pageHistory.set(key, history);
-    for (const observation of page.observations ?? []) {
-      const observationKey = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.canonicalBoxScorePath ?? key}`;
+    for (const [index, observation] of (page.observations ?? []).entries()) {
+      const observationKey = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
       this.observations.set(observationKey, Object.freeze({ ...observation, provenance }));
     }
     for (const unavailable of page.unavailableCoverage ?? []) {
@@ -197,16 +233,21 @@ export class InMemoryPersistence {
 
   transitionJob(key, nextState, lease, details = {}) {
     const job = this.#requireLease(key, lease);
-    assertTransition(job.state, nextState);
     this.#applyTransition(job, nextState, details);
   }
 
   recordOperatorDisposition(key, disposition) {
     const job = this.jobs.get(key);
     if (!job || job.state !== 'operator_stop') throw new Error(`operator disposition requires operator_stop. Current state: ${job?.state ?? 'missing'}`);
-    this.operatorDispositions.push(Object.freeze({ jobKey: key, ...disposition }));
-    if (disposition.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString() });
-    if (disposition.kind === 'release_permanent') this.#applyTransition(job, 'permanently_failed', { failureReason: disposition.reason });
+    const validated = createOperatorDisposition(
+      disposition.kind,
+      disposition.operatorId,
+      disposition.reason,
+      disposition.at ? new Date(disposition.at) : this.clock(),
+    );
+    this.operatorDispositions.push(Object.freeze({ jobKey: key, ...validated }));
+    if (validated.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString() });
+    if (validated.kind === 'release_permanent') this.#applyTransition(job, 'permanently_failed', { failureReason: validated.reason });
   }
 
   acquireRequest(key, lease, host) {
@@ -229,7 +270,7 @@ export class InMemoryPersistence {
     const games = [];
     for (const page of this.pages.values()) {
       if (page.kind === 'school_index') {
-        for (const school of page.data.schools ?? []) schools.push({ ...school, provenance: page.provenance });
+        for (const school of page.data.schools ?? []) schools.push({ ...school, eligible: school.to === 2026, provenance: page.provenance });
       }
       if (page.kind === 'season') seasons.push({ ...page.data, provenance: page.provenance });
       if (page.kind === 'game') games.push({ ...page.data, gameKey: page.identity, provenance: page.provenance });
@@ -250,11 +291,11 @@ export class InMemoryPersistence {
     };
   }
 
-  #applyTransition(job, nextState, details) {
+  #applyTransition(job, nextState, details, at = this.clock()) {
     assertTransition(job.state, nextState);
     job.state = nextState;
     Object.assign(job, details);
-    job.updatedAt = this.clock().toISOString();
+    job.updatedAt = at.toISOString();
     if (['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed'].includes(nextState)) job.claim = null;
   }
 

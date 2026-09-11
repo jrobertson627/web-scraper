@@ -16,7 +16,12 @@ function makeJob(providerId = 'p', absoluteUrl = 'https://allowed.example/page')
   return { key: `${providerId}:allowed.example/page:season`, pageType: 'season', sourceUrl, canonicalPath: canonicalizeSourceUrl(sourceUrl) };
 }
 
-test('fixture worker follows eligible links, preserves projections, and records both game-log observations', async () => {
+function makeClock() {
+  let time = Date.parse('2026-01-01T00:00:00.000Z');
+  return { clock: () => new Date(time), sleep: async (milliseconds) => { time += milliseconds; }, now: () => time };
+}
+
+test('fixture worker follows eligible links, preserves projections, and records observations', async () => {
   const app = createFixtureApplication();
   const result = await app.runWorkerOnce();
   const models = app.persistence.queryModels();
@@ -26,11 +31,12 @@ test('fixture worker follows eligible links, preserves projections, and records 
   assert.equal(result.jobs.filter((job) => job.pageType === 'box_score').length, 1);
   assert.equal(result.jobs.every((job) => job.state === 'parsed'), true);
   assert.equal(models.schools.length, 2);
-  assert.equal(models.schools.some((school) => school.name === 'Fixture B'), true);
+  assert.equal(models.schools.find((school) => school.name === 'Fixture A').eligible, true);
+  assert.equal(models.schools.find((school) => school.name === 'Fixture B').eligible, false);
   assert.equal(models.seasons.length, 2);
   assert.equal(models.games.length, 1);
   assert.equal(app.persistence.unavailableCoverage.size, 3);
-  assert.equal(app.persistence.observations.size, 3);
+  assert.equal(app.persistence.observations.size, 5);
   assert.equal(models.health.conflicts, 0);
 });
 
@@ -41,25 +47,37 @@ test('configuration requires the complete safe request policy', () => {
   assert.throws(() => validateConfiguration({ mode: 'worker', providerId: 'p', allowedHosts: ['p.example'], rawStore: 'memory', policy: validPolicy, ...validScope }), /authorization/);
 });
 
-test('discovery resolves relative links and quarantines invalid links without throwing', () => {
+test('discovery resolves relative links, preserves row identity, and quarantines invalid links', () => {
   const discovery = new Discovery({ providerId: 'p', allowedHosts: ['allowed.example'], targetEndingYears: validScope.targetEndingYears });
   const sourceUrl = createSourceUrl('p', 'https://allowed.example/season/2026.html');
   const result = discovery.discover('season', {
-    jobKey: 'parent',
-    sourceUrl,
-    body: Buffer.from(JSON.stringify({ gameLogUrl: './games.html' })),
+    jobKey: 'parent', sourceUrl, body: Buffer.from(JSON.stringify({ gameLogUrl: './games.html' })),
     sourceUrlFrom: (url, base) => createSourceUrl('p', url, base),
   });
   assert.equal(result.childJobs[0].sourceUrl.absoluteUrl, 'https://allowed.example/season/games.html');
 
   const rejected = discovery.discover('season', {
-    jobKey: 'parent',
-    sourceUrl,
-    body: Buffer.from(JSON.stringify({ gameLogUrl: 'http://allowed.example/games.html' })),
+    jobKey: 'parent', sourceUrl, body: Buffer.from(JSON.stringify({ gameLogUrl: 'http://allowed.example/games.html' })),
     sourceUrlFrom: (url, base) => createSourceUrl('p', url, base),
   });
   assert.equal(rejected.childJobs.length, 0);
   assert.equal(rejected.observations[0].kind, 'rejected_url');
+
+  const index = discovery.discover('school_index', {
+    jobKey: 'index', sourceUrl: createSourceUrl('p', 'https://allowed.example/cbb/schools/'),
+    sourceUrlFrom: (url, base) => createSourceUrl('p', url, base),
+  }, { schools: [{ path: '/a', to: 2026, historyUrl: '/a/men/' }, { path: '/b', to: 2026, historyUrl: '/b/men/' }] });
+  assert.deepEqual(index.observations.filter((item) => item.kind === 'school').map((item) => item.rowIndex), [0, 1]);
+});
+
+test('missing school identity is quarantined instead of becoming an undefined URL', () => {
+  const discovery = new Discovery({ providerId: 'p', allowedHosts: ['allowed.example'], targetEndingYears: validScope.targetEndingYears });
+  const result = discovery.discover('school_index', {
+    jobKey: 'index', sourceUrl: createSourceUrl('p', 'https://allowed.example/cbb/schools/'),
+    sourceUrlFrom: (url, base) => createSourceUrl('p', url, base),
+  }, { schools: [{ to: 2026, historyUrl: '/a/men/' }] });
+  assert.equal(result.childJobs.length, 0);
+  assert.match(result.observations.at(-1).reason, /source path is missing/);
 });
 
 test('canonical job identity is provider and page scoped', () => {
@@ -70,7 +88,7 @@ test('canonical job identity is provider and page scoped', () => {
   assert.equal(first.normalizedQuery, 'a=1&b=2');
 });
 
-test('retry and operator-stop states release claims for later work', () => {
+test('retry and operator-stop states release claims and validate dispositions', () => {
   const now = new Date('2026-01-01T00:00:00.000Z');
   const persistence = new InMemoryPersistence(() => now);
   persistence.addJob(makeJob());
@@ -80,27 +98,52 @@ test('retry and operator-stop states release claims for later work', () => {
   assert.equal(retry.key, first.key);
   persistence.transitionJob(retry.key, 'operator_stop', retry.lease);
   assert.equal(persistence.getJob(retry.key).claim, null);
+  assert.throws(() => persistence.recordOperatorDisposition(retry.key, { kind: 'bogus' }), /invalid operator disposition/);
   persistence.recordOperatorDisposition(retry.key, { kind: 'release_permanent', operatorId: 'ops-1', reason: 'challenge reviewed' });
   assert.equal(persistence.getJob(retry.key).state, 'permanently_failed');
 });
 
-test('fetcher sends validators and reuses immutable body on 304', async () => {
-  let time = Date.parse('2026-01-01T00:00:00.000Z');
-  const clock = () => new Date(time);
-  const sleep = async (milliseconds) => { time += milliseconds; };
+test('expired fetched jobs return to retryable state', () => {
+  const now = new Date('2026-01-01T00:00:00.000Z');
+  const persistence = new InMemoryPersistence(() => now);
+  persistence.addJob(makeJob());
+  const job = persistence.claimNextJob(now, 'worker');
+  persistence.transitionJob(job.key, 'fetched', job.lease);
+  const later = new Date(now.getTime() + 60_000);
+  assert.equal(persistence.recoverExpiredClaims(later), 1);
+  assert.equal(persistence.claimNextJob(later, 'worker-2').key, job.key);
+});
+
+test('link-less game-log rows remain distinct observations', () => {
+  const now = new Date('2026-01-01T00:00:00.000Z');
+  const persistence = new InMemoryPersistence(() => now);
+  const sourceUrl = createSourceUrl('p', 'https://allowed.example/log');
+  persistence.addJob({ key: 'log', pageType: 'game_log', sourceUrl, canonicalPath: canonicalizeSourceUrl(sourceUrl) });
+  const job = persistence.claimNextJob(now, 'worker');
+  persistence.transitionJob(job.key, 'fetched', job.lease);
+  persistence.commitPage({ jobKey: 'log', kind: 'game_log', identity: 'log', observations: [
+    { kind: 'game_log', parentKey: 'log', rowIndex: 0, game: { opponent: 'A' } },
+    { kind: 'game_log', parentKey: 'log', rowIndex: 1, game: { opponent: 'B' } },
+  ] }, { providerId: 'p' }, job.lease);
+  assert.equal(persistence.observations.size, 2);
+});
+
+test('fetcher renews claims while waiting for request rate limits and reuses 304 bodies', async () => {
+  const time = makeClock();
   const sourceUrl = createSourceUrl('p', 'https://allowed.example/page');
   const transport = new FixtureTransport(new Map([['https://allowed.example/page', { body: '{"ok":true}', etag: 'stable' }]]));
   const rawStore = new MemoryRawStore();
-  const persistence = new InMemoryPersistence(clock);
+  const persistence = new InMemoryPersistence(time.clock);
   persistence.addJob({ key: 'job', pageType: 'season', sourceUrl, canonicalPath: canonicalizeSourceUrl(sourceUrl) });
-  const job = persistence.claimNextJob(clock(), 'worker');
-  const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, allowedHosts: ['allowed.example'], policy: { ...validPolicy } });
+  const job = persistence.claimNextJob(time.clock(), 'worker');
+  const fetcher = new Fetcher({ transport, rawStore, persistence, clock: time.clock, sleep: time.sleep, allowedHosts: ['allowed.example'], policy: { ...validPolicy, maxRequestsPerMinute: 1 } });
   const first = await fetcher.fetch(job, job.lease);
   const second = await fetcher.fetch(job, job.lease);
   assert.equal(first.kind, 'fetched');
   assert.equal(second.kind, 'not_modified');
   assert.equal(transport.requests[1].headers['if-none-match'], 'stable');
   assert.equal(second.checksum, first.checksum);
+  assert.equal(new Date(persistence.getJob(job.key).claim.expiresAt) > time.clock(), true);
 });
 
 test('malformed parser input becomes a structural failure', () => {

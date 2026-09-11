@@ -5,7 +5,7 @@ export const JOB_STATES = Object.freeze([
 const TRANSITIONS = new Map([
   ['pending', new Set(['fetching'])],
   ['fetching', new Set(['fetched', 'retry_wait', 'permanently_failed', 'parse_failed', 'operator_stop'])],
-  ['fetched', new Set(['parsed', 'parse_failed'])],
+  ['fetched', new Set(['parsed', 'parse_failed', 'retry_wait'])],
   ['retry_wait', new Set(['fetching', 'permanently_failed'])],
   ['operator_stop', new Set(['retry_wait', 'permanently_failed'])],
   ['parsed', new Set()],

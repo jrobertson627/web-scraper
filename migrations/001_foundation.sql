@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS crawl_jobs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (provider_id, canonical_path, page_type),
-  CHECK ((state = 'fetching') = (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND lease_generation IS NOT NULL))
+  CHECK ((state IN ('fetching','fetched')) = (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND lease_generation IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS crawl_jobs_claim_idx ON crawl_jobs (state, next_allowed_at, created_at);
 
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS players (
   display_name TEXT NOT NULL,
   provenance JSONB NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS players_identity_idx ON players (provider_id, COALESCE(canonical_source_path, ''), display_name);
+CREATE UNIQUE INDEX IF NOT EXISTS players_linked_identity_idx ON players (provider_id, canonical_source_path) WHERE canonical_source_path IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS games (
   id BIGSERIAL PRIMARY KEY,
@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS player_game_basic_stats (
   stats JSONB NOT NULL,
   provenance JSONB NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS player_game_basic_identity_idx ON player_game_basic_stats (game_id, COALESCE(player_id, 0), player_name);
+CREATE UNIQUE INDEX IF NOT EXISTS player_game_basic_linked_identity_idx ON player_game_basic_stats (game_id, player_id) WHERE player_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS player_game_advanced_stats (
   id BIGSERIAL PRIMARY KEY,
@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS player_game_advanced_stats (
   stats JSONB NOT NULL,
   provenance JSONB NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS player_game_advanced_identity_idx ON player_game_advanced_stats (game_id, COALESCE(player_id, 0), player_name);
+CREATE UNIQUE INDEX IF NOT EXISTS player_game_advanced_linked_identity_idx ON player_game_advanced_stats (game_id, player_id) WHERE player_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS game_observations (
   id BIGSERIAL PRIMARY KEY,
@@ -212,6 +212,12 @@ CREATE TABLE IF NOT EXISTS in_flight_requests (
   released_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_request_per_host ON in_flight_requests(host) WHERE released_at IS NULL;
+CREATE TABLE IF NOT EXISTS host_request_schedule (
+  host TEXT PRIMARY KEY,
+  last_request_started_at TIMESTAMPTZ,
+  recent_request_starts TIMESTAMPTZ[] NOT NULL DEFAULT ARRAY[]::TIMESTAMPTZ[]
+);
+
 
 CREATE TABLE IF NOT EXISTS operator_dispositions (
   id BIGSERIAL PRIMARY KEY,

@@ -4,13 +4,13 @@ import { assertGameContext, assertGameStatus } from '../contracts/value-state.mj
 export class Normalizer {
   normalize(pageType, document, context) {
     if (pageType === 'school_index') {
-      return { jobKey: context.jobKey, kind: 'school_index', identity: context.jobKey, data: document, observations: [] };
+      return { jobKey: context.jobKey, kind: 'school_index', identity: context.jobKey, data: document, observations: context.observations ?? [] };
     }
     if (pageType === 'school_history') {
-      return { jobKey: context.jobKey, kind: 'school_history', identity: context.jobKey, data: document, observations: [] };
+      return { jobKey: context.jobKey, kind: 'school_history', identity: context.jobKey, data: document, observations: context.observations ?? [] };
     }
     if (pageType === 'season') {
-      return { jobKey: context.jobKey, kind: 'season', identity: context.jobKey, data: document, observations: [] };
+      return { jobKey: context.jobKey, kind: 'season', identity: context.jobKey, data: document, observations: context.observations ?? [] };
     }
     if (pageType === 'game_log') {
       return { jobKey: context.jobKey, kind: 'game_log', identity: context.jobKey, data: document, observations: context.observations ?? [] };
@@ -26,7 +26,12 @@ export class Normalizer {
         kind: 'game',
         identity,
         data: {
-          ...document,
+          gameDate: document.date ?? null,
+          status: document.status,
+          gameType: document.gameType ?? null,
+          neutralSite: document.context === 'neutral',
+          overtime: document.overtime ?? null,
+          lineScores: document.lineScores ?? {},
           playerSourceId: document.playerSourceId ?? null,
           teams: [
             { side: 'home', name: document.home ?? null, finalScore: document.homeScore ?? null },

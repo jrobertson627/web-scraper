@@ -24,6 +24,7 @@ export class IngestionOrchestrator {
   }
 
   async #process(job) {
+    let phase = 'fetch';
     try {
       const result = await this.fetcher.fetch(job, job.lease);
       if (result.kind === 'retry_wait') {
@@ -52,6 +53,7 @@ export class IngestionOrchestrator {
         body: stored.body,
         sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(job.sourceUrl.providerId, target, baseUrl),
       };
+      phase = 'parse';
       const parser = this.parsers.get(job.pageType, job.parserVersion ?? '1');
       const parsed = parser.parse(snapshot);
       this.persistence.recordParse({
@@ -68,6 +70,7 @@ export class IngestionOrchestrator {
         this.persistence.transitionJob(job.key, 'parse_failed', job.lease, { failureReason: parsed.error });
         return;
       }
+      phase = 'normalize';
       const discovered = this.discovery.discover(job.pageType, snapshot, parsed.document);
       const page = this.normalizer.normalize(job.pageType, parsed.document, {
         jobKey: job.key,
@@ -90,8 +93,20 @@ export class IngestionOrchestrator {
     } catch (error) {
       const current = this.persistence.getJob(job.key);
       if (current?.claim && ['fetching', 'fetched'].includes(current.state)) {
-        this.persistence.transitionJob(job.key, 'parse_failed', job.lease, { failureReason: error.message });
-      } else {
+        try {
+          this.persistence.transitionJob(
+            job.key,
+            phase === 'fetch' ? 'permanently_failed' : 'parse_failed',
+            job.lease,
+            { failureReason: error.message, failurePhase: phase },
+          );
+        } catch (transitionError) {
+          this.persistence.recoverExpiredClaims(this.clock());
+          if (this.persistence.getJob(job.key)?.state === 'fetching') throw transitionError;
+        }
+      } else if (current?.state === 'fetching' || current?.state === 'fetched') {
+        this.persistence.recoverExpiredClaims(this.clock());
+      } else if (current?.state !== 'retry_wait' && current?.state !== 'operator_stop') {
         throw error;
       }
     }

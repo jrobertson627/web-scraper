@@ -10,7 +10,7 @@
     "start:local": "node src/application/cli.mjs local",
     "start:worker": "node src/application/cli.mjs worker",
     "start:api": "node src/application/cli.mjs api",
-    "check": "node --check src/application/cli.mjs && node --test",
+    "check": "node --check src/api/index.mjs && node --check src/application/cli.mjs && node --check src/application/composition-root.mjs && node --check src/application/lifecycle.mjs && node --check src/application/orchestrator.mjs && node --check src/config/authorization.mjs && node --check src/config/configuration.mjs && node --check src/contracts/jobs.mjs && node --check src/contracts/provenance.mjs && node --check src/contracts/source.mjs && node --check src/contracts/value-state.mjs && node --check src/discovery/index.mjs && node --check src/domain/index.mjs && node --check src/fetcher/index.mjs && node --check src/parsers/index.mjs && node --check src/persistence/index.mjs && node --test",
     "test": "node --test"
   }
 }
