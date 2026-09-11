@@ -16,18 +16,45 @@ export function assertPageType(pageType) {
   return pageType;
 }
 
-export function createSourceUrl(providerId, absoluteUrl) {
-  const url = new URL(absoluteUrl);
+export function createSourceUrl(providerId, targetUrl, baseUrl) {
+  let url;
+  try {
+    url = new URL(targetUrl, baseUrl);
+  } catch (error) {
+    throw new Error(`invalid source URL: ${targetUrl}. Expected an absolute or base-resolvable HTTPS URL.`, { cause: error });
+  }
   if (url.protocol !== 'https:') {
     throw new Error(`invalid source URL scheme: ${url.protocol}. Expected https. Example: https://provider.example/cbb/schools/`);
   }
   return Object.freeze({
     providerId,
     absoluteUrl: url.href,
-    host: url.host,
+    host: url.host.toLowerCase(),
     path: url.pathname || '/',
     query: url.search,
   });
+}
+
+export function canonicalPathString(canonicalPath) {
+  return `${canonicalPath.host}${canonicalPath.path}${canonicalPath.normalizedQuery ? `?${canonicalPath.normalizedQuery}` : ''}`;
+}
+
+export function serializeCanonicalPath(canonicalPath) {
+  return `${canonicalPath.providerId}:${canonicalPathString(canonicalPath)}`;
+}
+
+export function sourceKey(canonicalPath, pageType) {
+  assertPageType(pageType);
+  return `${serializeCanonicalPath(canonicalPath)}:${pageType}`;
+}
+
+export function gameKey(canonicalPath) {
+  return serializeCanonicalPath(canonicalPath);
+}
+
+export function isAllowedSourceUrl(sourceUrl, allowedHosts) {
+  return sourceUrl?.absoluteUrl.startsWith('https://') &&
+    allowedHosts.map((host) => host.toLowerCase()).includes(sourceUrl.host.toLowerCase());
 }
 
 export function canonicalizeSourceUrl(sourceUrl) {
@@ -43,15 +70,3 @@ export function canonicalizeSourceUrl(sourceUrl) {
   });
 }
 
-export function sourceKey(canonicalPath, pageType) {
-  assertPageType(pageType);
-  return `${canonicalPath.providerId}:${canonicalPath.host}${canonicalPath.path}?${canonicalPath.normalizedQuery}:${pageType}`;
-}
-
-export function gameKey(canonicalPath) {
-  return `${canonicalPath.providerId}:${canonicalPath.host}${canonicalPath.path}?${canonicalPath.normalizedQuery}`;
-}
-
-export function isAllowedSourceUrl(sourceUrl, allowedHosts) {
-  return sourceUrl.absoluteUrl.startsWith('https://') && allowedHosts.includes(sourceUrl.host.toLowerCase());
-}
