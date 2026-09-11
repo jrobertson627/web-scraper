@@ -10,29 +10,31 @@ export function createQueryService(persistence) {
   });
 }
 
+function sendJson(response, status, body) {
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  response.end(JSON.stringify(body));
+}
+
 export function createApiServer({ queries, config }) {
   return createServer((request, response) => {
     if (request.method !== 'GET') {
-      response.writeHead(405, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ error: 'read-only API accepts GET only' }));
+      sendJson(response, 405, { error: 'read-only API accepts GET only' });
       return;
     }
     if (config.publication === 'public') {
       const gate = authorizationStatus(config.authorization, config.providerId, 'publish');
       if (!gate.ok) {
-        response.writeHead(403, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ error: 'publication gate denied' }));
+        sendJson(response, 403, { error: 'publication gate denied' });
         return;
       }
     }
+    const pathname = new URL(request.url, 'http://localhost').pathname.replace(/\/$/, '') || '/';
     const routes = { '/health': queries.health, '/schools': queries.listSchools, '/seasons': queries.listSeasons, '/games': queries.listGames };
-    const query = routes[request.url];
+    const query = routes[pathname];
     if (!query) {
-      response.writeHead(404, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ error: 'not found' }));
+      sendJson(response, 404, { error: 'not found' });
       return;
-      }
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify(query()));
+    }
+    sendJson(response, 200, query());
   });
 }
