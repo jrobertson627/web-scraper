@@ -59,6 +59,7 @@ export async function runCli({
   if (mode === 'local') {
     const app = createFixtureApplication();
     app.lifecycle.ready();
+    stdout('fixture local ready');
     app.lifecycle.running();
     let result;
     try {

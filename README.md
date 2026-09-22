@@ -42,6 +42,7 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 - `PARSER_NORMALIZATION.md`: versioned parsing, value states, provenance, and conflict quarantine.
 - `REQUEST_POLICY.md`: validated runtime scope, pacing, cache, timeout, and retry rules.
 - `COMPOSITION_READ_BOUNDARY.md`: atomic fixture page commits, worker progress, dry-run preview, and read isolation.
+- `FOUNDATION_HANDOFF.md`: fixture matrix, reconciliation, transition/value glossary, package ownership, and deferred PostgreSQL smoke.
 - `migrations/`: ordered PostgreSQL schema migrations.
 - `test/`: behavior and smoke tests.
 

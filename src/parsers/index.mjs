@@ -34,7 +34,12 @@ export class FixtureParser {
   version() { return this.rev; }
   parse(snapshot) {
     try {
-      const document = JSON.parse(Buffer.from(snapshot.body).toString('utf8'));
+      const raw = Buffer.from(snapshot.body).toString('utf8');
+      const fixtureDocument = raw.trimStart().startsWith('<')
+        ? raw.match(/<script\s+id="fixture-document"\s+type="application\/json">([\s\S]*?)<\/script>/i)?.[1]
+        : raw;
+      if (!fixtureDocument) throw new Error('HTML fixture has no fixture-document script');
+      const document = JSON.parse(fixtureDocument);
       if (document.layoutShift) return createParseResult({ kind: 'structural_failure', error: 'fixture layout changed; column meaning is uncertain', warnings: [] });
       return createParseResult({ kind: 'valid', document, warnings: document.warnings ?? [] });
     } catch (error) {
