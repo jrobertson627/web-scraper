@@ -1,4 +1,6 @@
 import { REQUIRED_ELIGIBILITY_PREDICATE, TARGET_ENDING_YEARS } from '../contracts/source.mjs';
+import { PAGE_TYPES } from '../contracts/source.mjs';
+import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { requireAuthorization } from './authorization.mjs';
 import { contractFingerprint, requireDataContract } from './data-contract.mjs';
 
@@ -11,21 +13,9 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   if (!['local', 'worker', 'api'].includes(config.mode)) {
     throw configError('mode', `is invalid: ${config.mode}`, 'Expected local, worker, or api', 'mode: local');
   }
-  const policy = config.policy;
-  if (!policy || !Number.isFinite(policy.minIntervalMs) || policy.minIntervalMs < 6000) {
-    throw configError('policy.minIntervalMs', 'is invalid', 'Expected a finite value of at least 6000 milliseconds (six seconds)', 'minIntervalMs: 6000');
-  }
-  if (!Number.isFinite(policy.maxRequestsPerMinute) || policy.maxRequestsPerMinute < 1 || policy.maxRequestsPerMinute > 10) {
-    throw configError('policy.maxRequestsPerMinute', 'is invalid', 'Expected a finite value from 1 through 10 requests per minute', 'maxRequestsPerMinute: 10');
-  }
-  if (policy.hostConcurrency !== 1) {
-    throw configError('policy.hostConcurrency', 'must be one', 'Expected one sequential request for the host', 'hostConcurrency: 1');
-  }
-  if (typeof policy.userAgent !== 'string' || !policy.userAgent.includes('@')) {
-    throw configError('policy.userAgent', 'must include an operator contact address', 'Expected a transparent application name and contact', 'userAgent: scraper (+ops@example.com)');
-  }
+  config.policy = validateRequestPolicy(config.policy);
   if (!Array.isArray(config.allowedHosts) || config.allowedHosts.length === 0 ||
-      config.allowedHosts.some((host) => typeof host !== 'string' || !host || host.includes('/') || host.includes(':'))) {
+      config.allowedHosts.some((host) => typeof host !== 'string' || !/^[a-z0-9.-]+$/i.test(host) || host.startsWith('.') || host.endsWith('.') || host.includes('..'))) {
     throw configError('allowedHosts', 'is invalid', 'Expected host names without schemes, paths, or ports', 'allowedHosts: [provider.example]');
   }
   if (typeof config.providerId !== 'string' || !config.providerId) {
@@ -40,6 +30,20 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   }
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
     throw configError('rawStore', `is invalid: ${config.rawStore}`, 'Expected memory or filesystem', 'rawStore: memory');
+  }
+  if (config.requestMethod !== undefined && config.requestMethod !== 'GET') throw configError('requestMethod', 'must be GET', 'Expected GET-only transport', 'requestMethod: GET');
+  if (config.redirectMode !== undefined && config.redirectMode !== 'manual') throw configError('redirectMode', 'must be manual', 'Expected per-hop allowlist checks', 'redirectMode: manual');
+  if (config.allowedSchemes !== undefined && JSON.stringify(config.allowedSchemes) !== JSON.stringify(['https'])) throw configError('allowedSchemes', 'must contain only https', 'Expected exactly [https]', 'allowedSchemes: [https]');
+  config.requestMethod = 'GET';
+  config.redirectMode = 'manual';
+  config.allowedSchemes = ['https'];
+  if (config.claimTimeoutMs === undefined) config.claimTimeoutMs = 30_000;
+  if (!Number.isSafeInteger(config.claimTimeoutMs) || config.claimTimeoutMs < 10_000 || config.claimTimeoutMs > 300_000) throw configError('claimTimeoutMs', 'is invalid', 'Expected an integer from 10000 through 300000 milliseconds', 'claimTimeoutMs: 30000');
+  if (config.parserVersions === undefined) config.parserVersions = Object.fromEntries(PAGE_TYPES.map((pageType) => [pageType, '1']));
+  if (!config.parserVersions || typeof config.parserVersions !== 'object' || Array.isArray(config.parserVersions) ||
+      Object.keys(config.parserVersions).some((pageType) => !PAGE_TYPES.includes(pageType)) ||
+      PAGE_TYPES.some((pageType) => typeof config.parserVersions[pageType] !== 'string' || !config.parserVersions[pageType].trim())) {
+    throw configError('parserVersions', 'is invalid', 'Expected a non-empty version for every page type', "parserVersions: { school_index: '1', school_history: '1', season: '1', game_log: '1', box_score: '1' }");
   }
   if (config.mode === 'local' && config.publication === 'public') {
     throw configError('publication', 'cannot be public in local mode', 'Expected private fixture output', 'publication: private');

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createSourceUrl, isAllowedSourceUrl } from '../contracts/source.mjs';
 import { createFetchResult } from '../contracts/boundaries.mjs';
+import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 
 function header(headers, name) {
   if (!headers) return undefined;
@@ -22,8 +23,8 @@ export class Fetcher {
     this.rawStore = rawStore;
     this.persistence = persistence;
     this.clock = clock;
-    this.policy = policy;
-    this.allowedHosts = allowedHosts;
+    this.policy = validateRequestPolicy(policy);
+    this.allowedHosts = Object.freeze([...(allowedHosts ?? [])]);
     this.sleep = sleep;
   }
 
@@ -31,10 +32,23 @@ export class Fetcher {
     if (!isAllowedSourceUrl(job.sourceUrl, this.allowedHosts)) {
       throw new Error(`source URL rejected before transport: ${job.sourceUrl?.absoluteUrl}. Expected an HTTPS URL on an allowed host.`);
     }
-    const request = this.persistence.acquireRequest(job.key, lease, job.sourceUrl.host);
+    const requestHost = new URL(job.sourceUrl.absoluteUrl).host;
+    const request = this.persistence.acquireRequest(job.key, lease, requestHost);
     if (!request) return createFetchResult({ kind: 'retry_wait', reason: 'host request already owned', nextAllowedAt: this.#nextTime(1000) });
     try {
       const prior = this.persistence.lastSuccessfulFetch(job.key);
+      if (prior && this.policy.cacheMaxAgeMs > 0) {
+        const ageMs = this.clock().getTime() - new Date(prior.fetchedAt).getTime();
+        if (ageMs >= 0 && ageMs < this.policy.cacheMaxAgeMs) {
+          const verification = this.rawStore.verify(prior.checksum, prior.objectPath);
+          if (!verification.ok) return createFetchResult({ kind: 'operator_stop', reason: 'cached raw snapshot failed verification' });
+          const sourceFetchId = this.persistence.recordFetch({
+            jobKey: job.key, status: 200, checksum: prior.checksum, objectPath: prior.objectPath,
+            etag: prior.etag, lastModified: prior.lastModified, reusedBody: true, cacheHit: true,
+          }, lease, this.rawStore);
+          return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum });
+        }
+      }
       let headers = { 'user-agent': this.policy.userAgent };
       if (prior?.etag) headers['if-none-match'] = prior.etag;
       if (prior?.lastModified) headers['if-modified-since'] = prior.lastModified;
@@ -43,16 +57,17 @@ export class Fetcher {
       let startedAt;
       for (let redirectCount = 0; ; redirectCount += 1) {
         if (!isAllowedSourceUrl(sourceUrl, this.allowedHosts)) return createFetchResult({ kind: 'operator_stop', reason: 'redirect target is not allowlisted' });
-        await this.#waitForPolicy(job, lease, sourceUrl.host);
+        const host = new URL(sourceUrl.absoluteUrl).host;
+        await this.#waitForPolicy(job, lease, host);
         startedAt = this.clock();
-        this.#recordRequestStart(sourceUrl.host, startedAt);
+        this.#recordRequestStart(host, startedAt);
         try {
-          response = await this.transport.request({ method: 'GET', url: sourceUrl.absoluteUrl, headers, redirect: 'manual' });
+          response = await this.transport.request({ method: 'GET', url: sourceUrl.absoluteUrl, headers, redirect: 'manual', timeoutMs: this.policy.requestTimeoutMs });
         } catch (error) {
           return this.#retry(job, `transport error: ${error.message}`);
         }
         if (!response.redirectUrl) break;
-        if (redirectCount >= 4) return createFetchResult({ kind: 'operator_stop', reason: 'redirect limit exceeded' });
+        if (redirectCount >= this.policy.maxRedirects) return createFetchResult({ kind: 'operator_stop', reason: 'redirect limit exceeded' });
         try {
           const redirect = createSourceUrl(job.sourceUrl.providerId, response.redirectUrl, sourceUrl.absoluteUrl);
           if (!isAllowedSourceUrl(redirect, this.allowedHosts)) return createFetchResult({ kind: 'operator_stop', reason: 'redirect target is not allowlisted' });
@@ -80,8 +95,9 @@ export class Fetcher {
       if (response.status === 429) {
         const retryAfter = header(response.headers, 'retry-after');
         const retryAt = retryAfterDate(retryAfter, this.clock());
-        if (!retryAt) return createFetchResult({ kind: 'operator_stop', reason: 'rate limited without Retry-After; operator review required' });
-        return createFetchResult({ kind: 'retry_wait', reason: 'rate limited', nextAllowedAt: retryAt.toISOString() });
+        if (!retryAt) return createFetchResult({ kind: 'operator_stop', reason: 'rate limited without valid Retry-After; operator review required' });
+        const earliest = this.#nextTime(this.policy.minIntervalMs);
+        return createFetchResult({ kind: 'retry_wait', reason: 'rate limited', nextAllowedAt: new Date(Math.max(retryAt.getTime(), Date.parse(earliest))).toISOString() });
       }
       if (response.status === 403 || response.challenge) return createFetchResult({ kind: 'operator_stop', reason: 'operator review required for challenge response' });
       if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`);
@@ -135,10 +151,8 @@ export class Fetcher {
   }
 
   #retry(job, reason) {
-    const maxAttempts = this.policy.maxAttempts ?? 3;
-    if (job.attempts >= maxAttempts) return createFetchResult({ kind: 'permanently_failed', reason: `${reason}; retry limit reached` });
-    const base = this.policy.retryBaseMs ?? 1000;
-    const delay = Math.min(base * (2 ** Math.max(0, job.attempts - 1)), this.policy.retryMaxMs ?? 60_000);
+    if (job.attempts >= this.policy.maxAttempts) return createFetchResult({ kind: 'permanently_failed', reason: `${reason}; retry limit reached` });
+    const delay = Math.min(this.policy.retryBaseMs * (2 ** Math.max(0, job.attempts - 1)), this.policy.retryMaxMs);
     return createFetchResult({ kind: 'retry_wait', reason, nextAllowedAt: this.#nextTime(delay) });
   }
 

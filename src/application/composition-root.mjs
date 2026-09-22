@@ -42,7 +42,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     publication: 'private',
   }, { clock });
   const rawStore = createRawStore(config.rawStore);
-  const persistence = new InMemoryPersistence(clock);
+  const persistence = new InMemoryPersistence(clock, { claimTimeoutMs: config.claimTimeoutMs });
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
   const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears });
