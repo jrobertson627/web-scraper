@@ -6,6 +6,7 @@ import {
   serializeCanonicalPath,
   sourceKey,
 } from '../contracts/source.mjs';
+import { createDiscoveryResult, createJob } from '../contracts/boundaries.mjs';
 
 export class Discovery {
   constructor({ providerId, allowedHosts, targetEndingYears }) {
@@ -39,7 +40,7 @@ export class Discovery {
       const key = sourceKey(canonicalPath, childType);
       if (childKeys.has(key)) return;
       childKeys.add(key);
-      childJobs.push({ key, pageType: childType, sourceUrl, canonicalPath, parentKey: snapshot.jobKey, ...metadata });
+      childJobs.push(createJob({ key, pageType: childType, sourceUrl, canonicalPath, parentKey: snapshot.jobKey, ...metadata }));
     };
 
     if (pageType === 'school_index') {
@@ -88,6 +89,6 @@ export class Discovery {
       }
     }
     if (pageType === 'box_score') observations.push({ kind: 'box_score', game: page, parentKey: snapshot.jobKey, rowIndex: 0 });
-    return { observations, childJobs, unavailableCoverage, warnings };
+    return createDiscoveryResult({ observations, childJobs, unavailableCoverage, warnings });
   }
 }

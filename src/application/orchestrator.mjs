@@ -1,5 +1,6 @@
 import { createProvenance } from '../contracts/provenance.mjs';
 import { createSourceUrl } from '../contracts/source.mjs';
+import { createSnapshot } from '../contracts/boundaries.mjs';
 
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
@@ -54,14 +55,14 @@ export class IngestionOrchestrator {
         return;
       }
       this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
-      const snapshot = {
+      const snapshot = createSnapshot({
         jobKey: job.key,
         parentKey: job.parentKey,
         schoolSourcePath: job.schoolSourcePath,
         sourceUrl: job.sourceUrl,
         body: stored.body,
         sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(job.sourceUrl.providerId, target, baseUrl),
-      };
+      });
       phase = 'parse';
       const parser = this.parsers.get(job.pageType, job.parserVersion ?? '1');
       const parsed = parser.parse(snapshot);
@@ -85,9 +86,9 @@ export class IngestionOrchestrator {
         jobKey: job.key,
         canonicalPath: job.canonicalPath,
         observations: discovered.observations,
+        childJobs: discovered.childJobs,
+        unavailableCoverage: discovered.unavailableCoverage,
       });
-      page.childJobs = discovered.childJobs;
-      page.unavailableCoverage = discovered.unavailableCoverage;
       const provenance = createProvenance({
         providerId: job.sourceUrl.providerId,
         canonicalPath: job.canonicalPath,

@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/application/composition-root.mjs",
+    "./contracts": "./src/contracts/index.mjs",
+    "./fetcher": "./src/fetcher/public.mjs",
+    "./discovery": "./src/discovery/public.mjs",
+    "./parsers": "./src/parsers/public.mjs",
+    "./domain": "./src/domain/public.mjs",
+    "./persistence": "./src/persistence/public.mjs",
+    "./api": "./src/api/public.mjs"
+  },
   "engines": {
     "node": ">=20"
   },

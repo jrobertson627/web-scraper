@@ -1,3 +1,5 @@
+import { createParseResult } from '../contracts/boundaries.mjs';
+
 export class ParserRegistry {
   #parsers = new Map();
   register(parser) {
@@ -20,10 +22,10 @@ export class FixtureParser {
   parse(snapshot) {
     try {
       const document = JSON.parse(Buffer.from(snapshot.body).toString('utf8'));
-      if (document.layoutShift) return { kind: 'structural_failure', error: 'fixture layout changed; column meaning is uncertain', warnings: [] };
-      return { kind: 'valid', document, warnings: document.warnings ?? [] };
+      if (document.layoutShift) return createParseResult({ kind: 'structural_failure', error: 'fixture layout changed; column meaning is uncertain', warnings: [] });
+      return createParseResult({ kind: 'valid', document, warnings: document.warnings ?? [] });
     } catch (error) {
-      return { kind: 'structural_failure', error: `document could not be parsed: ${error.message}`, warnings: [] };
+      return createParseResult({ kind: 'structural_failure', error: `document could not be parsed: ${error.message}`, warnings: [] });
     }
   }
 }
