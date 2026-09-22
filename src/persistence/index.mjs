@@ -356,12 +356,35 @@ export class InMemoryPersistence {
 
   commitPage(page, provenance, lease) {
     this.#requireLease(page.jobKey, lease);
+    const staged = this.#stagePage(page, provenance);
+    this.#installPage(staged);
+    return staged.key;
+  }
+
+  commitPageAndTransition(page, provenance, lease) {
+    this.#requireLease(page.jobKey, lease);
+    if (this.inFlight.has(page.jobKey)) throw new Error(`cannot commit page ${page.jobKey} while its host request is still active`);
+    const staged = this.#stagePage(page, provenance);
+    const job = cloneJob(staged.jobs.get(page.jobKey));
+    this.#applyTransition(job, 'parsed', {});
+    staged.jobs.set(page.jobKey, job);
+    this.#installPage(staged);
+    return Object.freeze({ key: staged.key, conflict: staged.conflict });
+  }
+
+  #stagePage(page, provenance) {
     const key = page.identity ?? page.jobKey;
     const record = Object.freeze({ ...page, provenance });
     const previous = this.pages.get(key);
     const conflict = Boolean(previous && !jsonEqual(previous.data, record.data));
+    const pages = new Map(this.pages);
+    const observations = new Map(this.observations);
+    const observationHistory = [...this.observationHistory];
+    const unavailableCoverage = new Map(this.unavailableCoverage);
+    const reconciliationIssues = [...this.reconciliationIssues];
+    const jobs = new Map(this.jobs);
     if (conflict) {
-      this.reconciliationIssues.push(createReconciliationIssue({
+      reconciliationIssues.push(createReconciliationIssue({
         issueType: 'conflicting_page_reprocess',
         recordKey: key,
         details: {
@@ -371,21 +394,36 @@ export class InMemoryPersistence {
         status: 'open',
       }));
     } else {
-      this.pages.set(key, record);
+      pages.set(key, record);
     }
     for (const [index, observation] of (page.observations ?? []).entries()) {
       const observationKey = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
       const storedObservation = Object.freeze({ ...observation, provenance });
-      this.observationHistory.push(storedObservation);
-      if (!conflict) this.observations.set(observationKey, storedObservation);
+      if (!observationHistory.some((entry) => jsonEqual(entry, storedObservation))) observationHistory.push(storedObservation);
+      if (!conflict) observations.set(observationKey, storedObservation);
     }
-    if (conflict) return key;
-    for (const unavailable of page.unavailableCoverage ?? []) {
-      const coverageKey = `${unavailable.schoolSourcePath}:${unavailable.endingYear}`;
-      this.unavailableCoverage.set(coverageKey, Object.freeze({ ...unavailable, provenance }));
+    if (!conflict) {
+      for (const unavailable of page.unavailableCoverage ?? []) {
+        const coverageKey = `${unavailable.schoolSourcePath}:${unavailable.endingYear}`;
+        unavailableCoverage.set(coverageKey, Object.freeze({ ...unavailable, provenance }));
+      }
+      for (const child of page.childJobs ?? []) {
+        const validated = createJob(child);
+        if (jobs.has(validated.key)) continue;
+        const now = this.clock().toISOString();
+        jobs.set(validated.key, { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now, history: [], failures: [] });
+      }
     }
-    for (const child of page.childJobs ?? []) this.addJob(child);
-    return key;
+    return { key, conflict, pages, observations, observationHistory, unavailableCoverage, reconciliationIssues, jobs };
+  }
+
+  #installPage(staged) {
+    this.pages = staged.pages;
+    this.observations = staged.observations;
+    this.observationHistory = staged.observationHistory;
+    this.unavailableCoverage = staged.unavailableCoverage;
+    this.reconciliationIssues = staged.reconciliationIssues;
+    this.jobs = staged.jobs;
   }
 
   transitionJob(key, nextState, lease, details = {}) {
@@ -472,6 +510,8 @@ export class InMemoryPersistence {
         jobStates,
         sourceFetches: this.sourceFetches.length,
         parseRuns: this.parseRuns.length,
+        warnings: this.parseRuns.reduce((total, run) => total + (run.warnings?.length ?? 0), 0),
+        unavailableCoverage: this.unavailableCoverage.size,
         conflicts: this.reconciliationIssues.length,
         observations: this.observations.size,
       },

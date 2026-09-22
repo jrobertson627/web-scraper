@@ -1,5 +1,5 @@
 import { validateConfiguration } from '../config/configuration.mjs';
-import { sourceKey } from '../contracts/source.mjs';
+import { createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
 import { assertBoundaryPort, createJob } from '../contracts/boundaries.mjs';
 import { Fetcher } from '../fetcher/public.mjs';
@@ -34,7 +34,8 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     fixture('/school/a/men/2024-gamelogs.html', { games: [{ boxScoreUrl: `${base}/box/one.html`, context: 'away', status: 'final' }] }),
     fixture('/box/one.html', { date: '2026-01-02', home: 'Fixture A', away: 'Opponent', homeScore: 70, awayScore: 65, context: 'neutral', status: 'final', playerSourceId: null }),
   ];
-  const transport = new FixtureTransport(new Map(fixtureData.map((item) => [item.url, item])));
+  const fixtureMap = new Map(fixtureData.map((item) => [item.url, item]));
+  const transport = new FixtureTransport(fixtureMap);
   const config = validateConfiguration({
     mode: 'local', providerId, allowedHosts: [host], rawStore: 'memory',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-fixture (+local@example.com)' },
@@ -50,7 +51,8 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   const normalizer = new Normalizer();
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
-  persistence.addJob(createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath }));
+  const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
+  persistence.addJob(rootJob);
   const boundaryPorts = {
     fetcher: assertBoundaryPort('fetcher', fetcher),
     discovery: assertBoundaryPort('discovery', discovery),
@@ -74,6 +76,40 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     return { ...result, transportCalls: transport.calls.length };
   }
 
+  function previewDryRun() {
+    const queue = [rootJob];
+    const seen = new Set();
+    const boxScoreLinks = new Set();
+    const pageTypes = {};
+    let unavailableCoverage = 0;
+    while (queue.length) {
+      const job = queue.shift();
+      if (seen.has(job.key)) continue;
+      seen.add(job.key);
+      pageTypes[job.pageType] = (pageTypes[job.pageType] ?? 0) + 1;
+      const entry = fixtureMap.get(job.sourceUrl.absoluteUrl);
+      if (!entry) continue;
+      const snapshot = {
+        jobKey: job.key, parentKey: job.parentKey, schoolSourcePath: job.schoolSourcePath,
+        sourceUrl: job.sourceUrl, body: Buffer.from(entry.body),
+        sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(providerId, target, baseUrl),
+      };
+      const discovered = discovery.discover(job.pageType, snapshot, JSON.parse(entry.body));
+      unavailableCoverage += discovered.unavailableCoverage.length;
+      for (const child of discovered.childJobs) {
+        if (child.pageType === 'box_score') boxScoreLinks.add(child.key);
+        else queue.push(child);
+      }
+    }
+    return Object.freeze({
+      uniquePreBackfillUrls: seen.size,
+      boxScoreLinks: boxScoreLinks.size,
+      unavailableCoverage,
+      pageTypes: Object.freeze(pageTypes),
+      estimatedMinimumRuntimeMs: Math.max(0, seen.size - 1) * config.policy.minIntervalMs,
+    });
+  }
+
   return {
     config,
     sourceAdapter: adapter,
@@ -84,6 +120,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     persistence,
     orchestrator,
     runWorkerOnce,
+    previewDryRun,
     queries,
     createApiServer: (apiConfig = config) => createApiServer({ queries, config: apiConfig, clock }),
   };

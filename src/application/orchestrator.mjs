@@ -17,13 +17,15 @@ export class IngestionOrchestrator {
 
   async runOnce(workerId = 'worker') {
     let processed = 0;
+    const events = [];
     for (;;) {
       const job = this.persistence.claimNextJob(this.clock(), workerId);
       if (!job) break;
-      await this.#process(job);
+      const event = await this.#process(job);
+      if (event) events.push(Object.freeze(event));
       processed += 1;
     }
-    return { processed, jobs: this.persistence.listJobs() };
+    return { processed, jobs: this.persistence.listJobs(), events: Object.freeze(events) };
   }
 
   async #process(job) {
@@ -35,15 +37,15 @@ export class IngestionOrchestrator {
           nextAllowedAt: result.nextAllowedAt,
           lastError: result.reason,
         });
-        return;
+        return { kind: 'retry_wait', jobKey: job.key, pageType: job.pageType, reason: result.reason, nextAllowedAt: result.nextAllowedAt };
       }
       if (result.kind === 'operator_stop') {
         this.persistence.transitionJob(job.key, 'operator_stop', job.lease, { lastError: result.reason });
-        return;
+        return { kind: 'operator_stop', jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       if (result.kind === 'permanently_failed') {
         this.persistence.transitionJob(job.key, 'permanently_failed', job.lease, { lastError: result.reason });
-        return;
+        return { kind: 'permanently_failed', jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       phase = 'snapshot';
       const stored = this.rawStore.get(result.checksum);
@@ -52,7 +54,7 @@ export class IngestionOrchestrator {
         this.persistence.transitionJob(job.key, 'operator_stop', job.lease, {
           lastError: `raw snapshot ${result.checksum} is unavailable or failed durable verification after fetch: ${verification.reason ?? 'unavailable'}`,
         });
-        return;
+        return { kind: 'operator_stop', jobKey: job.key, pageType: job.pageType, reason: 'raw snapshot failed durable verification' };
       }
       this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
       const snapshot = createSnapshot({
@@ -79,7 +81,7 @@ export class IngestionOrchestrator {
       }, job.lease);
       if (parsed.kind === 'structural_failure') {
         this.persistence.transitionJob(job.key, 'parse_failed', job.lease, { failureReason: parsed.error });
-        return;
+        return { kind: 'parse_failed', jobKey: job.key, pageType: job.pageType, reason: parsed.error, warnings: parsed.warnings };
       }
       phase = 'normalize';
       const discovered = this.discovery.discover(job.pageType, snapshot, parsed.document);
@@ -99,8 +101,8 @@ export class IngestionOrchestrator {
         parserVersion: parser.version(),
         parsedAt: this.clock().toISOString(),
       });
-      this.persistence.commitPage(page, provenance, job.lease);
-      this.persistence.transitionJob(job.key, 'parsed', job.lease);
+      const committed = this.persistence.commitPageAndTransition(page, provenance, job.lease);
+      return { kind: 'parsed', jobKey: job.key, pageType: job.pageType, warnings: [...(parsed.warnings ?? []), ...discovered.warnings], reconciliationIssues: committed.conflict ? 1 : 0 };
     } catch (error) {
       if (phase === 'fetch' || phase === 'snapshot') throw error;
       const current = this.persistence.getJob(job.key);
@@ -124,6 +126,7 @@ export class IngestionOrchestrator {
         this.persistence.recoverExpiredClaims(this.clock());
         if (!FAILURE_SETTLED_STATES.has(this.persistence.getJob(job.key)?.state)) throw error;
       }
+      return { kind: 'parse_failed', jobKey: job.key, pageType: job.pageType, reason: error.message, phase };
     }
   }
 }

@@ -7,6 +7,7 @@ export function createQueryService(persistence) {
     listSchools: () => persistence.queryModels().schools,
     listSeasons: () => persistence.queryModels().seasons,
     listGames: () => persistence.queryModels().games,
+    getGame: (key) => persistence.queryModels().games.find((game) => game.gameKey === key) ?? null,
     health: () => persistence.queryModels().health,
   });
 }
@@ -35,6 +36,16 @@ export function createApiServer({ queries, config, clock = () => new Date() }) {
       }
     }
     const pathname = new URL(request.url, 'http://localhost').pathname.replace(/\/$/, '') || '/';
+    if (pathname.startsWith('/games/')) {
+      let key;
+      try { key = decodeURIComponent(pathname.slice('/games/'.length)); } catch {
+        sendJson(response, 400, { error: 'invalid game key' });
+        return;
+      }
+      const game = queries.getGame(key);
+      sendJson(response, game ? 200 : 404, game ?? { error: 'not found' });
+      return;
+    }
     const routes = { '/health': queries.health, '/schools': queries.listSchools, '/seasons': queries.listSeasons, '/games': queries.listGames };
     const query = routes[pathname];
     if (!query) {

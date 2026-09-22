@@ -11,8 +11,8 @@ export const BOUNDARY_PORT_METHODS = Object.freeze({
   discovery: Object.freeze(['discover']),
   parsers: Object.freeze(['get', 'parse']),
   domain: Object.freeze(['normalize']),
-  persistence: Object.freeze(['claimNextJob', 'listJobs', 'getJob', 'transitionJob', 'recordParse', 'commitPage', 'recoverExpiredClaims']),
-  api: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'health']),
+  persistence: Object.freeze(['claimNextJob', 'listJobs', 'getJob', 'transitionJob', 'recordParse', 'commitPage', 'commitPageAndTransition', 'recoverExpiredClaims']),
+  api: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'getGame', 'health']),
 });
 
 export function deepFreeze(value) {
