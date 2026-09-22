@@ -40,6 +40,7 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 - `RAW_STORAGE.md`: immutable raw objects, durable finalization, and repair protocol.
 - `POSTGRES_SCHEMA.md`: migration ordering, durable constraints, provenance, and compatibility rules.
 - `PARSER_NORMALIZATION.md`: versioned parsing, value states, provenance, and conflict quarantine.
+- `REQUEST_POLICY.md`: validated runtime scope, pacing, cache, timeout, and retry rules.
 - `migrations/`: ordered PostgreSQL schema migrations.
 - `test/`: behavior and smoke tests.
 
