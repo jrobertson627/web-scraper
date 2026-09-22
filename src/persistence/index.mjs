@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertTransition, createOperatorDisposition, sameLease } from '../contracts/jobs.mjs';
+import {
+  FAILURE_STATES,
+  assertTransition,
+  createJobStateEvent,
+  createLeaseToken,
+  createOperatorDisposition,
+  sameLease,
+} from '../contracts/jobs.mjs';
 import { createJob, createQueryModels, createReconciliationIssue } from '../contracts/boundaries.mjs';
 
 function stableValue(value) {
@@ -18,6 +25,15 @@ function jsonEqual(left, right) {
 
 function cloneClaim(claim) {
   return claim ? { ...claim, lease: claim.lease ? { ...claim.lease } : claim.lease } : null;
+}
+
+function cloneJob(job) {
+  return {
+    ...job,
+    claim: cloneClaim(job.claim),
+    history: (job.history ?? []).map((event) => ({ ...event, details: { ...event.details } })),
+    failures: (job.failures ?? []).map((failure) => ({ ...failure, details: { ...failure.details } })),
+  };
 }
 
 export class MemoryRawStore {
@@ -131,8 +147,13 @@ export function createRawStore(kind, root = '.raw') {
 }
 
 export class InMemoryPersistence {
-  constructor(clock = () => new Date()) {
+  constructor(clock = () => new Date(), {
+    authorizeOperator = (operatorId) => Boolean(operatorId),
+    claimTimeoutMs = 30_000,
+  } = {}) {
     this.clock = clock;
+    this.authorizeOperator = authorizeOperator;
+    this.claimTimeoutMs = claimTimeoutMs;
     this.jobs = new Map();
     this.sourceFetches = [];
     this.parseRuns = [];
@@ -143,6 +164,7 @@ export class InMemoryPersistence {
     this.operatorDispositions = [];
     this.rawObjectRepairs = new Map();
     this.inFlight = new Map();
+    this.requestHistory = [];
     this.requestSchedules = new Map();
     this.nextRequestId = 1;
   }
@@ -152,34 +174,43 @@ export class InMemoryPersistence {
     const existing = this.jobs.get(validated.key);
     if (existing) return existing;
     const now = this.clock().toISOString();
-    const stored = { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now };
+    const stored = { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now, history: [], failures: [] };
     this.jobs.set(validated.key, stored);
     return stored;
   }
 
-  listJobs() { return [...this.jobs.values()].map((job) => ({ ...job, claim: cloneClaim(job.claim) })); }
+  listJobs() { return [...this.jobs.values()].map(cloneJob); }
   getJob(key) {
     const job = this.jobs.get(key);
-    return job ? { ...job, claim: cloneClaim(job.claim) } : null;
+    return job ? cloneJob(job) : null;
   }
 
   claimNextJob(now, workerId) {
     let current = this.#findClaimableJob(now);
     if (!current && this.recoverExpiredClaims(now) > 0) current = this.#findClaimableJob(now);
     if (!current) return null;
+    const previousState = current.state;
     const generation = (current.generation ?? 0) + 1;
-    const lease = { workerId, generation, value: `${workerId}:${generation}` };
+    const lease = createLeaseToken(workerId, generation);
     current.generation = generation;
     current.state = 'fetching';
     current.attempts += 1;
     current.updatedAt = now.toISOString();
-    current.claim = { owner: workerId, expiresAt: new Date(now.getTime() + 30_000).toISOString(), lease };
-    return { ...current, lease };
+    current.claim = { owner: workerId, expiresAt: new Date(now.getTime() + this.claimTimeoutMs).toISOString(), lease };
+    current.history.push(createJobStateEvent({
+      from: previousState,
+      to: 'fetching',
+      at: now,
+      attempts: current.attempts,
+      lease,
+      details: { owner: workerId },
+    }));
+    return { ...cloneJob(current), lease };
   }
 
   renewClaim(key, lease, now) {
     const job = this.#requireLease(key, lease);
-    job.claim.expiresAt = new Date(now.getTime() + 30_000).toISOString();
+    job.claim.expiresAt = new Date(now.getTime() + this.claimTimeoutMs).toISOString();
     job.updatedAt = now.toISOString();
   }
 
@@ -325,6 +356,7 @@ export class InMemoryPersistence {
 
   transitionJob(key, nextState, lease, details = {}) {
     const job = this.#requireLease(key, lease);
+    if (this.inFlight.has(key)) throw new Error(`cannot transition job ${key} while its host request is still active`);
     this.#applyTransition(job, nextState, details);
   }
 
@@ -337,15 +369,27 @@ export class InMemoryPersistence {
       disposition.reason,
       disposition.at ? new Date(disposition.at) : this.clock(),
     );
+    if (!this.authorizeOperator(validated.operatorId, validated)) {
+      throw new Error(`operator ${validated.operatorId} is not authorized to review operator-stop work`);
+    }
     this.operatorDispositions.push(Object.freeze({ jobKey: key, ...validated }));
-    if (validated.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString() });
+    job.history.push(Object.freeze({ type: 'operator_disposition', state: job.state, at: validated.at, operatorId: validated.operatorId, disposition: validated.kind, reason: validated.reason }));
+    if (validated.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString(), lastError: validated.reason });
     if (validated.kind === 'release_permanent') this.#applyTransition(job, 'permanently_failed', { failureReason: validated.reason });
   }
 
   acquireRequest(key, lease, host) {
     this.#requireLease(key, lease);
     if ([...this.inFlight.values()].some((request) => request.host === host)) return null;
-    const request = Object.freeze({ id: `request-${this.nextRequestId++}`, jobKey: key, host, lease });
+    const job = this.jobs.get(key);
+    const request = Object.freeze({
+      id: `request-${this.nextRequestId++}`,
+      jobKey: key,
+      providerId: job.sourceUrl.providerId,
+      host,
+      lease,
+      startedAt: this.clock().toISOString(),
+    });
     this.inFlight.set(key, request);
     return request;
   }
@@ -354,6 +398,17 @@ export class InMemoryPersistence {
     const request = this.inFlight.get(key);
     if (!request || !sameLease(request.lease, lease)) throw new Error('request ownership mismatch. Expected the current lease token before release. Example: workerId: worker-1');
     this.inFlight.delete(key);
+    this.requestHistory.push(Object.freeze({ ...request, outcome: 'completed', releasedAt: this.clock().toISOString() }));
+  }
+
+  confirmRequestCancellation(key, lease, reason) {
+    const request = this.inFlight.get(key);
+    if (!request || !sameLease(request.lease, lease)) throw new Error('request cancellation requires the current request ownership token');
+    if (!reason) throw new Error('request cancellation confirmation requires a reason');
+    this.inFlight.delete(key);
+    const record = Object.freeze({ ...request, outcome: 'canceled', cancellationReason: reason, releasedAt: this.clock().toISOString() });
+    this.requestHistory.push(record);
+    return record;
   }
 
   queryModels() {
@@ -392,16 +447,28 @@ export class InMemoryPersistence {
   #findClaimableJob(now) {
     for (const job of this.jobs.values()) {
       const retryReady = job.state === 'retry_wait' && job.nextAllowedAt && new Date(job.nextAllowedAt) <= now;
-      if (!job.claim && (job.state === 'pending' || retryReady)) return job;
+      const parentComplete = !job.parentKey || this.jobs.get(job.parentKey)?.state === 'parsed';
+      if (parentComplete && !job.claim && (job.state === 'pending' || retryReady)) return job;
     }
     return null;
   }
 
   #applyTransition(job, nextState, details, at = this.clock()) {
+    const previousState = job.state;
     assertTransition(job.state, nextState);
     job.state = nextState;
     Object.assign(job, details);
     job.updatedAt = at.toISOString();
+    job.history.push(createJobStateEvent({ from: previousState, to: nextState, at, attempts: job.attempts, lease: job.claim?.lease, details }));
+    if (FAILURE_STATES.includes(nextState)) {
+      job.failures.push(Object.freeze({
+        state: nextState,
+        at: at.toISOString(),
+        attempts: job.attempts,
+        reason: details.lastError ?? details.failureReason ?? 'unspecified failure',
+        details: Object.freeze({ ...details }),
+      }));
+    }
     if (['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed'].includes(nextState)) job.claim = null;
   }
 
