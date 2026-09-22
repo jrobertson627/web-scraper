@@ -22,6 +22,9 @@ export function assertPageType(pageType) {
 }
 
 export function createSourceUrl(providerId, targetUrl, baseUrl) {
+  if (typeof providerId !== 'string' || !providerId.trim()) {
+    throw new Error('invalid provider id. Expected a non-empty provider identifier. Example: providerId: sports-reference');
+  }
   let url;
   try {
     url = new URL(targetUrl, baseUrl);
@@ -30,6 +33,12 @@ export function createSourceUrl(providerId, targetUrl, baseUrl) {
   }
   if (url.protocol !== 'https:') {
     throw new Error(`invalid source URL scheme: ${url.protocol}. Expected https. Example: https://provider.example/cbb/schools/`);
+  }
+  if (url.username || url.password) {
+    throw new Error('invalid source URL credentials. Expected an HTTPS URL without username or password.');
+  }
+  if (url.hash) {
+    throw new Error('invalid source URL fragment. Expected a fetchable URL without a #fragment.');
   }
   return Object.freeze({
     providerId,
@@ -58,20 +67,25 @@ export function gameKey(canonicalPath) {
 }
 
 export function isAllowedSourceUrl(sourceUrl, allowedHosts) {
-  return sourceUrl?.absoluteUrl.startsWith('https://') &&
-    allowedHosts.map((host) => host.toLowerCase()).includes(sourceUrl.host.toLowerCase());
+  if (!sourceUrl || typeof sourceUrl.absoluteUrl !== 'string' || !Array.isArray(allowedHosts)) return false;
+  let url;
+  try { url = new URL(sourceUrl.absoluteUrl); } catch { return false; }
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) return false;
+  const allowed = new Set(allowedHosts.filter((host) => typeof host === 'string').map((host) => host.toLowerCase()));
+  return allowed.has(url.host.toLowerCase());
 }
 
 export function canonicalizeSourceUrl(sourceUrl) {
-  const url = new URL(sourceUrl.absoluteUrl);
+  const validated = createSourceUrl(sourceUrl?.providerId, sourceUrl?.absoluteUrl);
+  const url = new URL(validated.absoluteUrl);
   const normalizedPath = url.pathname.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-  const normalizedQuery = new URLSearchParams(url.search);
-  normalizedQuery.sort();
+  const queryEntries = [...new URLSearchParams(url.search).entries()]
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) => leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+  const normalizedQuery = new URLSearchParams(queryEntries).toString();
   return Object.freeze({
-    providerId: sourceUrl.providerId,
+    providerId: validated.providerId,
     host: url.host.toLowerCase(),
     path: normalizedPath,
-    normalizedQuery: normalizedQuery.toString(),
+    normalizedQuery,
   });
 }
-

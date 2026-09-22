@@ -36,6 +36,7 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 - `src/persistence/`: fixture persistence, raw stores, read projections, and migration reference.
 - `src/api/`: read-only HTTP surface and publication gate.
 - `AUTHORIZATION_CONTRACT.md`: provider authorization, retained-data contract, and fail-closed publication rules.
+- `URL_IDENTITY.md`: provider-scoped URL identity, canonicalization, and host allowlisting rules.
 - `migrations/`: ordered PostgreSQL schema migrations.
 - `test/`: behavior and smoke tests.
 
