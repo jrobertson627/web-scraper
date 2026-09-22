@@ -7,12 +7,22 @@ export function unavailable(reason = 'source_unavailable') { return Object.freez
 export function explicitNull() { return Object.freeze({ state: 'null' }); }
 export function present(value) { return Object.freeze({ state: 'present', value }); }
 
+export function sourceValue(value, { missingReason = 'source_unavailable' } = {}) {
+  if (value === undefined) return unavailable(missingReason);
+  if (value === '') return blank();
+  if (value === null) return explicitNull();
+  return present(value);
+}
+
 export function assertSourceValue(value) {
   if (!value || !VALUE_STATES.includes(value.state)) {
     throw new Error(`invalid source value state. Expected blank, unavailable, null, or present(value). Example: present(0)`);
   }
   if (value.state === 'present' && !('value' in value)) {
     throw new Error('present source value is missing value. Expected present(value). Example: present(0)');
+  }
+  if (value.state !== 'present' && 'value' in value) {
+    throw new Error(`${value.state} source value must not contain a value`);
   }
   return value;
 }

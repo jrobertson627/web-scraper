@@ -9,7 +9,7 @@ export const PARSE_RESULT_KINDS = Object.freeze(['valid', 'structural_failure'])
 export const BOUNDARY_PORT_METHODS = Object.freeze({
   fetcher: Object.freeze(['fetch']),
   discovery: Object.freeze(['discover']),
-  parsers: Object.freeze(['get']),
+  parsers: Object.freeze(['get', 'parse']),
   domain: Object.freeze(['normalize']),
   persistence: Object.freeze(['claimNextJob', 'listJobs', 'getJob', 'transitionJob', 'recordParse', 'commitPage', 'recoverExpiredClaims']),
   api: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'health']),
@@ -72,8 +72,9 @@ export function createDiscoveryResult({ observations = [], childJobs = [], unava
 
 export function createParseResult(input) {
   if (!PARSE_RESULT_KINDS.includes(input?.kind)) throw new Error(`invalid parse result kind: ${input?.kind}`);
-  if (input.kind === 'valid' && !input.document) throw new Error('valid parse result requires document');
+  if (input.kind === 'valid' && (!input.document || typeof input.document !== 'object')) throw new Error('valid parse result requires document');
   if (input.kind === 'structural_failure' && !input.error) throw new Error('structural_failure parse result requires error');
+  if (input.warnings !== undefined && !Array.isArray(input.warnings)) throw new Error('parse result warnings must be an array');
   return deepFreeze({ warnings: [], ...input, warnings: [...(input.warnings ?? [])] });
 }
 
