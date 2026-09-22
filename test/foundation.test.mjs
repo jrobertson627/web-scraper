@@ -126,7 +126,7 @@ test('missing post-fetch snapshots stop for operator review without stranding th
     parsers: {},
     normalizer: {},
     persistence,
-    rawStore: { get: () => null },
+    rawStore: { get: () => null, verify: () => ({ ok: false, reason: 'missing raw object' }) },
     clock: () => now,
   });
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { assertTransition, createOperatorDisposition, sameLease } from '../contracts/jobs.mjs';
 
@@ -36,8 +36,19 @@ export class MemoryRawStore {
     return object ? Object.freeze({ ...object, body: Buffer.from(object.body) }) : null;
   }
 
-  has(checksum) { return this.#objects.has(checksum); }
+  has(checksum) { return this.verify(checksum).ok; }
   entries() { return [...this.#objects.values()].map(({ checksum, objectPath, body }) => ({ checksum, objectPath, size: body.length })); }
+
+  verify(checksum, expectedObjectPath) {
+    const object = this.get(checksum);
+    if (!object) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
+    const actualChecksum = createHash('sha256').update(object.body).digest('hex');
+    if (actualChecksum !== checksum) return Object.freeze({ ok: false, reason: 'raw object checksum mismatch', checksum, actualChecksum, objectPath: object.objectPath });
+    if (expectedObjectPath && object.objectPath !== expectedObjectPath) {
+      return Object.freeze({ ok: false, reason: 'raw object path mismatch', checksum, objectPath: object.objectPath, expectedObjectPath });
+    }
+    return Object.freeze({ ok: true, checksum, objectPath: object.objectPath, size: object.body.length });
+  }
 }
 
 export class FileRawStore {
@@ -75,7 +86,33 @@ export class FileRawStore {
     return body ? Object.freeze({ checksum, objectPath: `file://${this.#path(checksum)}`, body }) : null;
   }
 
-  has(checksum) { return Boolean(this.#read(this.#path(checksum))); }
+  has(checksum) { return this.verify(checksum).ok; }
+
+  entries() {
+    const entries = [];
+    for (const directory of readdirSync(this.root, { withFileTypes: true })) {
+      if (!directory.isDirectory()) continue;
+      const directoryPath = join(this.root, directory.name);
+      for (const file of readdirSync(directoryPath, { withFileTypes: true })) {
+        if (!file.isFile() || !/^[a-f0-9]{64}$/.test(file.name)) continue;
+        const path = join(directoryPath, file.name);
+        const body = this.#read(path);
+        if (body) entries.push({ checksum: file.name, objectPath: `file://${path}`, size: body.length });
+      }
+    }
+    return entries;
+  }
+
+  verify(checksum, expectedObjectPath) {
+    const object = this.get(checksum);
+    if (!object) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
+    const actualChecksum = createHash('sha256').update(object.body).digest('hex');
+    if (actualChecksum !== checksum) return Object.freeze({ ok: false, reason: 'raw object checksum mismatch', checksum, actualChecksum, objectPath: object.objectPath });
+    if (expectedObjectPath && object.objectPath !== expectedObjectPath) {
+      return Object.freeze({ ok: false, reason: 'raw object path mismatch', checksum, objectPath: object.objectPath, expectedObjectPath });
+    }
+    return Object.freeze({ ok: true, checksum, objectPath: object.objectPath, size: object.body.length });
+  }
 
   #read(path) {
     try { return readFileSync(path); } catch (error) {
@@ -103,8 +140,10 @@ export class InMemoryPersistence {
     this.unavailableCoverage = new Map();
     this.reconciliationIssues = [];
     this.operatorDispositions = [];
+    this.rawObjectRepairs = new Map();
     this.inFlight = new Map();
     this.requestSchedules = new Map();
+    this.nextRequestId = 1;
   }
 
   addJob(job) {
@@ -187,6 +226,60 @@ export class InMemoryPersistence {
     return this.sourceFetches.findLast((fetch) => fetch.jobKey === jobKey && fetch.checksum) ?? null;
   }
 
+  repairRawObjects({ rawStore } = {}) {
+    if (!rawStore || typeof rawStore.entries !== 'function' || typeof rawStore.verify !== 'function') {
+      throw new Error('raw repair requires a raw store with entries() and verify().');
+    }
+    const observedAt = this.clock().toISOString();
+    const references = new Map();
+    for (const fetch of this.sourceFetches.filter((item) => item.checksum)) {
+      const list = references.get(fetch.checksum) ?? [];
+      list.push(fetch);
+      references.set(fetch.checksum, list);
+    }
+
+    const healthy = [];
+    const pending = [];
+    for (const [checksum, fetches] of references) {
+      const expectedPaths = [...new Set(fetches.map((fetch) => fetch.objectPath).filter(Boolean))];
+      const expectedObjectPath = expectedPaths.length === 1 ? expectedPaths[0] : undefined;
+      const verification = rawStore.verify(checksum, expectedObjectPath);
+      if (verification.ok && expectedPaths.length <= 1) {
+        healthy.push(Object.freeze({ checksum, objectPath: verification.objectPath, sourceFetchIds: fetches.map((fetch) => fetch.id) }));
+        continue;
+      }
+      const reason = expectedPaths.length > 1 ? 'source fetches disagree about the raw object path' : verification.reason;
+      const record = Object.freeze({
+        checksum,
+        objectPath: expectedObjectPath ?? verification.objectPath ?? expectedPaths[0] ?? 'missing',
+        state: 'pending',
+        observedAt,
+        reason,
+        sourceFetchIds: fetches.map((fetch) => fetch.id),
+      });
+      this.rawObjectRepairs.set(checksum, record);
+      pending.push(record);
+    }
+
+    const orphans = [];
+    for (const entry of rawStore.entries()) {
+      if (references.has(entry.checksum)) continue;
+      const verification = rawStore.verify(entry.checksum, entry.objectPath);
+      const record = Object.freeze({
+        checksum: entry.checksum,
+        objectPath: entry.objectPath,
+        state: 'retained',
+        detectedAs: 'orphan',
+        observedAt,
+        reason: verification.ok ? 'orphan raw object retained for operator review' : `${verification.reason}; orphan retained for operator review`,
+      });
+      this.rawObjectRepairs.set(entry.checksum, record);
+      orphans.push(record);
+    }
+
+    return Object.freeze({ observedAt, healthy: Object.freeze(healthy), pending: Object.freeze(pending), orphans: Object.freeze(orphans) });
+  }
+
   recordParse(run, lease) {
     this.#requireLease(run.jobKey, lease);
     const id = `parse-${this.parseRuns.length + 1}`;
@@ -250,7 +343,7 @@ export class InMemoryPersistence {
   acquireRequest(key, lease, host) {
     this.#requireLease(key, lease);
     if ([...this.inFlight.values()].some((request) => request.host === host)) return null;
-    const request = Object.freeze({ id: `request-${this.inFlight.size + 1}`, jobKey: key, host, lease });
+    const request = Object.freeze({ id: `request-${this.nextRequestId++}`, jobKey: key, host, lease });
     this.inFlight.set(key, request);
     return request;
   }

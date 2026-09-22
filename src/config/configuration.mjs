@@ -5,7 +5,7 @@ function configError(field, problem, expected, example) {
   return new Error(`${field} ${problem}. ${expected}. Example: ${example}`);
 }
 
-export function validateConfiguration(input) {
+export function validateConfiguration(input, { clock = () => new Date() } = {}) {
   const config = structuredClone(input);
   if (!['local', 'worker', 'api'].includes(config.mode)) {
     throw configError('mode', `is invalid: ${config.mode}`, 'Expected local, worker, or api', 'mode: local');
@@ -40,8 +40,8 @@ export function validateConfiguration(input) {
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
     throw configError('rawStore', `is invalid: ${config.rawStore}`, 'Expected memory or filesystem', 'rawStore: memory');
   }
-  if (config.mode === 'worker') requireAuthorization(config.authorization, config.providerId, 'crawl');
-  if (config.mode === 'api' && config.publication === 'public') requireAuthorization(config.authorization, config.providerId, 'publish');
+  if (config.mode === 'worker') requireAuthorization(config.authorization, config.providerId, 'crawl', clock);
+  if (config.mode === 'api' && config.publication === 'public') requireAuthorization(config.authorization, config.providerId, 'publish', clock);
   return deepFreeze(config);
 }
 

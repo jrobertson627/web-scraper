@@ -22,6 +22,8 @@ npm test
 
 `local` is the only mode enabled by default. `worker` validates its safety gates but does not pretend to crawl without a configured production source adapter. API reads use local projections only and never start or claim crawl work.
 
+The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure, `2` is an invalid mode, `3` is rejected worker configuration, and `4` means configuration is valid but no production source adapter is installed.
+
 ## Layout
 
 - `src/application/`: composition root, lifecycle, CLI entry point, and reusable ingestion orchestrator.
@@ -35,3 +37,5 @@ npm test
 - `src/api/`: read-only HTTP surface and publication gate.
 - `migrations/`: ordered PostgreSQL schema migrations.
 - `test/`: behavior and smoke tests.
+
+Source providers implement the `SourceAdapter` contract (`providerId`, `indexUrl`, `classify`, and `canonicalize`) and are selected only by the composition root. Raw stores expose immutable put/get plus inventory and checksum verification; `Persistence.repairRawObjects(scope)` retains orphaned objects for review and reports missing or mismatched bodies as pending repair rather than allowing them to become parseable.

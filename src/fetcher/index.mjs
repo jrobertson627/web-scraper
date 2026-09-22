@@ -33,29 +33,37 @@ export class Fetcher {
     const request = this.persistence.acquireRequest(job.key, lease, job.sourceUrl.host);
     if (!request) return { kind: 'retry_wait', reason: 'host request already owned', nextAllowedAt: this.#nextTime(1000) };
     try {
-      await this.#waitForPolicy(job, lease);
       const prior = this.persistence.lastSuccessfulFetch(job.key);
-      const headers = { 'user-agent': this.policy.userAgent };
+      let headers = { 'user-agent': this.policy.userAgent };
       if (prior?.etag) headers['if-none-match'] = prior.etag;
       if (prior?.lastModified) headers['if-modified-since'] = prior.lastModified;
-      const startedAt = this.clock();
-      this.#recordRequestStart(job.sourceUrl.host, startedAt);
+      let sourceUrl = job.sourceUrl;
       let response;
-      try {
-        response = await this.transport.request({ method: 'GET', url: job.sourceUrl.absoluteUrl, headers });
-      } catch (error) {
-        return this.#retry(job, `transport error: ${error.message}`);
-      }
-      if (response.redirectUrl) {
+      let startedAt;
+      for (let redirectCount = 0; ; redirectCount += 1) {
+        if (!isAllowedSourceUrl(sourceUrl, this.allowedHosts)) return { kind: 'operator_stop', reason: 'redirect target is not allowlisted' };
+        await this.#waitForPolicy(job, lease, sourceUrl.host);
+        startedAt = this.clock();
+        this.#recordRequestStart(sourceUrl.host, startedAt);
         try {
-          const redirect = createSourceUrl(job.sourceUrl.providerId, response.redirectUrl, job.sourceUrl.absoluteUrl);
+          response = await this.transport.request({ method: 'GET', url: sourceUrl.absoluteUrl, headers, redirect: 'manual' });
+        } catch (error) {
+          return this.#retry(job, `transport error: ${error.message}`);
+        }
+        if (!response.redirectUrl) break;
+        if (redirectCount >= 4) return { kind: 'operator_stop', reason: 'redirect limit exceeded' };
+        try {
+          const redirect = createSourceUrl(job.sourceUrl.providerId, response.redirectUrl, sourceUrl.absoluteUrl);
           if (!isAllowedSourceUrl(redirect, this.allowedHosts)) return { kind: 'operator_stop', reason: 'redirect target is not allowlisted' };
+          sourceUrl = redirect;
+          headers = { 'user-agent': this.policy.userAgent };
         } catch (error) {
           return { kind: 'operator_stop', reason: `invalid redirect target: ${error.message}` };
         }
       }
       if (response.status === 304) {
-        if (!prior || !this.rawStore.has(prior.checksum)) return { kind: 'operator_stop', reason: '304 has no durable prior raw snapshot' };
+        const priorVerification = prior ? this.rawStore.verify(prior.checksum, prior.objectPath) : { ok: false };
+        if (!prior || !priorVerification.ok) return { kind: 'operator_stop', reason: '304 has no durable verified prior raw snapshot' };
         const sourceFetchId = this.persistence.recordFetch({
           jobKey: job.key,
           status: 304,
@@ -79,6 +87,8 @@ export class Fetcher {
       if (response.status < 200 || response.status >= 300) return { kind: 'permanently_failed', reason: `upstream ${response.status}` };
       const body = Buffer.from(response.body ?? '');
       const raw = this.rawStore.put(body);
+      const verification = this.rawStore.verify(raw.checksum, raw.objectPath);
+      if (!verification.ok) return { kind: 'operator_stop', reason: `raw finalization failed verification: ${verification.reason}` };
       const sourceFetchId = this.persistence.recordFetch({
         jobKey: job.key,
         status: response.status,
@@ -95,10 +105,10 @@ export class Fetcher {
     }
   }
 
-  async #waitForPolicy(job, lease) {
+  async #waitForPolicy(job, lease, host = job.sourceUrl.host) {
     for (;;) {
       const now = this.clock();
-      const schedule = this.#getSchedule(job.sourceUrl.host, now);
+      const schedule = this.#getSchedule(host, now);
       const intervalDelay = schedule.lastStartedAt ? Math.max(0, this.policy.minIntervalMs - (now.getTime() - schedule.lastStartedAt.getTime())) : 0;
       const starts = schedule.starts.filter((at) => now.getTime() - at.getTime() < 60_000);
       const rateDelay = starts.length >= this.policy.maxRequestsPerMinute
@@ -137,12 +147,14 @@ export class Fetcher {
 export class FixtureTransport {
   constructor(fixtures = new Map()) { this.fixtures = fixtures; this.calls = []; this.requests = []; }
 
-  async request({ method, url, headers = {} }) {
+  async request({ method, url, headers = {}, redirect = 'manual' }) {
     if (method !== 'GET') throw new Error(`transport rejected method ${method}. Expected GET only. Example: method: GET`);
+    if (redirect !== 'manual') throw new Error('transport requires manual redirect handling so targets can be allowlisted before request.');
     this.calls.push(url);
     this.requests.push({ method, url, headers: { ...headers } });
     const fixture = this.fixtures.get(url);
     if (!fixture) return { status: 404, headers: {}, body: Buffer.from('') };
+    if (fixture.redirectUrl) return { status: fixture.status ?? 302, headers: fixture.headers ?? {}, redirectUrl: fixture.redirectUrl, body: Buffer.alloc(0) };
     const etag = fixture.etag ?? `fixture-${createHash('sha256').update(fixture.body).digest('hex')}`;
     if (headers['if-none-match'] === etag) return { status: 304, headers: { etag }, body: Buffer.alloc(0) };
     return { status: 200, headers: { etag, ...(fixture.lastModified ? { 'last-modified': fixture.lastModified } : {}) }, body: Buffer.from(fixture.body) };

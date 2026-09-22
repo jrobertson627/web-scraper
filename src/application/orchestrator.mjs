@@ -44,15 +44,16 @@ export class IngestionOrchestrator {
         this.persistence.transitionJob(job.key, 'permanently_failed', job.lease, { lastError: result.reason });
         return;
       }
-      this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
       phase = 'snapshot';
       const stored = this.rawStore.get(result.checksum);
-      if (!stored) {
+      const verification = this.rawStore.verify(result.checksum, stored?.objectPath);
+      if (!stored || !verification.ok) {
         this.persistence.transitionJob(job.key, 'operator_stop', job.lease, {
-          lastError: `raw snapshot ${result.checksum} is unavailable after fetch`,
+          lastError: `raw snapshot ${result.checksum} is unavailable or failed durable verification after fetch: ${verification.reason ?? 'unavailable'}`,
         });
         return;
       }
+      this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
       const snapshot = {
         jobKey: job.key,
         parentKey: job.parentKey,

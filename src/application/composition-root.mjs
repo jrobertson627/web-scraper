@@ -1,5 +1,6 @@
 import { validateConfiguration } from '../config/configuration.mjs';
-import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../contracts/source.mjs';
+import { sourceKey } from '../contracts/source.mjs';
+import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
 import { FixtureTransport, Fetcher } from '../fetcher/index.mjs';
 import { Discovery } from '../discovery/index.mjs';
 import { FixtureParser, ParserRegistry } from '../parsers/index.mjs';
@@ -8,14 +9,15 @@ import { InMemoryPersistence, createRawStore } from '../persistence/index.mjs';
 import { createQueryService, createApiServer } from '../api/index.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
+import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 
-const PROVIDER = 'fixture-provider';
-const HOST = 'fixture.example';
-const base = `https://${HOST}`;
-
-function fixture(url, data) { return { url: `${base}${url}`, body: JSON.stringify(data) }; }
-
-export function createFixtureApplication() {
+export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter() } = {}) {
+  const adapter = assertSourceAdapter(sourceAdapter);
+  const providerId = adapter.providerId();
+  const indexUrl = adapter.indexUrl();
+  const host = indexUrl.host;
+  const base = new URL(indexUrl.absoluteUrl).origin;
+  const fixture = (url, data) => ({ url: `${base}${url}`, body: JSON.stringify(data) });
   let currentTime = Date.parse('2026-01-01T00:00:00.000Z');
   const clock = () => new Date(currentTime);
   const sleep = async (milliseconds) => { currentTime += milliseconds; };
@@ -29,22 +31,22 @@ export function createFixtureApplication() {
     fixture('/box/one.html', { date: '2026-01-02', home: 'Fixture A', away: 'Opponent', homeScore: 70, awayScore: 65, context: 'neutral', status: 'final', playerSourceId: null }),
   ];
   const transport = new FixtureTransport(new Map(fixtureData.map((item) => [item.url, item])));
-  const persistence = new InMemoryPersistence(clock);
   const config = validateConfiguration({
-    mode: 'local', providerId: PROVIDER, allowedHosts: [HOST], rawStore: 'memory',
+    mode: 'local', providerId, allowedHosts: [host], rawStore: 'memory',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-fixture (+local@example.com)' },
     eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
     publication: 'private',
-  });
+  }, { clock });
   const rawStore = createRawStore(config.rawStore);
+  const persistence = new InMemoryPersistence(clock);
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
-  const discovery = new Discovery({ providerId: PROVIDER, allowedHosts: [HOST], targetEndingYears: config.targetEndingYears });
-  const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, policy: config.policy, allowedHosts: [HOST] });
+  const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears });
+  const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, policy: config.policy, allowedHosts: [host] });
   const normalizer = new Normalizer();
-  const indexUrl = createSourceUrl(PROVIDER, `${base}/cbb/schools/`);
-  const indexPath = canonicalizeSourceUrl(indexUrl);
-  persistence.addJob({ key: sourceKey(indexPath, 'school_index'), pageType: 'school_index', sourceUrl: indexUrl, canonicalPath: indexPath });
+  const indexPath = adapter.canonicalize(indexUrl);
+  const indexPageType = adapter.classify(indexUrl);
+  persistence.addJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
   const orchestrator = new IngestionOrchestrator({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock });
 
   async function runWorkerOnce(workerId = 'fixture-worker') {
@@ -54,6 +56,7 @@ export function createFixtureApplication() {
 
   return {
     config,
+    sourceAdapter: adapter,
     lifecycle: new ApplicationLifecycle('local'),
     clock,
     transport,
@@ -62,6 +65,6 @@ export function createFixtureApplication() {
     orchestrator,
     runWorkerOnce,
     queries: createQueryService(persistence),
-    createApiServer: (apiConfig = config) => createApiServer({ queries: createQueryService(persistence), config: apiConfig }),
+    createApiServer: (apiConfig = config) => createApiServer({ queries: createQueryService(persistence), config: apiConfig, clock }),
   };
 }

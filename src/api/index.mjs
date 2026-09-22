@@ -15,14 +15,14 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-export function createApiServer({ queries, config }) {
+export function createApiServer({ queries, config, clock = () => new Date() }) {
   return createServer((request, response) => {
     if (request.method !== 'GET') {
       sendJson(response, 405, { error: 'read-only API accepts GET only' });
       return;
     }
     if (config.publication === 'public') {
-      const gate = authorizationStatus(config.authorization, config.providerId, 'publish');
+      const gate = authorizationStatus(config.authorization, config.providerId, 'publish', clock);
       if (!gate.ok) {
         sendJson(response, 403, { error: 'publication gate denied' });
         return;
