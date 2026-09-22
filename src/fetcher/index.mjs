@@ -74,7 +74,7 @@ export class Fetcher {
           lastModified: header(response.headers, 'last-modified') ?? prior.lastModified,
           fetchedAt: startedAt.toISOString(),
           reusedBody: true,
-        }, lease);
+        }, lease, this.rawStore);
         return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum });
       }
       if (response.status === 429) {
@@ -99,7 +99,7 @@ export class Fetcher {
         lastModified: header(response.headers, 'last-modified'),
         fetchedAt: startedAt.toISOString(),
         reusedBody: false,
-      }, lease);
+      }, lease, this.rawStore);
       return createFetchResult({ kind: 'fetched', sourceFetchId, checksum: raw.checksum });
     } finally {
       this.persistence.releaseRequest(job.key, lease);
