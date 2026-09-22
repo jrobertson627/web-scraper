@@ -1,5 +1,6 @@
 import { REQUIRED_ELIGIBILITY_PREDICATE, TARGET_ENDING_YEARS } from '../contracts/source.mjs';
 import { requireAuthorization } from './authorization.mjs';
+import { contractFingerprint, requireDataContract } from './data-contract.mjs';
 
 function configError(field, problem, expected, example) {
   return new Error(`${field} ${problem}. ${expected}. Example: ${example}`);
@@ -40,8 +41,18 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
     throw configError('rawStore', `is invalid: ${config.rawStore}`, 'Expected memory or filesystem', 'rawStore: memory');
   }
-  if (config.mode === 'worker') requireAuthorization(config.authorization, config.providerId, 'crawl', clock);
-  if (config.mode === 'api' && config.publication === 'public') requireAuthorization(config.authorization, config.providerId, 'publish', clock);
+  if (config.mode === 'local' && config.publication === 'public') {
+    throw configError('publication', 'cannot be public in local mode', 'Expected private fixture output', 'publication: private');
+  }
+  const expectedScope = { allowedHosts: config.allowedHosts, eligibilityPredicate: config.eligibilityPredicate, targetEndingYears: years };
+  const requiresUpstream = config.mode === 'worker' || (config.mode === 'api' && config.publication === 'public');
+  if (requiresUpstream) {
+    const use = config.mode === 'worker' ? 'crawl' : 'publish';
+    if (!config.authorization) requireAuthorization(config.authorization, config.providerId, use, clock);
+    const contract = requireDataContract(config.dataContract, config.providerId, clock, config.dataContract?.version);
+    if (use === 'publish' && contract.redistribution !== 'public') throw configError('dataContract.redistribution', 'must permit public redistribution', 'Expected public', 'redistribution: public');
+    requireAuthorization(config.authorization, config.providerId, use, clock, { expectedScope, expectedContractVersion: contract.version, expectedContractFingerprint: contractFingerprint(contract) });
+  }
   return deepFreeze(config);
 }
 

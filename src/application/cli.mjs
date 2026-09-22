@@ -24,6 +24,13 @@ function parseAuthorization(value) {
   }
 }
 
+function parseDataContract(value) {
+  if (!value) return undefined;
+  try { return JSON.parse(value); } catch {
+    throw new Error('data contract configuration is invalid JSON. Expected a data contract object; secret-bearing input was redacted.');
+  }
+}
+
 function configuredPort(env) {
   const port = Number(env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -104,6 +111,7 @@ export async function runCli({
         policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
         eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
         authorization: parseAuthorization(env.AUTHORIZATION_JSON),
+        dataContract: parseDataContract(env.DATA_CONTRACT_JSON),
       });
     } catch (error) {
       stderr(`worker configuration rejected: ${safeMessage(error)}`);

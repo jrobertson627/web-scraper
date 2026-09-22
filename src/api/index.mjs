@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { authorizationStatus } from '../config/authorization.mjs';
+import { publicationStatus } from '../config/authorization.mjs';
+import { contractFingerprint, dataContractStatus } from '../config/data-contract.mjs';
 
 export function createQueryService(persistence) {
   return Object.freeze({
@@ -22,7 +23,12 @@ export function createApiServer({ queries, config, clock = () => new Date() }) {
       return;
     }
     if (config.publication === 'public') {
-      const gate = authorizationStatus(config.authorization, config.providerId, 'publish', clock);
+      const gate = publicationStatus(config.authorization, config.dataContract, config.providerId, clock, {
+        expectedContractVersion: config.dataContract?.version,
+        expectedContractFingerprint: config.dataContract ? contractFingerprint(config.dataContract) : undefined,
+        expectedScope: config.allowedHosts ? { allowedHosts: config.allowedHosts, eligibilityPredicate: config.eligibilityPredicate, targetEndingYears: config.targetEndingYears } : undefined,
+        dataContractStatus,
+      });
       if (!gate.ok) {
         sendJson(response, 403, { error: 'publication gate denied' });
         return;
