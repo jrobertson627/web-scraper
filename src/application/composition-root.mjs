@@ -1,12 +1,16 @@
 import { validateConfiguration } from '../config/configuration.mjs';
 import { sourceKey } from '../contracts/source.mjs';
 import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
-import { FixtureTransport, Fetcher } from '../fetcher/index.mjs';
-import { Discovery } from '../discovery/index.mjs';
-import { FixtureParser, ParserRegistry } from '../parsers/index.mjs';
-import { Normalizer } from '../domain/index.mjs';
-import { InMemoryPersistence, createRawStore } from '../persistence/index.mjs';
-import { createQueryService, createApiServer } from '../api/index.mjs';
+import { assertBoundaryPort, createJob } from '../contracts/boundaries.mjs';
+import { Fetcher } from '../fetcher/public.mjs';
+import { FixtureTransport } from '../fetcher/index.mjs';
+import { Discovery } from '../discovery/public.mjs';
+import { ParserRegistry } from '../parsers/public.mjs';
+import { FixtureParser } from '../parsers/index.mjs';
+import { Normalizer } from '../domain/public.mjs';
+import { createRawStore } from '../persistence/public.mjs';
+import { InMemoryPersistence } from '../persistence/index.mjs';
+import { createQueryService, createApiServer } from '../api/public.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
@@ -46,8 +50,24 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   const normalizer = new Normalizer();
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
-  persistence.addJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
-  const orchestrator = new IngestionOrchestrator({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock });
+  persistence.addJob(createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath }));
+  const boundaryPorts = {
+    fetcher: assertBoundaryPort('fetcher', fetcher),
+    discovery: assertBoundaryPort('discovery', discovery),
+    parsers: assertBoundaryPort('parsers', parsers),
+    domain: assertBoundaryPort('domain', normalizer),
+    persistence: assertBoundaryPort('persistence', persistence),
+  };
+  const queries = assertBoundaryPort('api', createQueryService(persistence));
+  const orchestrator = new IngestionOrchestrator({
+    fetcher: boundaryPorts.fetcher,
+    discovery: boundaryPorts.discovery,
+    parsers: boundaryPorts.parsers,
+    normalizer: boundaryPorts.domain,
+    persistence: boundaryPorts.persistence,
+    rawStore,
+    clock,
+  });
 
   async function runWorkerOnce(workerId = 'fixture-worker') {
     const result = await orchestrator.runOnce(workerId);
@@ -64,7 +84,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     persistence,
     orchestrator,
     runWorkerOnce,
-    queries: createQueryService(persistence),
-    createApiServer: (apiConfig = config) => createApiServer({ queries: createQueryService(persistence), config: apiConfig, clock }),
+    queries,
+    createApiServer: (apiConfig = config) => createApiServer({ queries, config: apiConfig, clock }),
   };
 }

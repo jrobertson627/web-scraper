@@ -39,3 +39,5 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 - `test/`: behavior and smoke tests.
 
 Source providers implement the `SourceAdapter` contract (`providerId`, `indexUrl`, `classify`, and `canonicalize`) and are selected only by the composition root. Raw stores expose immutable put/get plus inventory and checksum verification; `Persistence.repairRawObjects(scope)` retains orphaned objects for review and reports missing or mismatched bodies as pending repair rather than allowing them to become parseable.
+
+The frozen public package entry points and dependency rules are documented in [`BOUNDARY_CONTRACTS.md`](BOUNDARY_CONTRACTS.md) and enforced by the architecture test suite.

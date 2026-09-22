@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { assertTransition, createOperatorDisposition, sameLease } from '../contracts/jobs.mjs';
+import { createJob, createQueryModels, createReconciliationIssue } from '../contracts/boundaries.mjs';
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -147,11 +148,12 @@ export class InMemoryPersistence {
   }
 
   addJob(job) {
-    const existing = this.jobs.get(job.key);
+    const validated = createJob(job);
+    const existing = this.jobs.get(validated.key);
     if (existing) return existing;
     const now = this.clock().toISOString();
-    const stored = { ...job, state: 'pending', attempts: 0, createdAt: now, updatedAt: now };
-    this.jobs.set(job.key, stored);
+    const stored = { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now };
+    this.jobs.set(validated.key, stored);
     return stored;
   }
 
@@ -301,7 +303,7 @@ export class InMemoryPersistence {
     const record = Object.freeze({ ...page, provenance });
     const previous = this.pages.get(key);
     if (previous && !jsonEqual(previous.data, record.data)) {
-      this.reconciliationIssues.push(Object.freeze({
+      this.reconciliationIssues.push(createReconciliationIssue({
         issueType: 'conflicting_page_reprocess',
         recordKey: key,
         details: { previous: previous.data, current: record.data },
@@ -373,7 +375,7 @@ export class InMemoryPersistence {
     }
     const jobStates = {};
     for (const job of this.jobs.values()) jobStates[job.state] = (jobStates[job.state] ?? 0) + 1;
-    return {
+    return createQueryModels({
       schools,
       seasons,
       games,
@@ -384,7 +386,7 @@ export class InMemoryPersistence {
         conflicts: this.reconciliationIssues.length,
         observations: this.observations.size,
       },
-    };
+    });
   }
 
   #findClaimableJob(now) {
