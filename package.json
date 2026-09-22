@@ -20,6 +20,8 @@
     "start:local": "node src/application/cli.mjs local",
     "start:worker": "node src/application/cli.mjs worker",
     "start:api": "node src/application/cli.mjs api",
+    "smoke:foundation": "node scripts/foundation-smoke.mjs",
+    "smoke:migrations": "node scripts/migration-smoke.mjs",
     "check": "node --check src/application/cli.mjs && node --test",
     "test": "node --test"
   }

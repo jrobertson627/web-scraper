@@ -14,8 +14,9 @@ import { createQueryService, createApiServer } from '../api/public.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
+import { buildFixtureReconciliationReport } from './reconciliation.mjs';
 
-export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter() } = {}) {
+export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState } = {}) {
   const adapter = assertSourceAdapter(sourceAdapter);
   const providerId = adapter.providerId();
   const indexUrl = adapter.indexUrl();
@@ -23,8 +24,8 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   const base = new URL(indexUrl.absoluteUrl).origin;
   const fixture = (url, data) => ({ url: `${base}${url}`, body: JSON.stringify(data) });
   let currentTime = Date.parse('2026-01-01T00:00:00.000Z');
-  const clock = () => new Date(currentTime);
-  const sleep = async (milliseconds) => { currentTime += milliseconds; };
+  const clock = sharedState?.clock ?? (() => new Date(currentTime));
+  const sleep = sharedState?.sleep ?? (async (milliseconds) => { currentTime += milliseconds; });
   const fixtureData = [
     fixture('/cbb/schools/', { schools: [{ path: '/school/a', name: 'Fixture A', to: 2026, historyUrl: `${base}/school/a/men/` }, { path: '/school/b', name: 'Fixture B', to: 2025, historyUrl: `${base}/school/b/men/` }] }),
     fixture('/school/a/men/', { seasons: [{ endingYear: 2026, url: `${base}/school/a/men/2026.html` }, { endingYear: 2024, url: `${base}/school/a/men/2024.html` }] }),
@@ -34,16 +35,16 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     fixture('/school/a/men/2024-gamelogs.html', { games: [{ boxScoreUrl: `${base}/box/one.html`, context: 'away', status: 'final' }] }),
     fixture('/box/one.html', { date: '2026-01-02', home: 'Fixture A', away: 'Opponent', homeScore: 70, awayScore: 65, context: 'neutral', status: 'final', playerSourceId: null }),
   ];
-  const fixtureMap = new Map(fixtureData.map((item) => [item.url, item]));
-  const transport = new FixtureTransport(fixtureMap);
+  const fixtureMap = new Map((fixtureEntries ?? fixtureData).map((item) => [item.url, item]));
+  const transport = sharedState?.transport ?? new FixtureTransport(fixtureMap);
   const config = validateConfiguration({
     mode: 'local', providerId, allowedHosts: [host], rawStore: 'memory',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-fixture (+local@example.com)' },
     eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
     publication: 'private',
   }, { clock });
-  const rawStore = createRawStore(config.rawStore);
-  const persistence = new InMemoryPersistence(clock, { claimTimeoutMs: config.claimTimeoutMs });
+  const rawStore = sharedState?.rawStore ?? createRawStore(config.rawStore);
+  const persistence = sharedState?.persistence ?? new InMemoryPersistence(clock, { claimTimeoutMs: config.claimTimeoutMs });
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
   const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears });
@@ -94,7 +95,9 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
         sourceUrl: job.sourceUrl, body: Buffer.from(entry.body),
         sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(providerId, target, baseUrl),
       };
-      const discovered = discovery.discover(job.pageType, snapshot, JSON.parse(entry.body));
+      const parsed = parsers.parse(job.pageType, '1', snapshot);
+      if (parsed.kind !== 'valid') continue;
+      const discovered = discovery.discover(job.pageType, snapshot, parsed.document);
       unavailableCoverage += discovered.unavailableCoverage.length;
       for (const child of discovered.childJobs) {
         if (child.pageType === 'box_score') boxScoreLinks.add(child.key);
@@ -121,6 +124,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     orchestrator,
     runWorkerOnce,
     previewDryRun,
+    reconcile: () => buildFixtureReconciliationReport(persistence),
     queries,
     createApiServer: (apiConfig = config) => createApiServer({ queries, config: apiConfig, clock }),
   };
