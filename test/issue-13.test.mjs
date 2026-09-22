@@ -10,9 +10,12 @@ import { validateConfiguration } from '../src/config/configuration.mjs';
 import { createSourceUrl, canonicalizeSourceUrl } from '../src/contracts/source.mjs';
 import { Fetcher, FixtureTransport } from '../src/fetcher/index.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
+import { contractFingerprint } from '../src/config/data-contract.mjs';
 
 const validPolicy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'test (+ops@example.com)' };
 const validScope = { eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+const validAuthorizationScope = { allowedHosts: ['allowed.example'], ...validScope };
+const validDataContract = { providerId: 'p', version: 'v1', retainedFields: ['school', 'games'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'public', retention: 'indefinite' };
 
 function makeJob(providerId = 'p', absoluteUrl = 'https://allowed.example/page') {
   const sourceUrl = createSourceUrl(providerId, absoluteUrl);
@@ -49,13 +52,14 @@ test('fixture composition is replaceable through the source adapter contract', a
 });
 
 test('authorization expiry uses the injected clock in validation and status checks', () => {
-  const authorization = { providerId: 'p', status: 'active', uses: ['crawl'], evidenceRef: 'private-record', expiresAt: '2026-01-02T00:00:00.000Z' };
+  const authorization = { providerId: 'p', status: 'active', uses: ['crawl'], evidenceRef: 'private-record', contractVersion: 'v1', scope: validAuthorizationScope, expiresAt: '2026-01-02T00:00:00.000Z' };
   const beforeExpiry = () => new Date('2026-01-01T00:00:00.000Z');
   const atExpiry = () => new Date('2026-01-02T00:00:00.000Z');
   const input = {
     mode: 'worker', providerId: 'p', allowedHosts: ['allowed.example'], rawStore: 'memory', publication: 'private',
-    policy: validPolicy, authorization, ...validScope,
+    policy: validPolicy, authorization, dataContract: validDataContract, ...validScope,
   };
+  authorization.contractFingerprint = contractFingerprint(validDataContract);
 
   assert.equal(authorizationStatus(authorization, 'p', 'crawl', beforeExpiry).ok, true);
   assert.equal(authorizationStatus(authorization, 'p', 'crawl', atExpiry).ok, false);
@@ -145,10 +149,11 @@ test('worker CLI uses distinct sanitized configuration and adapter exit codes', 
   assert.match(invalid.stderr, /worker configuration rejected/);
   assert.doesNotMatch(invalid.stderr, /TOP_SECRET|\n\s+at /);
 
-  const authorization = JSON.stringify({ providerId: 'provider', status: 'active', uses: ['crawl'], evidenceRef: 'private-record' });
+  const dataContract = JSON.stringify({ providerId: 'provider', version: 'v1', retainedFields: ['school'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'public', retention: 'indefinite' });
+  const authorization = JSON.stringify({ providerId: 'provider', status: 'active', uses: ['crawl'], evidenceRef: 'private-record', contractVersion: 'v1', contractFingerprint: contractFingerprint(JSON.parse(dataContract)), scope: { allowedHosts: ['provider.example'], ...validScope } });
   const missingAdapter = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], {
     cwd: process.cwd(), encoding: 'utf8',
-    env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: authorization },
+    env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: authorization, DATA_CONTRACT_JSON: dataContract },
   });
   assert.equal(missingAdapter.status, EXIT_CODES.sourceAdapterMissing);
   assert.match(missingAdapter.stderr, /no production source adapter/);
@@ -183,8 +188,9 @@ test('API publication gate evaluates expiry with the fixture clock', async () =>
     ...app.config,
     mode: 'api',
     publication: 'public',
-    authorization: { providerId: app.config.providerId, status: 'active', uses: ['publish'], evidenceRef: 'private-record', expiresAt: '2026-01-02T00:00:00.000Z' },
+    dataContract: { ...validDataContract, providerId: app.config.providerId },
   };
+  config.authorization = { providerId: app.config.providerId, status: 'active', uses: ['publish'], evidenceRef: 'private-record', contractVersion: 'v1', contractFingerprint: contractFingerprint(config.dataContract), scope: { allowedHosts: [new URL(app.sourceAdapter.indexUrl().absoluteUrl).host], eligibilityPredicate: app.config.eligibilityPredicate, targetEndingYears: app.config.targetEndingYears }, expiresAt: '2026-01-02T00:00:00.000Z' };
   const server = app.createApiServer(config);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
