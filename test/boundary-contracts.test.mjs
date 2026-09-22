@@ -56,7 +56,7 @@ test('composition root validates all six boundary ports and API stays read-only'
   assertBoundaryPort('domain', app.orchestrator.normalizer);
   assertBoundaryPort('persistence', app.orchestrator.persistence);
   assertBoundaryPort('api', app.queries);
-  assert.deepEqual(Object.keys(app.queries).sort(), ['health', 'listGames', 'listSchools', 'listSeasons']);
+  assert.deepEqual(Object.keys(app.queries).sort(), ['getGame', 'health', 'listGames', 'listSchools', 'listSeasons']);
   assert.equal('claimNextJob' in app.queries, false);
   assert.equal('fetch' in app.queries, false);
   assert.throws(() => assertBoundaryPort('fetcher', {}), /missing fetch/);
