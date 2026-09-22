@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { platform } from 'node:os';
 import {
   FAILURE_STATES,
   assertTransition,
@@ -86,22 +87,34 @@ export class MemoryRawStore {
 
 export class FileRawStore {
   constructor(root) {
-    this.root = root;
-    mkdirSync(root, { recursive: true });
+    if (typeof root !== 'string' || !isAbsolute(root)) throw new Error('filesystem raw store requires an absolute root path');
+    this.root = resolve(root);
+    mkdirSync(this.root, { recursive: true });
+    this.#requireDirectory(this.root);
   }
 
   put(bytes) {
     const body = Buffer.from(bytes);
     const checksum = createHash('sha256').update(body).digest('hex');
     const path = this.#path(checksum);
-    mkdirSync(dirname(path), { recursive: true });
+    const directory = dirname(path);
+    mkdirSync(directory, { recursive: true });
+    this.#requireDirectory(directory);
     let existing = this.#read(path);
     if (!existing) {
       const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
       try {
-        writeFileSync(temporaryPath, body, { flag: 'wx' });
+        const handle = openSync(temporaryPath, 'wx');
+        try {
+          writeFileSync(handle, body);
+          fsyncSync(handle);
+        } finally {
+          closeSync(handle);
+        }
         try {
           linkSync(temporaryPath, path);
+          this.#syncDirectory(directory);
+          this.#syncDirectory(this.root);
         } catch (error) {
           if (error.code !== 'EEXIST') throw error;
         }
@@ -116,7 +129,9 @@ export class FileRawStore {
 
   get(checksum) {
     if (!CHECKSUM_PATTERN.test(checksum ?? '')) return null;
-    const body = this.#read(this.#path(checksum));
+    let body;
+    try { body = this.#read(this.#path(checksum)); } catch { return null; }
+    if (body && createHash('sha256').update(body).digest('hex') !== checksum) return null;
     return body ? Object.freeze({ checksum, objectPath: `file://${this.#path(checksum)}`, body }) : null;
   }
 
@@ -125,10 +140,11 @@ export class FileRawStore {
   entries() {
     const entries = [];
     for (const directory of readdirSync(this.root, { withFileTypes: true })) {
-      if (!directory.isDirectory()) continue;
+      if (!directory.isDirectory() || !/^[a-f0-9]{2}$/.test(directory.name)) continue;
       const directoryPath = join(this.root, directory.name);
+      this.#requireDirectory(directoryPath);
       for (const file of readdirSync(directoryPath, { withFileTypes: true })) {
-        if (!file.isFile() || !/^[a-f0-9]{64}$/.test(file.name)) continue;
+        if (!file.isFile() || !/^[a-f0-9]{64}$/.test(file.name) || !file.name.startsWith(directory.name)) continue;
         const path = join(directoryPath, file.name);
         const body = this.#read(path);
         if (body) entries.push({ checksum: file.name, objectPath: `file://${path}`, size: body.length });
@@ -137,28 +153,64 @@ export class FileRawStore {
     return entries;
   }
 
+  temporaryEntries() {
+    const entries = [];
+    for (const directory of readdirSync(this.root, { withFileTypes: true })) {
+      if (!directory.isDirectory() || !/^[a-f0-9]{2}$/.test(directory.name)) continue;
+      const directoryPath = join(this.root, directory.name);
+      this.#requireDirectory(directoryPath);
+      for (const file of readdirSync(directoryPath, { withFileTypes: true })) {
+        const match = /^([a-f0-9]{64})\.\d+\.[a-f0-9-]+\.tmp$/.exec(file.name);
+        if (!file.isFile() || !match || !match[1].startsWith(directory.name)) continue;
+        const path = join(directoryPath, file.name);
+        try {
+          entries.push(Object.freeze({ checksum: match[1], objectPath: `file://${path}`, modifiedAt: lstatSync(path).mtime.toISOString() }));
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+    }
+    return entries.sort((left, right) => left.objectPath.localeCompare(right.objectPath));
+  }
+
   verify(checksum, expectedObjectPath) {
     if (!CHECKSUM_PATTERN.test(checksum ?? '')) return Object.freeze({ ok: false, reason: 'invalid raw checksum', checksum });
-    const object = this.get(checksum);
-    if (!object) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
-    const actualChecksum = createHash('sha256').update(object.body).digest('hex');
-    if (actualChecksum !== checksum) return Object.freeze({ ok: false, reason: 'raw object checksum mismatch', checksum, actualChecksum, objectPath: object.objectPath });
-    if (expectedObjectPath && object.objectPath !== expectedObjectPath) {
-      return Object.freeze({ ok: false, reason: 'raw object path mismatch', checksum, objectPath: object.objectPath, expectedObjectPath });
+    let body;
+    try { body = this.#read(this.#path(checksum)); } catch (error) {
+      return Object.freeze({ ok: false, reason: `unsafe raw object: ${error.message}`, checksum });
     }
-    return Object.freeze({ ok: true, checksum, objectPath: object.objectPath, size: object.body.length });
+    if (!body) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
+    const objectPath = `file://${this.#path(checksum)}`;
+    const actualChecksum = createHash('sha256').update(body).digest('hex');
+    if (actualChecksum !== checksum) return Object.freeze({ ok: false, reason: 'raw object checksum mismatch', checksum, actualChecksum, objectPath });
+    if (expectedObjectPath && objectPath !== expectedObjectPath) {
+      return Object.freeze({ ok: false, reason: 'raw object path mismatch', checksum, objectPath, expectedObjectPath });
+    }
+    return Object.freeze({ ok: true, checksum, objectPath, size: body.length });
   }
 
   #read(path) {
-    try { return readFileSync(path); } catch (error) {
+    try {
+      this.#requireDirectory(dirname(path));
+      if (!lstatSync(path).isFile()) throw new Error(`raw object is not a regular file: ${path}`);
+      return readFileSync(path);
+    } catch (error) {
       if (error.code === 'ENOENT') return null;
       throw error;
     }
   }
 
+  #requireDirectory(path) {
+    if (!lstatSync(path).isDirectory()) throw new Error(`raw store directory is not a real directory: ${path}`);
+  }
+
+  #syncDirectory(path) {
+    if (platform() === 'win32') return; // Node cannot portably open Windows directory handles for fsync.
+    const handle = openSync(path, 'r');
+    try { fsyncSync(handle); } finally { closeSync(handle); }
+  }
+
   #path(checksum) { return join(this.root, checksum.slice(0, 2), checksum); }
 }
-export function createRawStore(kind, root = '.raw') {
+export function createRawStore(kind, root) {
   if (kind === 'memory') return new MemoryRawStore();
   if (kind === 'filesystem') return new FileRawStore(root);
   throw new Error(`unsupported raw store: ${kind}. Expected memory or filesystem.`);
@@ -261,10 +313,14 @@ export class InMemoryPersistence {
 
   recordFetch(metadata, lease, rawStore) {
     this.#requireLease(metadata.jobKey, lease);
-    if ((Number.isInteger(metadata.status) && metadata.status >= 200 && metadata.status < 300) || metadata.status === 304) {
+    const successful = (Number.isInteger(metadata.status) && metadata.status >= 200 && metadata.status < 300) || metadata.status === 304;
+    if (successful) {
       assertRawReference(metadata);
+      if (!rawStore || typeof rawStore.verify !== 'function') {
+        throw new Error('successful fetch requires a raw store for durable verification');
+      }
     }
-    if (rawStore) {
+    if (rawStore && metadata.checksum) {
       const verification = rawStore.verify(metadata.checksum, metadata.objectPath);
       if (!verification.ok) throw new Error(`raw fetch metadata rejected before durable record: ${verification.reason}`);
     }
@@ -303,15 +359,23 @@ export class InMemoryPersistence {
       const expectedPaths = [...new Set(fetches.map((fetch) => fetch.objectPath).filter(Boolean))];
       const expectedObjectPath = expectedPaths.length === 1 ? expectedPaths[0] : undefined;
       const verification = rawStore.verify(checksum, expectedObjectPath);
-      if (verification.ok && expectedPaths.length <= 1) {
+      if (verification.ok && expectedPaths.length === 1 && fetches.every((fetch) => fetch.objectPath === expectedObjectPath)) {
         healthy.push(Object.freeze({ checksum, objectPath: verification.objectPath, sourceFetchIds: fetches.map((fetch) => fetch.id) }));
         continue;
       }
-      const reason = expectedPaths.length > 1 ? 'source fetches disagree about the raw object path' : verification.reason;
+      const reason = expectedPaths.length > 1 ? 'source fetches disagree about the raw object path'
+        : fetches.some((fetch) => !fetch.objectPath) ? 'source fetch is missing a raw object path'
+          : verification.reason;
+      const defect = expectedPaths.length > 1 ? 'path_conflict'
+        : fetches.some((fetch) => !fetch.objectPath) ? 'missing_path'
+          : verification.reason === 'missing raw object' ? 'missing'
+            : verification.reason === 'raw object checksum mismatch' ? 'checksum_mismatch'
+              : 'invalid_reference';
       const record = Object.freeze({
         checksum,
         objectPath: expectedObjectPath ?? verification.objectPath ?? expectedPaths[0] ?? 'missing',
         state: 'pending',
+        defect,
         observedAt,
         reason,
         sourceFetchIds: fetches.map((fetch) => fetch.id),
@@ -336,7 +400,18 @@ export class InMemoryPersistence {
       orphans.push(record);
     }
 
-    return Object.freeze({ observedAt, healthy: Object.freeze(healthy), pending: Object.freeze(pending), orphans: Object.freeze(orphans) });
+    healthy.sort((left, right) => left.checksum.localeCompare(right.checksum));
+    pending.sort((left, right) => left.checksum.localeCompare(right.checksum));
+    orphans.sort((left, right) => left.checksum.localeCompare(right.checksum));
+    const temporary = rawStore.temporaryEntries?.() ?? [];
+    return Object.freeze({
+      observedAt,
+      counts: Object.freeze({ healthy: healthy.length, pending: pending.length, orphans: orphans.length, temporary: temporary.length }),
+      healthy: Object.freeze(healthy),
+      pending: Object.freeze(pending),
+      orphans: Object.freeze(orphans),
+      temporary: Object.freeze(temporary),
+    });
   }
 
   recordParse(run, lease) {

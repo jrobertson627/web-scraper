@@ -108,7 +108,7 @@ export async function runCli({
     try {
       config = validateConfiguration({
         mode: 'worker', providerId: env.PROVIDER_ID ?? 'provider', allowedHosts: [env.PROVIDER_HOST ?? 'provider.example'],
-        rawStore: 'filesystem', publication: 'private',
+        rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
         policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
         eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
         authorization: parseAuthorization(env.AUTHORIZATION_JSON),

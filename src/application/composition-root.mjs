@@ -43,7 +43,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
     publication: 'private',
   }, { clock });
-  const rawStore = sharedState?.rawStore ?? createRawStore(config.rawStore);
+  const rawStore = sharedState?.rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
   const persistence = sharedState?.persistence ?? new InMemoryPersistence(clock, { claimTimeoutMs: config.claimTimeoutMs });
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));

@@ -107,8 +107,11 @@ test('raw repair inventories retained orphans and unsafe metadata references', a
   const mismatchedChecksum = 'b'.repeat(64);
   persistence.addJob(makeJob());
   const job = persistence.claimNextJob(now, 'worker');
-  persistence.recordFetch({ jobKey: job.key, status: 200, checksum: missingChecksum, objectPath: `memory://${missingChecksum}` }, job.lease);
-  persistence.recordFetch({ jobKey: job.key, status: 200, checksum: mismatchedChecksum, objectPath: `memory://${mismatchedChecksum}` }, job.lease);
+  // Seed impossible production records to model a damaged legacy metadata store.
+  persistence.sourceFetches.push(
+    { id: 'fetch-missing', jobKey: job.key, status: 200, checksum: missingChecksum, objectPath: `memory://${missingChecksum}` },
+    { id: 'fetch-mismatched', jobKey: job.key, status: 200, checksum: mismatchedChecksum, objectPath: `memory://${mismatchedChecksum}` },
+  );
   const repairStore = {
     entries: () => [...rawStore.entries(), { checksum: mismatchedChecksum, objectPath: `memory://${mismatchedChecksum}`, size: 8 }],
     verify: (checksum, objectPath) => {
@@ -153,7 +156,7 @@ test('worker CLI uses distinct sanitized configuration and adapter exit codes', 
   const authorization = JSON.stringify({ providerId: 'provider', status: 'active', uses: ['crawl'], evidenceRef: 'private-record', contractVersion: 'v1', contractFingerprint: contractFingerprint(JSON.parse(dataContract)), scope: { allowedHosts: ['provider.example'], ...validScope } });
   const missingAdapter = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], {
     cwd: process.cwd(), encoding: 'utf8',
-    env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: authorization, DATA_CONTRACT_JSON: dataContract },
+    env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: authorization, DATA_CONTRACT_JSON: dataContract, RAW_STORE_ROOT: process.cwd() },
   });
   assert.equal(missingAdapter.status, EXIT_CODES.sourceAdapterMissing);
   assert.match(missingAdapter.stderr, /no production source adapter/);
