@@ -64,8 +64,9 @@ export class IngestionOrchestrator {
         sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(job.sourceUrl.providerId, target, baseUrl),
       });
       phase = 'parse';
-      const parser = this.parsers.get(job.pageType, job.parserVersion ?? '1');
-      const parsed = parser.parse(snapshot);
+      const parserVersion = job.parserVersion ?? '1';
+      const parser = this.parsers.get(job.pageType, parserVersion);
+      const parsed = this.parsers.parse(job.pageType, parserVersion, snapshot);
       this.persistence.recordParse({
         jobKey: job.key,
         sourceFetchId: result.sourceFetchId,

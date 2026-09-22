@@ -177,6 +177,7 @@ export class InMemoryPersistence {
     this.parseRuns = [];
     this.pages = new Map();
     this.observations = new Map();
+    this.observationHistory = [];
     this.unavailableCoverage = new Map();
     this.reconciliationIssues = [];
     this.operatorDispositions = [];
@@ -358,19 +359,27 @@ export class InMemoryPersistence {
     const key = page.identity ?? page.jobKey;
     const record = Object.freeze({ ...page, provenance });
     const previous = this.pages.get(key);
-    if (previous && !jsonEqual(previous.data, record.data)) {
+    const conflict = Boolean(previous && !jsonEqual(previous.data, record.data));
+    if (conflict) {
       this.reconciliationIssues.push(createReconciliationIssue({
         issueType: 'conflicting_page_reprocess',
         recordKey: key,
-        details: { previous: previous.data, current: record.data },
+        details: {
+          previous: { data: previous.data, provenance: previous.provenance },
+          current: { data: record.data, provenance: record.provenance },
+        },
         status: 'open',
       }));
+    } else {
+      this.pages.set(key, record);
     }
-    this.pages.set(key, record);
     for (const [index, observation] of (page.observations ?? []).entries()) {
       const observationKey = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
-      this.observations.set(observationKey, Object.freeze({ ...observation, provenance }));
+      const storedObservation = Object.freeze({ ...observation, provenance });
+      this.observationHistory.push(storedObservation);
+      if (!conflict) this.observations.set(observationKey, storedObservation);
     }
+    if (conflict) return key;
     for (const unavailable of page.unavailableCoverage ?? []) {
       const coverageKey = `${unavailable.schoolSourcePath}:${unavailable.endingYear}`;
       this.unavailableCoverage.set(coverageKey, Object.freeze({ ...unavailable, provenance }));
