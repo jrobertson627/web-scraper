@@ -54,7 +54,9 @@ export class Discovery {
         }
         let schoolSourcePath;
         try {
-          schoolSourcePath = serializeCanonicalPath(canonicalizeSourceUrl(sourceUrlFrom(school.path)));
+          const schoolSourceUrl = sourceUrlFrom(school.path);
+          if (!isAllowedSourceUrl(schoolSourceUrl, this.allowedHosts)) throw new Error('host or scheme is not allowlisted');
+          schoolSourcePath = serializeCanonicalPath(canonicalizeSourceUrl(schoolSourceUrl));
         } catch (error) {
           observations.push({ kind: 'rejected_url', absoluteUrl: school.path, reason: error.message, parentKey: snapshot.jobKey, rowIndex });
           continue;
@@ -79,7 +81,9 @@ export class Discovery {
         let canonicalBoxScorePath = null;
         if (game.boxScoreUrl) {
           try {
-            canonicalBoxScorePath = serializeCanonicalPath(canonicalizeSourceUrl(sourceUrlFrom(game.boxScoreUrl)));
+            const boxScoreUrl = sourceUrlFrom(game.boxScoreUrl);
+            if (!isAllowedSourceUrl(boxScoreUrl, this.allowedHosts)) throw new Error('host or scheme is not allowlisted');
+            canonicalBoxScorePath = serializeCanonicalPath(canonicalizeSourceUrl(boxScoreUrl));
           } catch (error) {
             observations.push({ kind: 'rejected_url', absoluteUrl: game.boxScoreUrl, reason: error.message, parentKey: snapshot.jobKey, rowIndex });
           }
