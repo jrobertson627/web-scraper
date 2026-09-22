@@ -38,6 +38,7 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 - `AUTHORIZATION_CONTRACT.md`: provider authorization, retained-data contract, and fail-closed publication rules.
 - `URL_IDENTITY.md`: provider-scoped URL identity, canonicalization, and host allowlisting rules.
 - `RAW_STORAGE.md`: immutable raw objects, durable finalization, and repair protocol.
+- `POSTGRES_SCHEMA.md`: migration ordering, durable constraints, provenance, and compatibility rules.
 - `migrations/`: ordered PostgreSQL schema migrations.
 - `test/`: behavior and smoke tests.
 
