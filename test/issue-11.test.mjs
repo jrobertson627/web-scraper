@@ -44,6 +44,7 @@ test('persistence refuses successful fetch metadata without a verified immutable
   persistence.addJob(job);
   const claimed = persistence.claimNextJob(now, 'worker');
   assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64) }, claimed.lease), /object path is missing/);
+  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64), objectPath: 'memory://unverified' }, claimed.lease), /requires a raw store/);
   assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64), objectPath: 'memory://missing' }, claimed.lease, new MemoryRawStore()), /missing raw object/);
   const store = new MemoryRawStore();
   const raw = store.put(Buffer.from('durable'));

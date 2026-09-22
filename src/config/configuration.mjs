@@ -3,6 +3,7 @@ import { PAGE_TYPES } from '../contracts/source.mjs';
 import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { requireAuthorization } from './authorization.mjs';
 import { contractFingerprint, requireDataContract } from './data-contract.mjs';
+import { isAbsolute } from 'node:path';
 
 function configError(field, problem, expected, example) {
   return new Error(`${field} ${problem}. ${expected}. Example: ${example}`);
@@ -30,6 +31,9 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   }
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
     throw configError('rawStore', `is invalid: ${config.rawStore}`, 'Expected memory or filesystem', 'rawStore: memory');
+  }
+  if (config.rawStore === 'filesystem' && (typeof config.rawStoreRoot !== 'string' || !isAbsolute(config.rawStoreRoot))) {
+    throw configError('rawStoreRoot', 'is invalid', 'Expected an absolute filesystem path', 'rawStoreRoot: /var/lib/web-scraper/raw');
   }
   if (config.requestMethod !== undefined && config.requestMethod !== 'GET') throw configError('requestMethod', 'must be GET', 'Expected GET-only transport', 'requestMethod: GET');
   if (config.redirectMode !== undefined && config.redirectMode !== 'manual') throw configError('redirectMode', 'must be manual', 'Expected per-hop allowlist checks', 'redirectMode: manual');
