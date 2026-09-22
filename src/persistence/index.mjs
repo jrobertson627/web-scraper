@@ -23,6 +23,20 @@ function jsonEqual(left, right) {
   return JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right));
 }
 
+const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
+
+function assertChecksum(checksum) {
+  if (typeof checksum !== 'string' || !CHECKSUM_PATTERN.test(checksum)) {
+    throw new Error('raw checksum is invalid. Expected a lowercase SHA-256 hex digest.');
+  }
+  return checksum;
+}
+
+function assertRawReference({ checksum, objectPath }) {
+  assertChecksum(checksum);
+  if (typeof objectPath !== 'string' || !objectPath) throw new Error('raw object path is missing. Expected the immutable store reference.');
+}
+
 function cloneClaim(claim) {
   return claim ? { ...claim, lease: claim.lease ? { ...claim.lease } : claim.lease } : null;
 }
@@ -49,6 +63,7 @@ export class MemoryRawStore {
   }
 
   get(checksum) {
+    if (!CHECKSUM_PATTERN.test(checksum ?? '')) return null;
     const object = this.#objects.get(checksum);
     return object ? Object.freeze({ ...object, body: Buffer.from(object.body) }) : null;
   }
@@ -57,6 +72,7 @@ export class MemoryRawStore {
   entries() { return [...this.#objects.values()].map(({ checksum, objectPath, body }) => ({ checksum, objectPath, size: body.length })); }
 
   verify(checksum, expectedObjectPath) {
+    if (!CHECKSUM_PATTERN.test(checksum ?? '')) return Object.freeze({ ok: false, reason: 'invalid raw checksum', checksum });
     const object = this.get(checksum);
     if (!object) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
     const actualChecksum = createHash('sha256').update(object.body).digest('hex');
@@ -99,6 +115,7 @@ export class FileRawStore {
   }
 
   get(checksum) {
+    if (!CHECKSUM_PATTERN.test(checksum ?? '')) return null;
     const body = this.#read(this.#path(checksum));
     return body ? Object.freeze({ checksum, objectPath: `file://${this.#path(checksum)}`, body }) : null;
   }
@@ -121,6 +138,7 @@ export class FileRawStore {
   }
 
   verify(checksum, expectedObjectPath) {
+    if (!CHECKSUM_PATTERN.test(checksum ?? '')) return Object.freeze({ ok: false, reason: 'invalid raw checksum', checksum });
     const object = this.get(checksum);
     if (!object) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
     const actualChecksum = createHash('sha256').update(object.body).digest('hex');
@@ -240,8 +258,15 @@ export class InMemoryPersistence {
     this.requestSchedules.set(host, { lastStartedAt: at, starts: current.starts });
   }
 
-  recordFetch(metadata, lease) {
+  recordFetch(metadata, lease, rawStore) {
     this.#requireLease(metadata.jobKey, lease);
+    if ((Number.isInteger(metadata.status) && metadata.status >= 200 && metadata.status < 300) || metadata.status === 304) {
+      assertRawReference(metadata);
+    }
+    if (rawStore) {
+      const verification = rawStore.verify(metadata.checksum, metadata.objectPath);
+      if (!verification.ok) throw new Error(`raw fetch metadata rejected before durable record: ${verification.reason}`);
+    }
     const id = `fetch-${this.sourceFetches.length + 1}`;
     const record = Object.freeze({
       ...metadata,
