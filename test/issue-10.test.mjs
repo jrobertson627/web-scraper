@@ -8,10 +8,11 @@ const migrations = readdirSync(migrationRoot).filter((name) => /^\d{3}_.*\.sql$/
 const sql = migrations.map((name) => readFileSync(join(migrationRoot, name), 'utf8')).join('\n');
 
 test('foundation migrations are ordered, repeat-safe, and record every applied version', () => {
-  assert.deepEqual(migrations.slice(0, 5), [
+  assert.deepEqual(migrations, [
     '001_foundation.sql', '002_job_lifecycle.sql', '003_authorization_contract.sql', '004_schema_hardening.sql', '005_parser_normalization.sql',
+    '006_http_cache_metadata.sql',
   ]);
-  for (const version of ['001_foundation', '002_job_lifecycle', '003_authorization_contract', '004_schema_hardening', '005_parser_normalization']) {
+  for (const version of ['001_foundation', '002_job_lifecycle', '003_authorization_contract', '004_schema_hardening', '005_parser_normalization', '006_http_cache_metadata']) {
     assert.match(sql, new RegExp(`schema_migrations[^;]*${version}|${version}[^;]*schema_migrations`, 's'));
   }
   assert.match(sql, /CREATE TABLE IF NOT EXISTS/);
@@ -33,6 +34,7 @@ test('schema includes provider-scoped durable identities, provenance, claims, re
   assert.match(sql, /http_status <> 304/);
   assert.match(sql, /raw_object_repair_checksum_check/);
   assert.match(sql, /publication_policies_redistribution_check/);
+  assert.match(sql, /source_fetches_cache_hit_reuse_check/);
   assert.match(sql, /ALTER TABLE school_seasons ALTER COLUMN provenance SET NOT NULL/);
 });
 

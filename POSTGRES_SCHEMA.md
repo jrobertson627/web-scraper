@@ -1,6 +1,8 @@
 # PostgreSQL schema and migration contract
 
-Migrations are ordered `001_foundation` through `004_schema_hardening` and record their versions in `schema_migrations`. Every create, alter, and index operation is repeat-safe. The schema is provider-scoped for canonical jobs, games, linked identities, observations, authorization, and publication policy.
+Migrations are ordered `001_foundation` through `006_http_cache_metadata` and record their versions in `schema_migrations`. Every create, alter, and index operation is repeat-safe. The schema is provider-scoped for canonical jobs, games, linked identities, observations, authorization, and publication policy.
+
+`source_fetches.cache_control` retains the upstream cache directive. `cache_hit` distinguishes a fresh-cache reuse from a network 200; a cache hit must also set `reused_body`. A 304 records a new fetch referencing the existing verified immutable object.
 
 The schema preserves the ingestion lifecycle: claims and lease generations are fenced, state events are durable, active host requests are unique, successful fetches require a checksum/object-path reference (including 304 reuse), and raw repair records retain pending/orphan reasons and source-fetch references.
 

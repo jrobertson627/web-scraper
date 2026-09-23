@@ -9,7 +9,7 @@
 - **Production persistence seam:** PostgreSQL migration contract in `migrations/`; fixture/local mode uses deterministic in-memory adapters and never opens a network connection.
 - **Raw storage seam:** immutable filesystem/object-store port; fixture mode uses an in-memory content-addressed store.
 
-The implementation intentionally has no provider-specific parser or upstream client. Those belong to later boundary epics after authorization and a versioned data contract exist. The reusable orchestrator, fetcher, discovery, parser, normalizer, and persistence seams are exercised end-to-end by the fixture application.
+The implementation has a source-neutral HTTPS transport, but no provider-specific parser or production source adapter. Those require provider authorization and a versioned data contract. The reusable orchestrator, fetcher, discovery, parser, normalizer, and persistence seams are exercised end-to-end by the fixture application; local TLS integration tests exercise the real transport without contacting an upstream provider.
 
 ## Runtime modes
 
@@ -29,7 +29,7 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 - `src/application/`: composition root, lifecycle, CLI entry point, and reusable ingestion orchestrator.
 - `src/config/`: immutable configuration and authorization/publication gates.
 - `src/contracts/`: source-neutral value, URL, page, provenance, and state contracts.
-- `src/fetcher/`: only boundary allowed to invoke transport; owns pacing, validators, retries, and raw snapshots.
+- `src/fetcher/`: only boundary allowed to invoke transport; owns pacing, validators, retries, and raw snapshots. The real HTTPS transport enforces DNS and body limits while the fixture transport keeps local runs deterministic.
 - `src/discovery/`: staged link/manifest intent generation.
 - `src/parsers/`: versioned parser registry and result taxonomy.
 - `src/domain/`: normalization and source-value/status semantics.

@@ -64,7 +64,8 @@ test('composition root validates all six boundary ports and API stays read-only'
 
 test('boundary implementation imports obey one-way dependency rules', () => {
   const rules = new Map([
-    ['src/fetcher/index.mjs', ['node:', '../contracts/']],
+    ['src/fetcher/index.mjs', ['node:', '../contracts/', './']],
+    ['src/fetcher/http-transport.mjs', ['node:']],
     ['src/discovery/index.mjs', ['../contracts/']],
     ['src/parsers/index.mjs', ['../contracts/']],
     ['src/domain/index.mjs', ['../contracts/']],
