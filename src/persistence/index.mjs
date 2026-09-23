@@ -434,6 +434,7 @@ export class InMemoryPersistence {
 
   commitPage(page, provenance, lease) {
     this.#requireLease(page.jobKey, lease);
+    if (this.inFlight.has(page.jobKey)) throw new Error(`cannot commit page ${page.jobKey} while its host request is still active`);
     const staged = this.#stagePage(page, provenance);
     this.#installPage(staged);
     return staged.key;
