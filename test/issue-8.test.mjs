@@ -64,7 +64,7 @@ test('worker emits typed progress and local reads remain available after it stop
   assert.equal(result.events.every((event) => event.kind === 'parsed' && event.jobKey && event.pageType), true);
   const priorCalls = app.transport.calls.length;
   const priorJobs = app.persistence.listJobs().length;
-  const game = app.queries.listGames()[0];
+  const game = (await app.queries.listGames())[0];
   const server = app.createApiServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {

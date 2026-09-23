@@ -2,7 +2,7 @@
 
 Jobs follow the legal state graph defined in `src/contracts/jobs.mjs`: `pending` or a ready `retry_wait` may be claimed as `fetching`; a successful durable raw commit moves through `fetched` to `parsed`; fetch, parse, or challenge outcomes enter their explicit failure/stop states. Every claim and transition retains its timestamp, attempt count, lease generation, and details.
 
-A claim carries an owner, expiry, and monotonically increasing generation. Every fetch, parse, page commit, and transition requires the current unexpired token. Expiry alone does not release an active host request: recovery skips the job until response completion calls `releaseRequest`, or a supervisor confirms transport cancellation through `confirmRequestCancellation`. Only then can recovery issue the next generation, fencing the stale worker.
+A claim carries an owner, expiry, and monotonically increasing generation. PostgreSQL stores the next-generation counter separately from the active lease columns so clearing an expired lease cannot reuse a token. Every fetch, parse, page commit, and transition requires the current unexpired token. Expiry alone does not release an active host request: recovery skips the job until response completion calls `releaseRequest`, or a supervisor confirms transport cancellation through `confirmRequestCancellation`. Only then can recovery issue the next generation, fencing the stale worker.
 
 Child work is claimable only after its recorded parent reaches `parsed`. Replaying a page after a crash is idempotent because job, page, observation, and coverage identities are stable.
 

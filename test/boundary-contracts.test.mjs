@@ -26,7 +26,7 @@ test('package public exports expose entry points without fixture adapters', () =
   assert.deepEqual(Object.keys(discoveryPublic), ['Discovery']);
   assert.deepEqual(Object.keys(parsersPublic), ['ParserRegistry']);
   assert.deepEqual(Object.keys(domainPublic), ['Normalizer']);
-  assert.deepEqual(Object.keys(persistencePublic), ['createRawStore']);
+  assert.deepEqual(Object.keys(persistencePublic), ['createPostgresPersistence', 'createRawStore']);
   assert.deepEqual(Object.keys(apiPublic).sort(), ['createApiServer', 'createQueryService']);
 });
 
