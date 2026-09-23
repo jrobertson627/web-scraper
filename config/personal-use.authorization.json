@@ -1,0 +1,15 @@
+{
+  "providerId": "sports-reference",
+  "basis": "personal_use_attestation",
+  "status": "active",
+  "uses": ["crawl"],
+  "evidenceRef": "operator-attestation:single-operator-personal-non-commercial-private-use",
+  "effectiveAt": "2026-09-22T00:00:00.000Z",
+  "scope": {
+    "allowedHosts": ["www.sports-reference.com"],
+    "eligibilityPredicate": "To == 2026",
+    "targetEndingYears": [2022, 2023, 2024, 2025, 2026]
+  },
+  "contractVersion": "personal-v1",
+  "contractFingerprint": "755cd5df6cb4fe3e29fb4d1b4215d7a906b91d944b513a6612d104b6e19daf3e"
+}

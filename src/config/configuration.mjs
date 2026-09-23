@@ -59,6 +59,9 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
     if (!config.authorization) requireAuthorization(config.authorization, config.providerId, use, clock);
     const contract = requireDataContract(config.dataContract, config.providerId, clock, config.dataContract?.version);
     if (use === 'publish' && contract.redistribution !== 'public') throw configError('dataContract.redistribution', 'must permit public redistribution', 'Expected public', 'redistribution: public');
+    if (config.authorization?.basis === 'personal_use_attestation' && contract.redistribution !== 'private') {
+      throw configError('dataContract.redistribution', 'must be private for personal-use attestation', 'Expected private', 'redistribution: private');
+    }
     requireAuthorization(config.authorization, config.providerId, use, clock, { expectedScope, expectedContractVersion: contract.version, expectedContractFingerprint: contractFingerprint(contract) });
   }
   return deepFreeze(config);

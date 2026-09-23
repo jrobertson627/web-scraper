@@ -9,6 +9,15 @@ export function authorizationStatus(record, providerId, requiredUse, clock = () 
   if (!record) return { ok: false, reason: 'missing authorization evidence' };
   if (record.providerId !== providerId) return { ok: false, reason: `authorization provider mismatch: expected ${providerId}` };
   if (record.status !== 'active') return { ok: false, reason: `authorization is ${record.status}; expected active` };
+  if (record.basis === 'personal_use_attestation') {
+    if (requiredUse !== 'crawl') return { ok: false, reason: 'personal-use attestation does not cover publish' };
+    if (!Array.isArray(record.uses) || record.uses.length !== 1 || record.uses[0] !== 'crawl') {
+      return { ok: false, reason: 'personal-use attestation must cover crawl only' };
+    }
+    if (typeof record.evidenceRef !== 'string' || !record.evidenceRef.startsWith('operator-attestation:')) {
+      return { ok: false, reason: 'personal-use attestation evidenceRef must identify an operator attestation' };
+    }
+  }
   if (!record.uses?.includes(requiredUse)) return { ok: false, reason: `authorization does not cover ${requiredUse}` };
   if (!sameScope(record.scope, options.expectedScope)) return { ok: false, reason: 'authorization scope does not match configured crawl scope' };
   if (options.expectedContractVersion && record.contractVersion !== options.expectedContractVersion) return { ok: false, reason: `authorization data contract version mismatch: expected ${options.expectedContractVersion}` };

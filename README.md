@@ -16,11 +16,14 @@ The implementation has a source-neutral HTTPS transport, but no provider-specifi
 ```sh
 npm run start:local   # deterministic fixture/local mode; exits after the fixture chain
 npm run start:worker  # validates authorization/configuration; exits until a production adapter is wired
+npm run start:worker:personal  # loads the private, self-attested M1 records; set USER_AGENT and RAW_STORE_ROOT first
 npm run start:api     # read-only fixture API on 127.0.0.1:PORT (default 3000)
 npm test
 ```
 
 `local` is the only mode enabled by default. `worker` validates its safety gates but does not pretend to crawl without a configured production source adapter. API reads use local projections only and never start or claim crawl work.
+
+Milestone 1 includes a private, single-operator configuration in `config/personal-use.*.json`. Set a transparent contact-bearing `USER_AGENT` and an absolute `RAW_STORE_ROOT`, then run `npm run start:worker:personal` to validate it. This record is an operator attestation, not evidence of a provider grant; it never enables public publication or a live crawl. See [`AUTHORIZATION_CONTRACT.md`](AUTHORIZATION_CONTRACT.md) for its retained fields, attribution, and source-link convention.
 
 The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure, `2` is an invalid mode, `3` is rejected worker configuration, and `4` means configuration is valid but no production source adapter is installed.
 
