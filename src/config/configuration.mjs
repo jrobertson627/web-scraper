@@ -56,6 +56,11 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   const requiresUpstream = config.mode === 'worker' || (config.mode === 'api' && config.publication === 'public');
   if (requiresUpstream) {
     const use = config.mode === 'worker' ? 'crawl' : 'publish';
+    // Check authorization presence before the data contract so a missing
+    // authorization is always reported first, even though it's also
+    // rejected by the unconditional requireAuthorization call below. This
+    // isn't dead code: without it, a missing authorization combined with an
+    // invalid data contract would surface the data-contract error instead.
     if (!config.authorization) requireAuthorization(config.authorization, config.providerId, use, clock);
     const contract = requireDataContract(config.dataContract, config.providerId, clock, config.dataContract?.version);
     if (use === 'publish' && contract.redistribution !== 'public') throw configError('dataContract.redistribution', 'must permit public redistribution', 'Expected public', 'redistribution: public');
