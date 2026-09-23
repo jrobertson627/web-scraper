@@ -16,7 +16,10 @@ export function buildFixtureReconciliationReport(persistence) {
   const eligibleRecords = [];
   for (const page of indexPages) {
     for (const [rowIndex, school] of (page.data.schools ?? []).entries()) {
-      const observation = observations.find(([, value]) => value.kind === 'school' && value.parentKey === page.jobKey && value.rowIndex === rowIndex)?.[1];
+      // persistence.observations is already keyed `${kind}:${parentKey}:${rowIndex}`
+      // (see InMemoryPersistence#stagePage / #queryModels) -- an O(1) lookup here
+      // instead of an O(n) scan of the flattened observations array per row.
+      const observation = persistence.observations.get(`school:${page.jobKey}:${rowIndex}`);
       const expected = school.to === 2026;
       if (observation?.eligible !== expected) eligibleRecords.push({ key: `${page.jobKey}:${rowIndex}`, expected, observed: observation?.eligible ?? null });
     }
