@@ -192,6 +192,11 @@ export class Fetcher {
   }
 
   async #waitForPolicy(job, lease, host = job.sourceUrl.host) {
+    // Cap each sleep chunk to a fraction of claimTimeoutMs (not a fixed 10s):
+    // at claimTimeoutMs's configured minimum, a full 10s chunk left zero
+    // margin between renewal and expiry, so a claim could read as expired
+    // under real (non-mocked) clock jitter.
+    const maxChunkMs = Math.max(50, Math.min(10_000, Math.floor((this.persistence.claimTimeoutMs ?? 30_000) / 3)));
     for (;;) {
       const now = this.clock();
       const schedule = await this.#getSchedule(host, now);
@@ -204,7 +209,7 @@ export class Fetcher {
       if (delay === 0) return;
       await this.persistence.renewClaim(job.key, lease, now);
       const before = this.clock().getTime();
-      await this.sleep(Math.min(delay, 10_000));
+      await this.sleep(Math.min(delay, maxChunkMs));
       const after = this.clock().getTime();
       if (after <= before) throw new Error('throttle sleep did not advance the injected clock');
       await this.persistence.renewClaim(job.key, lease, this.clock());
