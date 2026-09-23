@@ -91,11 +91,19 @@ Only Fetcher owns upstream transport. Discovery and Parsers transform snapshots;
 | Persistence | Leased page, provenance, staged observations/jobs | Atomic page transition, repair inventory, stable read projections | Duplicate URL, two-sided game, stale lease, conflicting reparse | Owns SQL/raw adapters and transaction mapping; not provider selectors. |
 | API/UI | Read-only query port and publication gate | School/season/game/health views | Worker-stopped local reads, denied mutation/publication | Owns presentation only; never claims jobs or fetches. |
 
-## PostgreSQL migration smoke — deferred execution
+## PostgreSQL migration smoke — verified
 
 `npm run smoke:migrations` is an executable check for a **disposable** PostgreSQL database with `psql` installed. It applies every ordered migration twice, then verifies `schema_migrations` exactly matches the files. It refuses to run unless `PG_SMOKE_CONFIRM=disposable` and `PGHOST`, `PGDATABASE`, and `PGUSER` are set. Connection settings are not printed. It creates schema objects and must not target a database containing user data.
 
-No PostgreSQL instance is currently available, so live migration smoke is **not verified**. When the planned instance exists, create an empty disposable database, set the `PG*` connection variables and confirmation flag, run the command, and record its output in the integration handoff. The static migration contract tests already run under `npm run check`; they are not a substitute for the live test.
+On September 23, 2026, the smoke ran against an isolated disposable PostgreSQL 14 cluster. No connection values or credentials were recorded. Output:
+
+```text
+migration pass 1 completed (7 files)
+migration pass 2 completed (7 files)
+migration smoke passed: 7 versions, repeat-safe
+```
+
+`npm run test:postgres` subsequently passed against the same disposable cluster with `PG_TEST_CONFIRM=disposable`. It exercises exclusive claims, generation fencing, active-request cancellation, malformed row rejection by database constraints, atomic rollback, idempotent and conflicting page writes, basketball domain table mappings, two-sided canonical games, read projections, and a child process killed after parse recording but before page commit. The replacement process recovered the expired claim, finished all six fixture games, and left the already parsed school index at one attempt. The fixture source made no external upstream request. The PostgreSQL driver is pinned in `package-lock.json`; `npm audit --omit=dev` reported zero vulnerabilities when added.
 
 ## Implementation handoff checklist
 
@@ -104,6 +112,6 @@ No PostgreSQL instance is currently available, so live migration smoke is **not 
 - [x] Reconciliation names exact unresolved or quarantined records.
 - [x] Public boundary imports and API read isolation are tested.
 - [x] Six package boundaries have distinct inputs, outputs, fixture ownership, and exclusions.
-- [ ] Run migration smoke on the future disposable PostgreSQL instance.
+- [x] Run migration smoke on a disposable PostgreSQL instance.
 - [ ] Install a licensed/authorized provider adapter and agreed field contract before any real crawl.
-- [ ] Implement durable PostgreSQL repositories and validate process-level worker restart against them.
+- [x] Implement durable PostgreSQL repositories and validate process-level worker restart against them.

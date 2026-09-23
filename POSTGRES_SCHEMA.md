@@ -1,6 +1,6 @@
 # PostgreSQL schema and migration contract
 
-Migrations are ordered `001_foundation` through `006_http_cache_metadata` and record their versions in `schema_migrations`. Every create, alter, and index operation is repeat-safe. The schema is provider-scoped for canonical jobs, games, linked identities, observations, authorization, and publication policy.
+Migrations are ordered `001_foundation` through `007_postgres_repositories` and record their versions in `schema_migrations`. Every create, alter, and index operation is repeat-safe. The schema is provider-scoped for canonical jobs, games, linked identities, observations, authorization, and publication policy.
 
 `source_fetches.cache_control` retains the upstream cache directive. `cache_hit` distinguishes a fresh-cache reuse from a network 200; a cache hit must also set `reused_body`. A 304 records a new fetch referencing the existing verified immutable object.
 
@@ -9,3 +9,5 @@ The schema preserves the ingestion lifecycle: claims and lease generations are f
 Normalized entities require provenance. School-season and unavailable-coverage rows receive an explicit empty provenance object when upgrading older data, then enforce non-null provenance for new writes. Parser status, job state, publication redistribution, checksum format, and request release/outcome relationships are constrained at the database boundary.
 
 Page effects should be written in one transaction with the final job transition. Read consumers use stable projections rather than raw PostgreSQL rows; migration tests validate the schema contract without requiring a live database in the fixture environment.
+
+`007_postgres_repositories` adds a monotonic `claim_generation` counter separate from the active lease columns, because the active lease is cleared on retry and terminal transitions. It also retains every observation revision and prevents multiple active requests for one job. The PostgreSQL integration suite runs against a disposable real database with `PG_TEST_CONFIRM=disposable`.

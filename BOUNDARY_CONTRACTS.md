@@ -8,7 +8,7 @@ The application has six internal boundaries. Consumers import their narrow entry
 | Discovery | `web-scraper-foundation/discovery` | `discover` | contracts |
 | Parsers | `web-scraper-foundation/parsers` | `get` | contracts |
 | Domain normalization | `web-scraper-foundation/domain` | `normalize` | contracts |
-| Persistence | `web-scraper-foundation/persistence` | claim, transition, parse/page commit, recovery | Node runtime, contracts |
+| Persistence | `web-scraper-foundation/persistence` | claim, transition, parse/page commit, recovery | Node runtime, contracts, pinned PostgreSQL driver |
 | API/UI | `web-scraper-foundation/api` | stable school, season, game, and health reads | Node runtime, configuration gate |
 
 Shared immutable constructors live in `web-scraper-foundation/contracts`. They define page types, jobs, snapshots, fetch/discovery/parse/normalization results, provenance, reconciliation issues, and query models. The composition root is the only module that assembles implementations and fixture adapters.

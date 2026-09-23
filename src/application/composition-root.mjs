@@ -53,7 +53,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
   const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
-  persistence.addJob(rootJob);
+  const ready = Promise.resolve(persistence.addJob(rootJob));
   const boundaryPorts = {
     fetcher: assertBoundaryPort('fetcher', fetcher),
     discovery: assertBoundaryPort('discovery', discovery),
@@ -73,6 +73,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   });
 
   async function runWorkerOnce(workerId = 'fixture-worker') {
+    await ready;
     const result = await orchestrator.runOnce(workerId);
     return { ...result, transportCalls: transport.calls.length };
   }
@@ -121,6 +122,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     transport,
     rawStore,
     persistence,
+    ready,
     orchestrator,
     runWorkerOnce,
     previewDryRun,

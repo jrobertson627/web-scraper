@@ -4,11 +4,11 @@ import { contractFingerprint, dataContractStatus } from '../config/data-contract
 
 export function createQueryService(persistence) {
   return Object.freeze({
-    listSchools: () => persistence.queryModels().schools,
-    listSeasons: () => persistence.queryModels().seasons,
-    listGames: () => persistence.queryModels().games,
-    getGame: (key) => persistence.queryModels().games.find((game) => game.gameKey === key) ?? null,
-    health: () => persistence.queryModels().health,
+    listSchools: async () => (await persistence.queryModels()).schools,
+    listSeasons: async () => (await persistence.queryModels()).seasons,
+    listGames: async () => (await persistence.queryModels()).games,
+    getGame: async (key) => (await persistence.queryModels()).games.find((game) => game.gameKey === key) ?? null,
+    health: async () => (await persistence.queryModels()).health,
   });
 }
 
@@ -18,7 +18,8 @@ function sendJson(response, status, body) {
 }
 
 export function createApiServer({ queries, config, clock = () => new Date() }) {
-  return createServer((request, response) => {
+  return createServer(async (request, response) => {
+    try {
     if (request.method !== 'GET') {
       sendJson(response, 405, { error: 'read-only API accepts GET only' });
       return;
@@ -42,7 +43,7 @@ export function createApiServer({ queries, config, clock = () => new Date() }) {
         sendJson(response, 400, { error: 'invalid game key' });
         return;
       }
-      const game = queries.getGame(key);
+      const game = await queries.getGame(key);
       sendJson(response, game ? 200 : 404, game ?? { error: 'not found' });
       return;
     }
@@ -52,6 +53,10 @@ export function createApiServer({ queries, config, clock = () => new Date() }) {
       sendJson(response, 404, { error: 'not found' });
       return;
     }
-    sendJson(response, 200, query());
+    sendJson(response, 200, await query());
+    } catch {
+      if (!response.headersSent) sendJson(response, 500, { error: 'read query failed' });
+      else response.destroy();
+    }
   });
 }
