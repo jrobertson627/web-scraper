@@ -206,8 +206,11 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     const raw = createRawStore('filesystem', join(localRoot, 'raw-repair'));
     const body = raw.put(Buffer.from('durable body'));
     const orphan = raw.put(Buffer.from('orphan body'));
-    const fetchId = await reviewed.recordFetch({ jobKey: job.key, status: 200, ...body }, retry.lease, raw);
+    const fetchId = await reviewed.recordFetch({ jobKey: job.key, status: 200, ...body,
+      cacheControl: 'max-age=120', cacheHit: true, reusedBody: true }, retry.lease, raw);
     assert.equal((await reviewed.lastSuccessfulFetch(job.key)).id, fetchId);
+    assert.equal((await reviewed.lastSuccessfulFetch(job.key)).cacheControl, 'max-age=120');
+    assert.equal((await reviewed.lastSuccessfulFetch(job.key)).cacheHit, true);
     const initial = await reviewed.repairRawObjects({ rawStore: raw });
     assert.equal(initial.healthy.length, 1);
     assert.equal(initial.orphans.some((entry) => entry.checksum === orphan.checksum), true);
@@ -215,6 +218,22 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     const damaged = await reviewed.repairRawObjects({ rawStore: raw });
     assert.equal(damaged.pending.length, 1);
     assert.equal(damaged.pending[0].sourceFetchIds[0], fetchId);
+  })();
+
+  await reset();
+  await (async () => {
+    const slow = new PostgresPersistence({ pool, claimTimeoutMs: 250 });
+    const raw = createRawStore('filesystem', join(localRoot, 'raw-slow'));
+    const transport = { calls: [], async request({ url }) {
+      this.calls.push(url);
+      await delay(700);
+      return { status: 200, headers: {}, body: Buffer.from('<script id="fixture-document" type="application/json">{"schools":[]}</script>') };
+    } };
+    const app = createFixtureApplication({ sharedState: { persistence: slow, rawStore: raw, transport } });
+    const result = await app.runWorkerOnce();
+    assert.equal(result.jobs.length, 1);
+    assert.equal(result.jobs[0].state, 'parsed');
+    assert.equal(transport.calls.length, 1);
   })();
 
   await reset();
