@@ -10,9 +10,15 @@ export const EXIT_CODES = Object.freeze({
   sourceAdapterMissing: 4,
 });
 
-function safeMessage(error) {
+// Best-effort scrub for stderr/console output. Matches "key=value" (env-style)
+// and "key": "value" / key: value (JSON-style) for a superset of secret-shaped
+// field names, so a future error path that interpolates raw config still gets
+// redacted instead of relying on every caller never doing that.
+const SENSITIVE_KEY_VALUE = /"?\b(password|secret|token|credential|api[_-]?key|bearer)\b"?\s*[:=]\s*("(?:[^"\\]|\\.)*"|\S+)/gi;
+
+export function safeMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\b(password|secret|token|credential)=\S+/gi, '$1=[redacted]');
+  return message.replace(SENSITIVE_KEY_VALUE, (_match, key) => `${key}=[redacted]`);
 }
 
 function parseAuthorization(value) {
