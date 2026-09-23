@@ -5,6 +5,8 @@ export const REQUEST_POLICY_DEFAULTS = Object.freeze({
   retryMaxMs: 60_000,
   maxRedirects: 4,
   cacheMaxAgeMs: 0,
+  maxResponseBytes: 16 * 1024 * 1024,
+  maxRetryAfterMs: 86_400_000,
 });
 
 function invalid(field, expected, example) {
@@ -21,9 +23,11 @@ export function validateRequestPolicy(input) {
   for (const [field, min, max] of [
     ['requestTimeoutMs', 1_000, 120_000], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
     ['retryMaxMs', 100, 600_000], ['maxRedirects', 0, 10], ['cacheMaxAgeMs', 0, 86_400_000],
+    ['maxResponseBytes', 1_024, 64 * 1024 * 1024], ['maxRetryAfterMs', 6_000, 7 * 86_400_000],
   ]) {
     if (!Number.isSafeInteger(policy[field]) || policy[field] < min || policy[field] > max) invalid(`policy.${field}`, `an integer from ${min} through ${max}`, `${field}: ${REQUEST_POLICY_DEFAULTS[field]}`);
   }
   if (policy.retryMaxMs < policy.retryBaseMs) invalid('policy.retryMaxMs', 'at least policy.retryBaseMs', 'retryMaxMs: 60000');
+  if (policy.maxRetryAfterMs < policy.minIntervalMs) invalid('policy.maxRetryAfterMs', 'at least policy.minIntervalMs', 'maxRetryAfterMs: 86400000');
   return Object.freeze(policy);
 }

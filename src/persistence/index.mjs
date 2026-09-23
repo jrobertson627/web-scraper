@@ -331,6 +331,9 @@ export class InMemoryPersistence {
       fetchedAt: metadata.fetchedAt ?? this.clock().toISOString(),
       etag: metadata.etag ?? null,
       lastModified: metadata.lastModified ?? null,
+      cacheControl: metadata.cacheControl ?? null,
+      cacheHit: metadata.cacheHit ?? false,
+      reusedBody: metadata.reusedBody ?? false,
       recordedAt: this.clock().toISOString(),
     });
     this.sourceFetches.push(record);

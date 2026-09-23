@@ -37,15 +37,15 @@ export class IngestionOrchestrator {
           nextAllowedAt: result.nextAllowedAt,
           lastError: result.reason,
         });
-        return { kind: 'retry_wait', jobKey: job.key, pageType: job.pageType, reason: result.reason, nextAllowedAt: result.nextAllowedAt };
+        return { kind: 'retry_wait', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason, nextAllowedAt: result.nextAllowedAt };
       }
       if (result.kind === 'operator_stop') {
         this.persistence.transitionJob(job.key, 'operator_stop', job.lease, { lastError: result.reason });
-        return { kind: 'operator_stop', jobKey: job.key, pageType: job.pageType, reason: result.reason };
+        return { kind: 'operator_stop', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       if (result.kind === 'permanently_failed') {
         this.persistence.transitionJob(job.key, 'permanently_failed', job.lease, { lastError: result.reason });
-        return { kind: 'permanently_failed', jobKey: job.key, pageType: job.pageType, reason: result.reason };
+        return { kind: 'permanently_failed', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       phase = 'snapshot';
       const stored = this.rawStore.get(result.checksum);
