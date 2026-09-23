@@ -53,6 +53,22 @@ test('active request ownership blocks recovery until completion or confirmed can
   assert.throws(() => persistence.commitPage({ jobKey: first.key, identity: first.key, data: {} }, {}, first.lease), /stale or missing lease/);
 });
 
+test('commitPage rejects a page commit while its host request is still active', () => {
+  const time = mutableClock();
+  const persistence = new InMemoryPersistence(time.clock);
+  persistence.addJob(job('active'));
+  const claimed = persistence.claimNextJob(time.clock(), 'worker');
+  persistence.acquireRequest(claimed.key, claimed.lease, claimed.sourceUrl.host);
+
+  assert.throws(
+    () => persistence.commitPage({ jobKey: claimed.key, identity: claimed.key, data: {} }, {}, claimed.lease),
+    /host request is still active/,
+  );
+
+  persistence.releaseRequest(claimed.key, claimed.lease);
+  assert.equal(persistence.commitPage({ jobKey: claimed.key, identity: claimed.key, data: {} }, {}, claimed.lease), claimed.key);
+});
+
 test('operator stops require an authorized reviewed disposition and never auto-retry', () => {
   const time = mutableClock();
   const persistence = new InMemoryPersistence(time.clock, { authorizeOperator: (operatorId) => operatorId === 'approved-operator' });
