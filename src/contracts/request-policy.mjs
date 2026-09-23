@@ -19,6 +19,10 @@ export function validateRequestPolicy(input) {
   if (!Number.isFinite(policy.minIntervalMs) || policy.minIntervalMs < 6_000) invalid('policy.minIntervalMs', 'at least 6000 milliseconds', 'minIntervalMs: 6000');
   if (!Number.isInteger(policy.maxRequestsPerMinute) || policy.maxRequestsPerMinute < 1 || policy.maxRequestsPerMinute > 10) invalid('policy.maxRequestsPerMinute', 'an integer from 1 through 10', 'maxRequestsPerMinute: 10');
   if (policy.hostConcurrency !== 1) invalid('policy.hostConcurrency', 'one request per host', 'hostConcurrency: 1');
+  // Requires a leading application name followed by an operator contact
+  // email in parens, e.g. "scraper (+ops@example.com)" or
+  // "web-scraper-fixture (+local@example.com)". The parenthesized group
+  // must contain an @ with a dotted domain and no nested parens.
   if (typeof policy.userAgent !== 'string' || !/\S+.*\([^()\s]+@[^()\s]+\.[^()\s]+\)/.test(policy.userAgent)) invalid('policy.userAgent', 'an application name and operator contact address', 'userAgent: scraper (+ops@example.com)');
   for (const [field, min, max] of [
     ['requestTimeoutMs', 1_000, 120_000], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
