@@ -1,6 +1,11 @@
+import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { createFixtureApplication } from './composition-root.mjs';
+import { ApplicationLifecycle } from './lifecycle.mjs';
 import { validateConfiguration } from '../config/configuration.mjs';
+import { persistenceSettings } from '../config/persistence.mjs';
+import { openPostgresPersistence } from '../persistence/postgres.mjs';
+import { createQueryService, createApiServer } from '../api/public.mjs';
 
 export const EXIT_CODES = Object.freeze({
   success: 0,
@@ -45,15 +50,53 @@ function configuredPort(env) {
   return port;
 }
 
-async function listen(server, port) {
+// Loopback by default so a local run is never exposed; hosted platforms such
+// as Render need HOST=0.0.0.0 to route traffic to the process.
+function configuredHost(env) {
+  const host = env.HOST || '127.0.0.1';
+  if (host !== 'localhost' && !isIP(host)) {
+    throw new Error(`invalid HOST: ${host}. Expected an IP address or localhost. Example: HOST=0.0.0.0`);
+  }
+  return host;
+}
+
+function displayUrl(host, port) {
+  return `http://${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+}
+
+async function listen(server, port, host) {
   await new Promise((resolve, reject) => {
     const onError = (error) => reject(error);
     server.once('error', onError);
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       server.off('error', onError);
       resolve();
     });
   });
+}
+
+// Listens, wires SIGINT/SIGTERM to an idempotent close, and marks the
+// lifecycle running. onClose releases anything the server was reading from.
+async function serveApi({ lifecycle, server, port, host, stdout, onClose = async () => {} }) {
+  let closing;
+  const close = () => {
+    if (closing) return closing;
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    closing = new Promise((resolve, reject) => server.close((error) => {
+      lifecycle.stop();
+      if (error) reject(error);
+      else resolve();
+    })).finally(onClose);
+    return closing;
+  };
+  const onSignal = () => { void close(); };
+  await listen(server, port, host);
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  lifecycle.running();
+  stdout(`API ready on ${displayUrl(host, port)}`);
+  return close;
 }
 
 export async function runCli({
@@ -61,6 +104,7 @@ export async function runCli({
   env = process.env,
   stdout = (message) => console.log(message),
   stderr = (message) => console.error(message),
+  openPostgres = openPostgresPersistence,
 } = {}) {
   if (mode === 'local') {
     const app = createFixtureApplication();
@@ -78,30 +122,40 @@ export async function runCli({
   }
 
   if (mode === 'api') {
+    let settings;
+    let port;
+    let host;
+    try {
+      settings = persistenceSettings(env);
+      port = configuredPort(env);
+      host = configuredHost(env);
+    } catch (error) {
+      stderr(`api configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+
+    if (settings.kind === 'postgres') {
+      // Read-only against the durable store: no fixture crawl is written into it.
+      const lifecycle = new ApplicationLifecycle('api');
+      const persistence = await openPostgres(settings);
+      try {
+        lifecycle.ready();
+        const server = createApiServer({ queries: createQueryService(persistence), config: { mode: 'api', publication: 'private' } });
+        const close = await serveApi({ lifecycle, server, port, host, stdout, onClose: () => persistence.close() });
+        return { exitCode: EXIT_CODES.success, lifecycle, persistence, server, close };
+      } catch (error) {
+        lifecycle.stop();
+        await persistence.close().catch(() => {});
+        throw error;
+      }
+    }
+
     const app = createFixtureApplication();
     app.lifecycle.ready();
     try {
       await app.runWorkerOnce();
-      const port = configuredPort(env);
       const server = app.createApiServer();
-      let closing;
-      const close = () => {
-        if (closing) return closing;
-        process.off('SIGINT', onSignal);
-        process.off('SIGTERM', onSignal);
-        closing = new Promise((resolve, reject) => server.close((error) => {
-          app.lifecycle.stop();
-          if (error) reject(error);
-          else resolve();
-        }));
-        return closing;
-      };
-      const onSignal = () => { void close(); };
-      await listen(server, port);
-      process.once('SIGINT', onSignal);
-      process.once('SIGTERM', onSignal);
-      app.lifecycle.running();
-      stdout(`API ready on http://127.0.0.1:${port}`);
+      const close = await serveApi({ lifecycle: app.lifecycle, server, port, host, stdout });
       return { exitCode: EXIT_CODES.success, app, server, close };
     } catch (error) {
       app.lifecycle.stop();
@@ -111,7 +165,9 @@ export async function runCli({
 
   if (mode === 'worker') {
     let config;
+    let settings;
     try {
+      settings = persistenceSettings(env);
       config = validateConfiguration({
         mode: 'worker', providerId: env.PROVIDER_ID ?? 'provider', allowedHosts: [env.PROVIDER_HOST ?? 'provider.example'],
         rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
@@ -124,7 +180,18 @@ export async function runCli({
       stderr(`worker configuration rejected: ${safeMessage(error)}`);
       return { exitCode: EXIT_CODES.configurationRejected };
     }
-    stderr(`worker configuration accepted for ${config.providerId}, but no production source adapter is configured; no crawl started`);
+    if (settings.kind === 'postgres') {
+      // Verify the durable store up front so a deploy surfaces an unreachable
+      // or unmigrated database now rather than once a source adapter exists.
+      try {
+        const persistence = await openPostgres({ ...settings, claimTimeoutMs: config.claimTimeoutMs });
+        await persistence.close();
+      } catch (error) {
+        stderr(`worker persistence unavailable: ${safeMessage(error)}`);
+        return { exitCode: EXIT_CODES.runtimeFailure };
+      }
+    }
+    stderr(`worker configuration accepted for ${config.providerId} (${settings.kind} persistence), but no production source adapter is configured; no crawl started`);
     return { exitCode: EXIT_CODES.sourceAdapterMissing };
   }
 

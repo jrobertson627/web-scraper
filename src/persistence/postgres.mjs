@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { assertTransition, createLeaseToken, createOperatorDisposition } from '../contracts/jobs.mjs';
 import { createJob, createQueryModels } from '../contracts/boundaries.mjs';
@@ -411,3 +414,36 @@ export class PostgresPersistence {
 }
 
 export function createPostgresPersistence(options) { return new PostgresPersistence(options); }
+
+const MIGRATIONS_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations');
+
+export function expectedMigrationVersions(directory = MIGRATIONS_DIRECTORY) {
+  return readdirSync(directory).filter((name) => /^\d{3}_.+\.sql$/.test(name)).sort().map((name) => name.slice(0, -4));
+}
+
+// Fail at startup, not on the first query, when the database is unreachable or
+// has not had every ordered migration applied. Connection values are never
+// included in the error.
+export async function assertSchemaCurrent(pool, expected = expectedMigrationVersions()) {
+  let rows;
+  try {
+    ({ rows } = await pool.query('SELECT version FROM schema_migrations ORDER BY version'));
+  } catch (error) {
+    if (error.code === '42P01') throw new Error('database schema is missing: apply migrations/ before starting (schema_migrations does not exist)');
+    throw new Error(`database is unavailable (${error.code ?? 'connection failed'}); check PG* settings, PGSSLMODE, and network access`);
+  }
+  const applied = new Set(rows.map((row) => row.version));
+  const missing = expected.filter((version) => !applied.has(version));
+  if (missing.length) throw new Error(`database schema is behind: apply migrations/ before starting (missing ${missing.join(', ')})`);
+}
+
+export async function openPostgresPersistence({ pool: poolConfig, claimTimeoutMs } = {}) {
+  const persistence = new PostgresPersistence({ pool: new Pool(poolConfig), claimTimeoutMs });
+  try {
+    await assertSchemaCurrent(persistence.pool);
+  } catch (error) {
+    await persistence.close().catch(() => {});
+    throw error;
+  }
+  return persistence;
+}
