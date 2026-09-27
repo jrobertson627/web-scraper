@@ -25,7 +25,9 @@ import {
 
 // Tests and local mode only: fake time, fixture pages, in-memory persistence by
 // default. A real crawl goes through createWorkerApplication.
-export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState } = {}) {
+export function createFixtureApplication({
+  sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState, events = NO_CRAWL_EVENTS,
+} = {}) {
   if (sharedState?.transport instanceof HttpTransport) {
     throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
   }
