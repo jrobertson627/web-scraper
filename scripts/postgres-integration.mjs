@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
@@ -26,6 +26,7 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 const { Pool } = pg;
 const pool = new Pool({ max: 8 });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-test-'));
+after(async () => { await pool.end(); });
 
 async function reset() {
   const tables = await pool.query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'schema_migrations'`);
@@ -62,8 +63,7 @@ function childRun(mode, rawRoot) {
   return { child, message, exit };
 }
 
-test('real PostgreSQL persistence and process restart', async (t) => {
-  t.after(async () => { await pool.end(); });
+test('real PostgreSQL persistence and process restart', async () => {
   await reset();
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
   const job = rootJob();
@@ -400,4 +400,56 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     await worker.seedRootJob();
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM crawl_jobs')).rows[0].n, 1);
   })();
+});
+
+// Records every statement a persistence call sends, so the exact SQL can be
+// EXPLAINed afterwards.
+function recordingPool(target) {
+  const statements = [];
+  const wrap = (client) => ({ query: (text, values) => { statements.push({ text, values }); return client.query(text, values); },
+    release: () => client.release() });
+  return { statements, query: (text, values) => { statements.push({ text, values }); return target.query(text, values); },
+    connect: async () => wrap(await target.connect()), end: async () => {} };
+}
+
+async function explain(statements, label) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL enable_seqscan = off');
+    for (const { text, values } of statements) {
+      const plan = (await client.query(`EXPLAIN ${text}`, values)).rows.map((row) => row['QUERY PLAN']).join('\n');
+      assert.doesNotMatch(plan, /Seq Scan on crawl_jobs/, `${label}: ${text}\n${plan}`);
+      assert.match(plan, /Index (Only )?Scan|Bitmap Index Scan/, `${label}: ${text}\n${plan}`);
+    }
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+}
+
+test('lease checks, renewals, transitions and fetch records use an index on crawl_jobs', async () => {
+  await reset();
+  const setup = new PostgresPersistence({ pool, claimTimeoutMs: 30_000 });
+  for (let index = 0; index < 50; index += 1) await setup.addJob(rootJob(`/filler/${index}`, 'season'));
+  const job = rootJob();
+  await setup.addJob(job);
+  await pool.query('ANALYZE crawl_jobs');
+  let claimed;
+  while ((claimed = await setup.claimNextJob(new Date(), 'explain-worker')).key !== job.key) { /* claim past the filler */ }
+  const recorder = recordingPool(pool);
+  const persistence = new PostgresPersistence({ pool: recorder, claimTimeoutMs: 30_000 });
+  const raw = createRawStore('filesystem', join(localRoot, 'raw-explain'));
+  const body = raw.put(Buffer.from('explain'));
+  for (const [label, call] of [
+    ['lease check and recordFetch', () => persistence.recordFetch({ jobKey: job.key, status: 200, ...body }, claimed.lease, raw)],
+    ['renewClaim', () => persistence.renewClaim(job.key, claimed.lease)],
+    ['transitionJob', () => persistence.transitionJob(job.key, 'fetched', claimed.lease)],
+  ]) {
+    recorder.statements.length = 0;
+    await call();
+    const lookups = recorder.statements.filter(({ text }) => /crawl_jobs/.test(text) && /^\s*(SELECT|UPDATE)/.test(text));
+    assert.ok(lookups.length > 0, label);
+    await explain(lookups, label);
+  }
 });

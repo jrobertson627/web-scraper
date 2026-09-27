@@ -17,7 +17,21 @@ const FINAL_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_fa
 const FAILURE_STATES = new Set(['retry_wait', 'operator_stop', 'parse_failed', 'permanently_failed']);
 
 function iso(value) { return value == null ? null : new Date(value).toISOString(); }
-function keySql() { return "provider_id || ':' || canonical_path || ':' || page_type"; }
+// A job key is `${providerId}:${canonicalPath}:${pageType}`. Provider ids never
+// contain ':' (createJob rejects them) and page types are fixed words, so a key
+// splits back into the three columns of UNIQUE (provider_id, canonical_path,
+// page_type) and every lookup is served by that index. A malformed key splits
+// into NULLs, which match no row.
+export function jobKeyParts(key) {
+  const text = typeof key === 'string' ? key : '';
+  const first = text.indexOf(':');
+  const last = text.lastIndexOf(':');
+  if (first < 1 || last <= first + 1 || last === text.length - 1) return [null, null, null];
+  return [text.slice(0, first), text.slice(first + 1, last), text.slice(last + 1)];
+}
+function byKey(from, alias = '') {
+  return `${alias}provider_id = $${from} AND ${alias}canonical_path = $${from + 1} AND ${alias}page_type = $${from + 2}`;
+}
 function dbPath(canonicalPath) { return canonicalPathString(canonicalPath); }
 function canonicalFromRow(row) {
   const url = new URL(`https://${row.canonical_path}`);
@@ -113,7 +127,7 @@ export class PostgresPersistence {
     return this.transaction(async (client) => {
       let parentId = null;
       if (validated.parentKey) {
-        const parent = await client.query(`SELECT id FROM crawl_jobs WHERE ${keySql()} = $1`, [validated.parentKey]);
+        const parent = await client.query(`SELECT id FROM crawl_jobs WHERE ${byKey(1)}`, jobKeyParts(validated.parentKey));
         if (!parent.rowCount) throw new Error(`parent job is missing: ${validated.parentKey}`);
         parentId = parent.rows[0].id;
       }
@@ -123,7 +137,8 @@ export class PostgresPersistence {
         ON CONFLICT (provider_id, canonical_path, page_type) DO NOTHING
         RETURNING *`, [validated.sourceUrl.providerId, dbPath(validated.canonicalPath), validated.pageType,
         validated.sourceUrl.absoluteUrl, parentId, validated.schoolSourcePath ?? null, validated.parserVersion ?? '1']);
-      const row = inserted.rows[0] ?? (await client.query(`SELECT * FROM crawl_jobs WHERE ${keySql()} = $1`, [validated.key])).rows[0];
+      const row = inserted.rows[0] ?? (await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)}`,
+        [validated.sourceUrl.providerId, dbPath(validated.canonicalPath), validated.pageType])).rows[0];
       return mapJob(row);
     });
   }
@@ -138,7 +153,7 @@ export class PostgresPersistence {
 
   async getJob(key) {
     const result = await this.pool.query(`SELECT j.*, p.provider_id || ':' || p.canonical_path || ':' || p.page_type AS parent_key
-      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id WHERE j.provider_id || ':' || j.canonical_path || ':' || j.page_type = $1`, [key]);
+      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id WHERE ${byKey(1, 'j.')}`, jobKeyParts(key));
     if (!result.rowCount) return null;
     const events = await this.pool.query('SELECT * FROM job_state_events WHERE job_id = $1 ORDER BY id', [result.rows[0].id]);
     return mapJob(result.rows[0], events.rows);
@@ -167,10 +182,10 @@ export class PostgresPersistence {
   }
 
   async renewClaim(key, lease) {
-    const result = await this.pool.query(`UPDATE crawl_jobs SET claim_expires_at = clock_timestamp() + ($4::bigint * interval '1 millisecond'),
-      updated_at = clock_timestamp() WHERE ${keySql()} = $1 AND claim_owner = $2 AND lease_generation = $3
+    const result = await this.pool.query(`UPDATE crawl_jobs SET claim_expires_at = clock_timestamp() + ($6::bigint * interval '1 millisecond'),
+      updated_at = clock_timestamp() WHERE ${byKey(1)} AND claim_owner = $4 AND lease_generation = $5
       AND claim_expires_at > clock_timestamp() AND state IN ('fetching','fetched')`,
-    [key, lease?.workerId, lease?.generation, this.claimTimeoutMs]);
+    [...jobKeyParts(key), lease?.workerId, lease?.generation, this.claimTimeoutMs]);
     if (!result.rowCount) throw new Error(`stale or missing lease for job ${key}`);
   }
 
@@ -191,7 +206,7 @@ export class PostgresPersistence {
   }
 
   async leasedJob(client, key, lease) {
-    const result = await client.query(`SELECT * FROM crawl_jobs WHERE ${keySql()} = $1 FOR UPDATE`, [key]);
+    const result = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(key));
     const row = result.rows[0];
     if (!row || !lease || row.claim_owner !== lease.workerId || Number(row.lease_generation) !== lease.generation ||
       !row.claim_expires_at || new Date(row.claim_expires_at) <= new Date()) {
@@ -256,18 +271,18 @@ export class PostgresPersistence {
 
   async releaseRequest(key, lease) {
     const result = await this.pool.query(`UPDATE in_flight_requests SET released_at = clock_timestamp(), outcome = 'completed'
-      WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${keySql()} = $1 AND claim_owner = $3
-        AND lease_generation = $2)
-        AND lease_generation = $2 AND released_at IS NULL`, [key, lease?.generation, lease?.workerId]);
+      WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${byKey(3)} AND claim_owner = $2
+        AND lease_generation = $1)
+        AND lease_generation = $1 AND released_at IS NULL`, [lease?.generation, lease?.workerId, ...jobKeyParts(key)]);
     if (result.rowCount !== 1) throw new Error('request ownership mismatch');
   }
 
   async confirmRequestCancellation(key, lease, reason) {
     if (!reason) throw new Error('request cancellation confirmation requires a reason');
     const result = await this.pool.query(`UPDATE in_flight_requests SET released_at = clock_timestamp(), outcome = 'canceled',
-      cancellation_reason = $4 WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${keySql()} = $1
-      AND claim_owner = $3 AND lease_generation = $2)
-      AND lease_generation = $2 AND released_at IS NULL RETURNING *`, [key, lease?.generation, lease?.workerId, reason]);
+      cancellation_reason = $3 WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${byKey(4)}
+      AND claim_owner = $2 AND lease_generation = $1)
+      AND lease_generation = $1 AND released_at IS NULL RETURNING *`, [lease?.generation, lease?.workerId, reason, ...jobKeyParts(key)]);
     if (result.rowCount !== 1) throw new Error('request cancellation requires the current request ownership token');
     return result.rows[0];
   }
@@ -294,8 +309,8 @@ export class PostgresPersistence {
 
   async lastSuccessfulFetch(jobKey) {
     const result = await this.pool.query(`SELECT f.* FROM source_fetches f JOIN crawl_jobs j ON j.id = f.job_id
-      WHERE j.provider_id || ':' || j.canonical_path || ':' || j.page_type = $1 AND f.checksum IS NOT NULL
-      ORDER BY f.fetched_at DESC, f.id DESC LIMIT 1`, [jobKey]);
+      WHERE ${byKey(1, 'j.')} AND f.checksum IS NOT NULL
+      ORDER BY f.fetched_at DESC, f.id DESC LIMIT 1`, jobKeyParts(jobKey));
     const row = result.rows[0];
     return row ? { id: portId('fetch', row.id), jobKey, status: row.http_status, checksum: row.checksum,
       objectPath: row.raw_object_path, etag: row.etag, lastModified: row.last_modified,
@@ -337,7 +352,7 @@ export class PostgresPersistence {
       disposition.at ? new Date(disposition.at) : new Date());
     if (!this.authorizeOperator(validated.operatorId, validated)) throw new Error('operator is not authorized to review operator-stop work');
     return this.transaction(async (client) => {
-      const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${keySql()} = $1 FOR UPDATE`, [key]);
+      const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(key));
       const job = found.rows[0];
       if (!job || job.state !== 'operator_stop') throw new Error('operator disposition requires operator_stop');
       await client.query(`INSERT INTO operator_dispositions (job_id,disposition,operator_id,reason,recorded_at)
