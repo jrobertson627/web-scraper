@@ -106,12 +106,13 @@ test('retry and operator-stop states release claims and validate dispositions', 
 });
 
 test('expired fetched jobs return to retryable state', () => {
-  const now = new Date('2026-01-01T00:00:00.000Z');
+  let now = new Date('2026-01-01T00:00:00.000Z');
   const persistence = new InMemoryPersistence(() => now);
   persistence.addJob(makeJob());
   const job = persistence.claimNextJob(now, 'worker');
   persistence.transitionJob(job.key, 'fetched', job.lease);
   const later = new Date(now.getTime() + 60_000);
+  now = later;
   assert.equal(persistence.recoverExpiredClaims(later), 1);
   assert.equal(persistence.claimNextJob(later, 'worker-2').key, job.key);
 });

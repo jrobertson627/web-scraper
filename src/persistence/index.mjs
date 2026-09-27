@@ -278,9 +278,14 @@ export class InMemoryPersistence {
     return job ? cloneJob(job) : null;
   }
 
-  claimNextJob(now, workerId) {
+  // Like PostgreSQL's clock_timestamp(), this store's own clock is the only
+  // authority for claims, lease expiry and retry readiness. The caller's time
+  // argument is accepted for interface compatibility and ignored, so a skewed
+  // worker clock cannot extend or cut short a lease.
+  claimNextJob(_now, workerId) {
+    const now = this.clock();
     let current = this.#findClaimableJob(now);
-    if (!current && this.recoverExpiredClaims(now) > 0) current = this.#findClaimableJob(now);
+    if (!current && this.recoverExpiredClaims() > 0) current = this.#findClaimableJob(now);
     if (!current) return null;
     const previousState = current.state;
     const generation = (current.generation ?? 0) + 1;
@@ -301,13 +306,15 @@ export class InMemoryPersistence {
     return { ...cloneJob(current), lease };
   }
 
-  renewClaim(key, lease, now) {
+  renewClaim(key, lease) {
     const job = this.#requireLease(key, lease);
+    const now = this.clock();
     job.claim.expiresAt = new Date(now.getTime() + this.claimTimeoutMs).toISOString();
     job.updatedAt = now.toISOString();
   }
 
-  recoverExpiredClaims(now) {
+  recoverExpiredClaims() {
+    const now = this.clock();
     let recovered = 0;
     for (const job of this.jobs.values()) {
       if (!job.claim || new Date(job.claim.expiresAt) > now || this.inFlight.has(job.key)) continue;

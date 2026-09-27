@@ -196,23 +196,23 @@ export class PostgresPersistence {
         AND NOT EXISTS (SELECT 1 FROM in_flight_requests r WHERE r.job_id = j.id AND r.released_at IS NULL)
         FOR UPDATE OF j SKIP LOCKED`);
       for (const row of expired.rows) {
-        await client.query(`UPDATE crawl_jobs SET state = 'retry_wait', next_allowed_at = clock_timestamp(),
+        const updated = await client.query(`UPDATE crawl_jobs SET state = 'retry_wait', next_allowed_at = clock_timestamp(),
           last_error = 'claim expired before completion', claim_owner = NULL, claim_expires_at = NULL,
-          lease_generation = NULL, updated_at = clock_timestamp() WHERE id = $1`, [row.id]);
-        await this.recordEvent(client, row, row.state, 'retry_wait', { nextAllowedAt: new Date().toISOString(), lastError: 'claim expired before completion' });
+          lease_generation = NULL, updated_at = clock_timestamp() WHERE id = $1 RETURNING next_allowed_at`, [row.id]);
+        await this.recordEvent(client, row, row.state, 'retry_wait', { nextAllowedAt: iso(updated.rows[0].next_allowed_at), lastError: 'claim expired before completion' });
       }
       return expired.rowCount;
     });
   }
 
+  // The database clock is the only authority for lease validity (see "Time
+  // authority for leases" in JOB_LIFECYCLE.md), so the whole check runs in SQL.
   async leasedJob(client, key, lease) {
-    const result = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(key));
-    const row = result.rows[0];
-    if (!row || !lease || row.claim_owner !== lease.workerId || Number(row.lease_generation) !== lease.generation ||
-      !row.claim_expires_at || new Date(row.claim_expires_at) <= new Date()) {
-      throw new Error(`stale or missing lease for job ${key}`);
-    }
-    return row;
+    const result = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} AND claim_owner = $4
+      AND lease_generation = $5 AND claim_expires_at > clock_timestamp() FOR UPDATE`,
+    [...jobKeyParts(key), lease?.workerId ?? null, lease?.generation ?? null]);
+    if (!result.rowCount) throw new Error(`stale or missing lease for job ${key}`);
+    return result.rows[0];
   }
 
   async recordEvent(client, row, from, to, details) {

@@ -453,3 +453,33 @@ test('lease checks, renewals, transitions and fetch records use an index on craw
     await explain(lookups, label);
   }
 });
+
+// Shifts the process clock (new Date() and Date.now()) while the database
+// clock stays put. Dates built from explicit values are unaffected.
+async function withSkewedProcessClock(skewMs, action) {
+  const RealDate = globalThis.Date;
+  class SkewedDate extends RealDate {
+    constructor(...args) { if (args.length) super(...args); else super(RealDate.now() + skewMs); }
+    static now() { return RealDate.now() + skewMs; }
+  }
+  globalThis.Date = SkewedDate;
+  try { return await action(); } finally { globalThis.Date = RealDate; }
+}
+
+test('a process clock skewed from the database clock neither rejects a valid lease nor accepts an expired one', async () => {
+  for (const skewMs of [3_600_000, -3_600_000]) {
+    await reset();
+    const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 1500 });
+    const job = rootJob();
+    await persistence.addJob(job);
+    await withSkewedProcessClock(skewMs, async () => {
+      const claimed = await persistence.claimNextJob(new Date(), 'skewed-worker');
+      await persistence.renewClaim(job.key, claimed.lease, new Date());
+      await persistence.transitionJob(job.key, 'fetched', claimed.lease);
+      await delay(1700);
+      await assert.rejects(persistence.transitionJob(job.key, 'parsed', claimed.lease), /stale or missing lease/);
+      await assert.rejects(persistence.renewClaim(job.key, claimed.lease, new Date()), /stale or missing lease/);
+      assert.equal(await persistence.recoverExpiredClaims(new Date()), 1);
+    });
+  }
+});
