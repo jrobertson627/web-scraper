@@ -4,6 +4,7 @@ import { createSnapshot } from '../../src/contracts/boundaries.mjs';
 import { assertParsedDocument } from '../../src/contracts/parsed-documents.mjs';
 import { createSourceUrl } from '../../src/contracts/source.mjs';
 import { present, unavailable } from '../../src/contracts/value-state.mjs';
+import { createProductionParserRegistry } from '../../src/parsers/index.mjs';
 
 // Test access to the real Sports Reference captures (#38). raw/ is gitignored
 // (see README.md), so every test that reads a capture must skip when it is
@@ -43,12 +44,9 @@ export function captureSnapshot(sitePath, { jobKey = `capture:${sitePath}`, scho
 }
 
 // ---------------------------------------------------------------------------
-// Link documents: a stand-in for the phase 2 parsers (#39-#42). Each returns a
-// document in the frozen shape (PARSED_DOCUMENTS.md) whose link-bearing fields
-// (school paths, history and season links, the game-log link, row box-score
-// links, opponents, locations) are read from the real HTML. Statistics are left
-// unavailable('not_parsed'). Discovery tests use these to exercise discovery
-// against real page structure before the real parsers exist.
+// Parsers that have not landed yet still use link-only documents. Once a
+// production parser is registered, captureLinkDocument runs that parser so the
+// real-page discovery tests exercise its actual output.
 // ---------------------------------------------------------------------------
 
 const NOT_PARSED = unavailable('not_parsed');
@@ -181,7 +179,13 @@ function boxScore(html) {
 }
 
 const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, season, game_log: gameLog, box_score: boxScore });
+const productionParsers = createProductionParserRegistry();
 
 export function captureLinkDocument(pageType, sitePath) {
+  if (productionParsers.has(pageType, '1')) {
+    const parsed = productionParsers.parse(pageType, '1', captureSnapshot(sitePath));
+    if (parsed.kind !== 'valid') throw new Error(`${pageType}@1 rejected ${sitePath}: ${parsed.error}`);
+    return parsed.document;
+  }
   return assertParsedDocument(pageType, READERS[pageType](readCapture(sitePath).toString('utf8'), sitePath));
 }

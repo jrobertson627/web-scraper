@@ -104,11 +104,11 @@ test('worker assembly selects the real adapter only behind the worker authorizat
   await assert.rejects(createWorkerApplication(realParts({ config: workerConfig({ mode: 'local', authorization: undefined, dataContract: undefined }) })), /configuration mode is local, expected worker/);
 });
 
-test('until the phase 2 parsers land, the default registry leaves every page type missing', async () => {
+test('the default registry reports only the phase 2 parsers that have not landed', async () => {
   const versions = Object.fromEntries(PAGE_TYPES.map((pageType) => [pageType, '1']));
-  assert.deepEqual(missingProductionParsers(createProductionParserRegistry(), versions), PAGE_TYPES.map((pageType) => `${pageType}@1`));
+  assert.deepEqual(missingProductionParsers(createProductionParserRegistry(), versions), ['season@1', 'game_log@1', 'box_score@1']);
   const { parsers: _unused, ...withoutParsers } = realParts();
-  await assert.rejects(createWorkerApplication(withoutParsers), /no production parser is registered for school_index@1/);
+  await assert.rejects(createWorkerApplication(withoutParsers), /no production parser is registered for season@1/);
   const partial = createProductionParserRegistry([new StubParser('school_index')]);
   assert.deepEqual(missingProductionParsers(partial, versions), ['school_history@1', 'season@1', 'game_log@1', 'box_score@1']);
 });
