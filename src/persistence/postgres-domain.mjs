@@ -49,11 +49,14 @@ async function schoolId(client, job) {
 
 const JSON_COLUMNS = new Set(['aggregate_fields', 'advanced', 'extra', 'value_states', 'provenance', 'line_score', 'ncaa_games']);
 
-// Keeps the last entry for each key, as sequential per-row upserts would.
+// Keeps the last entry for each key, as sequential per-row upserts would, and
+// returns the entries sorted by key. Every commit therefore locks shared rows
+// (players, a game's team sides) in the same order, so two workers committing
+// pages that touch the same rows cannot deadlock on them.
 function lastByKey(entries, key) {
   const byKey = new Map();
-  for (const entry of entries) { byKey.delete(key(entry)); byKey.set(key(entry), entry); }
-  return [...byKey.values()];
+  for (const entry of entries) byKey.set(String(key(entry)), entry);
+  return [...byKey].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([, entry]) => entry);
 }
 
 // Writes many rows in one INSERT ... VALUES (...),(...) ON CONFLICT statement.
@@ -74,14 +77,11 @@ async function upsertRows(client, { table, columns, rows, conflict, update = [],
 // Upserts every linked player named on a page in one statement and returns
 // their ids by canonical path. When a path repeats, the last name wins.
 async function upsertPlayers(client, job, players, provenance) {
-  const names = new Map();
-  for (const player of players) {
-    const path = linkedPath(job.provider_id, player.playerPath, job.source_url);
-    if (path) { names.delete(path); names.set(path, player.name); }
-  }
+  const linked = players.map((player) => ({ path: linkedPath(job.provider_id, player.playerPath, job.source_url), name: player.name }))
+    .filter((player) => player.path);
   const rows = await upsertRows(client, {
     table: 'players', columns: ['provider_id', 'canonical_source_path', 'display_name', 'provenance'],
-    rows: [...names].map(([path, name]) => [job.provider_id, path, name, JSON.stringify(provenance)]),
+    rows: lastByKey(linked, (player) => player.path).map(({ path, name }) => [job.provider_id, path, name, JSON.stringify(provenance)]),
     conflict: '(provider_id,canonical_source_path) WHERE canonical_source_path IS NOT NULL',
     update: ['display_name', 'provenance'], returning: 'id,canonical_source_path',
   });

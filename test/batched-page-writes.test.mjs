@@ -73,6 +73,19 @@ test('committing a box score issues a fixed number of statements whatever the pl
   assert.match(playerUpserts[0].text, /\$4::jsonb\),\(\$5,/);
 });
 
+test('shared rows are written in a stable sorted order whatever the page order', async () => {
+  const statements = await commitBoxScore(12);
+  const players = statements.find(({ text }) => /INSERT INTO players/.test(text));
+  const paths = chunk(players.values, 4).map((row) => row[1]);
+  assert.deepEqual(paths, [...paths].sort());
+  const sides = statements.find(({ text }) => /INSERT INTO game_teams/.test(text));
+  assert.deepEqual(chunk(sides.values, 7).map((row) => row[1]), ['away', 'home']);
+  const linked = statements.find(({ text }) => /INSERT INTO player_game_stats/.test(text) && /player_id IS NOT NULL/.test(text));
+  const keys = chunk(linked.values, linked.text.slice(linked.text.indexOf('(') + 1, linked.text.indexOf(')')).split(',').length)
+    .map((row) => `${row[0]}:${row[2]}`);
+  assert.deepEqual(keys, [...keys].sort());
+});
+
 test('committing a season issues a fixed number of statements whatever the roster size', async () => {
   const small = await commitSeason(3);
   const large = await commitSeason(30);

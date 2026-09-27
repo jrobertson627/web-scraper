@@ -538,6 +538,49 @@ test('a worker killed mid-request leaves no permanent host stall', async () => {
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL AND host = $1', [host])).rows[0].n, 1);
 });
 
+// Breaks the first page commit that writes players: either with a simulated
+// deadlock, or by terminating the committing backend for real (57P01).
+function failingCommitPool(target, mode) {
+  let failed = false;
+  return { query: (text, values) => target.query(text, values), end: async () => {},
+    connect: async () => {
+      const client = await target.connect();
+      return { release: (error) => client.release(error), query: async (text, values) => {
+        if (!failed && /INSERT INTO players/.test(text)) {
+          failed = true;
+          if (mode === 'deadlock') throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+          await client.query('SELECT pg_terminate_backend(pg_backend_pid())');
+        }
+        return client.query(text, values);
+      } };
+    } };
+}
+
+test('a deadlock or connection loss during commit leaves the job retryable, and it then completes', async () => {
+  for (const mode of ['deadlock', 'terminate']) {
+    await reset();
+    const target = new Pool({ max: 4 });
+    target.on('error', () => {}); // the terminated connection reports here once it is idle
+    try {
+      const persistence = new PostgresPersistence({ pool: failingCommitPool(target, mode), claimTimeoutMs: 10000 });
+      const raw = createRawStore('filesystem', join(localRoot, `raw-transient-${mode}`));
+      const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: { persistence, rawStore: raw } });
+      const result = await app.runWorkerOnce();
+      const retried = result.events.find((event) => event.kind === 'retry_wait' && event.phase === 'commit');
+      assert.ok(retried, `${mode}: the failed commit became a retry`);
+      assert.equal(result.events.some((event) => event.kind === 'parse_failed'), false, mode);
+      const job = await persistence.getJob(retried.jobKey);
+      assert.equal(job.failures.some((failure) => failure.state === 'parse_failed'), false, mode);
+      assert.equal(job.failureAttempts, 1, mode);
+      // The fixture clock is far behind the database clock, so the retry is already due.
+      const resumed = await app.runWorkerOnce();
+      assert.ok(resumed.processed >= 0);
+      const states = await pool.query('SELECT state, count(*)::int AS n FROM crawl_jobs GROUP BY state');
+      assert.deepEqual(states.rows, [{ state: 'parsed', n: states.rows.reduce((total, row) => total + row.n, 0) }], mode);
+    } finally { await target.end(); }
+  }
+});
+
 test('retry transitions spend only the budget they name', async () => {
   await reset();
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });

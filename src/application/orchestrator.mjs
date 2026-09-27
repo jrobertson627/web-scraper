@@ -3,6 +3,7 @@ import { createSourceUrl } from '../contracts/source.mjs';
 import { createSnapshot } from '../contracts/boundaries.mjs';
 import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
 import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
+import { isTransientStoreError } from '../contracts/jobs.mjs';
 
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
@@ -108,10 +109,14 @@ export class IngestionOrchestrator {
         parserVersion: parser.version(),
         parsedAt: this.clock().toISOString(),
       });
+      phase = 'commit';
       const committed = await this.persistence.commitPageAndTransition(page, provenance, job.lease);
       return { kind: 'parsed', jobKey: job.key, pageType: job.pageType, warnings: [...(parsed.warnings ?? []), ...discovered.warnings], reconciliationIssues: committed.conflict ? 1 : 0 };
     } catch (error) {
-      if (phase === 'fetch' || phase === 'snapshot') return this.#containFetchFailure(job, error, phase);
+      // Fetch-phase errors, and transient database errors in any phase, say
+      // nothing about the page: retry. Only the remaining parse, normalize
+      // and commit errors are structural and become parse_failed.
+      if (phase === 'fetch' || phase === 'snapshot' || isTransientStoreError(error)) return this.#retryFailure(job, error, phase);
       const current = await this.persistence.getJob(job.key);
       if (current?.claim && ['fetching', 'fetched'].includes(current.state)) {
         try {
@@ -137,11 +142,11 @@ export class IngestionOrchestrator {
     }
   }
 
-  // An infrastructure error while fetching (raw store write, database call,
+  // An infrastructure error (raw store write, database call or deadlock,
   // lease renewal) settles only this job: it becomes a charged retry with
   // bounded backoff, or permanently_failed once the budget is spent, and the
   // run moves on. Errors marked fatal are wiring defects and still stop it.
-  async #containFetchFailure(job, error, phase) {
+  async #retryFailure(job, error, phase) {
     if (error?.fatal) throw error;
     const reason = `${phase} failed: ${error?.message ?? String(error)}`;
     const outcome = chargedRetry(this.fetcher.policy ?? REQUEST_POLICY_DEFAULTS, job, reason, error?.code ?? 'infrastructure', this.clock());

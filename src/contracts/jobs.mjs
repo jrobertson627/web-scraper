@@ -32,6 +32,22 @@ export const DEFAULT_MAX_CLAIM_RECOVERIES = 3;
 export const DEFAULT_ORPHAN_GRACE_MS = 10_000;
 export const ORPHANED_REQUEST_REASON = 'owner lease expired past request deadline';
 
+// PostgreSQL errors that say nothing about the page: serialization failures
+// (40001), deadlocks (40P01), connection exceptions (class 08) and an
+// administrator shutdown (57P01), plus a socket dropped under the driver.
+// A page commit that fails this way is retried rather than recorded as
+// parse_failed.
+const TRANSIENT_STORE_CODES = new Set(['40001', '40P01', '57P01', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+
+export function isTransientStoreError(error, seen = new Set()) {
+  if (!error || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  const code = typeof error.code === 'string' ? error.code : '';
+  if (TRANSIENT_STORE_CODES.has(code) || /^08[0-9A-Z]{3}$/.test(code)) return true;
+  if (/^Connection terminated\b/.test(error.message ?? '')) return true;
+  return isTransientStoreError(error.cause, seen) || (error.errors ?? []).some((inner) => isTransientStoreError(inner, seen));
+}
+
 export function positiveInteger(name, value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
   return value;
