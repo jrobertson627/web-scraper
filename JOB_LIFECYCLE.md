@@ -27,6 +27,12 @@ Claim recovery is not charged to `maxAttempts`, because a crash says nothing abo
 
 An infrastructure error while fetching settles only that job: the orchestrator records a charged `retry_wait` (or `permanently_failed`) and continues with the next job. If the job cannot be settled because its lease is already gone, claim recovery settles it later. Errors marked `fatal`, such as a throttle clock that does not advance, still stop the worker because they are wiring defects rather than page failures.
 
+## Long-running worker
+
+`IngestionOrchestrator.run` (used by worker mode through `runWorkerLoop`) keeps claiming until no runnable work remains. When nothing is claimable it asks persistence for `workOutlook()`: the number of `pending`, `retry_wait`, `fetching` and `fetched` jobs that can still run without an operator, and how long until the earliest retry falls due or claim expires (store clock). It sleeps that long, bounded by `maxIdleMs` (30 s) and `minIdleMs` (250 ms), then tries again; it returns once nothing runnable remains. Jobs below a parent in `operator_stop`, `parse_failed` or `permanently_failed` do not keep the worker alive; after an operator releases such a parent, start the worker again. The run returns job counts by state and outcome counts by kind, never the full job list.
+
+On SIGTERM or SIGINT the worker stops claiming. The current job settles normally: a request already on the wire finishes (the transport bounds it by `requestTimeoutMs`) and its page is committed; a request that has not started yet, including one waiting for the host's pacing window, is skipped as an uncharged `retry_wait`. Either way the host request is released before the process exits, so no job is left in `fetching`.
+
 ## Decision: time authority for leases
 
 **Status:** accepted (issue #87).

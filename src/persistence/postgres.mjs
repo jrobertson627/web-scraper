@@ -197,6 +197,30 @@ export class PostgresPersistence {
     });
   }
 
+  // Job counts by state, without loading jobs or their history.
+  async jobCounts() {
+    const result = await this.pool.query('SELECT state, count(*)::int AS count FROM crawl_jobs GROUP BY state ORDER BY state');
+    return Object.fromEntries(result.rows.map((row) => [row.state, row.count]));
+  }
+
+  // What a worker that found nothing to claim should do next. remaining counts
+  // pending, retry_wait, fetching and fetched jobs that can still run without
+  // an operator (none of their ancestors is stopped or failed); wakeInMs is how
+  // long until the earliest retry falls due or claim expires, by the database
+  // clock, or null when nothing is scheduled.
+  async workOutlook() {
+    const result = await this.pool.query(`WITH RECURSIVE live AS (
+        SELECT id, state FROM crawl_jobs WHERE parent_job_id IS NULL
+        UNION ALL
+        SELECT c.id, c.state FROM crawl_jobs c JOIN live p ON c.parent_job_id = p.id
+        WHERE p.state NOT IN ('operator_stop','parse_failed','permanently_failed'))
+      SELECT (SELECT count(*)::int FROM live WHERE state IN ('pending','retry_wait','fetching','fetched')) AS remaining,
+        (SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (min(CASE WHEN state = 'retry_wait' THEN next_allowed_at ELSE claim_expires_at END)
+          - clock_timestamp())) * 1000))::bigint FROM crawl_jobs WHERE state IN ('retry_wait','fetching','fetched')) AS wake_ms`);
+    const row = result.rows[0];
+    return { remaining: row.remaining, wakeInMs: row.wake_ms == null ? null : Number(row.wake_ms) };
+  }
+
   async renewClaim(key, lease) {
     const result = await this.pool.query(`UPDATE crawl_jobs SET claim_expires_at = clock_timestamp() + ($6::bigint * interval '1 millisecond'),
       updated_at = clock_timestamp() WHERE ${byKey(1)} AND claim_owner = $4 AND lease_generation = $5

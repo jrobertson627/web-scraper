@@ -46,6 +46,15 @@ function retryAfterDate(value, now) {
   return date;
 }
 
+// Settles when the promise does or when the signal aborts, whichever is first.
+function untilAborted(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.resolve();
+  let onAbort;
+  const aborted = new Promise((resolve) => { onAbort = resolve; signal.addEventListener('abort', onAbort, { once: true }); });
+  return Promise.race([promise, aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+}
+
 function freshAgeLimit(policyAge, cacheControl) {
   if (/(?:^|,)\s*no-(?:store|cache)\b/i.test(cacheControl ?? '')) return 0;
   const match = /(?:^|,)\s*max-age\s*=\s*(?:"(\d+)"|(\d+))(?:\s*,|\s*$)/i.exec(cacheControl ?? '');
@@ -71,7 +80,10 @@ export class Fetcher {
     this.sleep = sleep;
   }
 
-  async fetch(job, lease) {
+  // signal (optional) is the worker's shutdown signal. Once it is aborted no
+  // new request starts: the job returns an uncharged retry_wait and the host
+  // is released. A request already on the wire is allowed to finish.
+  async fetch(job, lease, { signal } = {}) {
     if (!isAllowedSourceUrl(job.sourceUrl, this.allowedHosts)) {
       throw new Error(`source URL rejected before transport: ${job.sourceUrl?.absoluteUrl}. Expected an HTTPS URL on an allowed host.`);
     }
@@ -113,7 +125,8 @@ export class Fetcher {
           ownsRequest = Boolean(await this.persistence.acquireRequest(job.key, lease, ownedHost));
           if (!ownsRequest) return createFetchResult({ kind: 'retry_wait', reason: 'redirect host request already owned', nextAllowedAt: this.#nextTime(1000) });
         }
-        await this.#waitForPolicy(job, lease, host);
+        await this.#waitForPolicy(job, lease, host, signal);
+        if (signal?.aborted) return createFetchResult({ kind: 'retry_wait', code: 'worker_stopping', reason: 'worker stopped before the request started', nextAllowedAt: this.#nextTime(0) });
         startedAt = this.clock();
         await this.#recordRequestStart(host, startedAt);
         this.events.emit('request.started', { jobKey: job.key, pageType: job.pageType, host });
@@ -196,7 +209,7 @@ export class Fetcher {
     }
   }
 
-  async #waitForPolicy(job, lease, host = job.sourceUrl.host) {
+  async #waitForPolicy(job, lease, host = job.sourceUrl.host, signal) {
     // Cap each sleep chunk to a fraction of claimTimeoutMs (not a fixed 10s):
     // at claimTimeoutMs's configured minimum, a full 10s chunk left zero
     // margin between renewal and expiry, so a claim could read as expired
@@ -211,11 +224,12 @@ export class Fetcher {
         ? Math.max(0, 60_000 - (now.getTime() - starts[0].getTime()))
         : 0;
       const delay = Math.max(intervalDelay, rateDelay);
-      if (delay === 0) return;
+      if (delay === 0 || signal?.aborted) return;
       await this.persistence.renewClaim(job.key, lease, now);
       const before = this.clock().getTime();
       this.events.emit('throttle.paused', { jobKey: job.key, host, waitMs: Math.min(delay, maxChunkMs) });
-      await this.sleep(Math.min(delay, maxChunkMs));
+      await untilAborted(this.sleep(Math.min(delay, maxChunkMs)), signal);
+      if (signal?.aborted) return;
       const after = this.clock().getTime();
       // A clock that does not advance is a wiring defect, not a page failure,
       // so it is marked fatal and stops the worker instead of being retried.

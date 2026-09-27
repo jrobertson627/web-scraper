@@ -12,7 +12,7 @@ test('foundation migrations are ordered, repeat-safe, and record every applied v
     '001_foundation.sql', '002_job_lifecycle.sql', '003_authorization_contract.sql', '004_schema_hardening.sql', '005_parser_normalization.sql',
     '006_http_cache_metadata.sql', '007_postgres_repositories.sql', '008_parsed_document_storage.sql',
   ]);
-  assert.ok(migrations.includes('009_retry_budgets.sql'));
+  assert.ok(migrations.includes('009_worker_robustness.sql'));
   assert.equal(new Set(migrations.map((name) => name.slice(0, 3))).size, migrations.length, 'migration numbers are unique');
   for (const version of migrations.map((name) => name.slice(0, -4))) {
     assert.match(sql, new RegExp(`schema_migrations[^;]*${version}|${version}[^;]*schema_migrations`, 's'));

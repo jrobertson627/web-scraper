@@ -581,6 +581,42 @@ test('a deadlock or connection loss during commit leaves the job retryable, and 
   }
 });
 
+test('SIGTERM during a request leaves no unreleased request and no job stuck in fetching', async () => {
+  await reset();
+  const run = childRun('sigterm', join(localRoot, 'raw-sigterm'));
+  const checkpoint = await run.message;
+  assert.equal(checkpoint.checkpoint, 'in-request');
+  const done = new Promise((resolve) => run.child.on('message', (message) => { if (message.done) resolve(message); }));
+  if (process.platform === 'win32') run.child.send({ signal: 'SIGTERM' });
+  else run.child.kill('SIGTERM');
+  const report = await done;
+  assert.equal(await run.exit, 0);
+  assert.equal(report.stopped, true);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL')).rows[0].n, 0);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM crawl_jobs WHERE state IN ('fetching','fetched')")).rows[0].n, 0);
+  assert.ok((await pool.query("SELECT count(*)::int AS n FROM crawl_jobs WHERE state = 'pending'")).rows[0].n > 0, 'the worker stopped claiming');
+});
+
+test('the work outlook ignores work held behind a stopped parent and reports the next wake-up', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
+  const parent = rootJob();
+  await persistence.addJob(parent);
+  await persistence.addJob({ ...rootJob('/school/a/men/', 'school_history'), parentKey: parent.key });
+  const claimed = await persistence.claimNextJob(new Date(), 'outlook-worker');
+  await persistence.transitionJob(parent.key, 'operator_stop', claimed.lease, { lastError: 'challenge' });
+  assert.deepEqual(await persistence.workOutlook(), { remaining: 0, wakeInMs: null });
+  const later = rootJob('/later/page.html', 'season');
+  await persistence.addJob(later);
+  const laterClaim = await persistence.claimNextJob(new Date(), 'outlook-worker');
+  const due = (await pool.query("SELECT clock_timestamp() + interval '1 hour' AS due")).rows[0].due;
+  await persistence.transitionJob(later.key, 'retry_wait', laterClaim.lease, { nextAllowedAt: due.toISOString(), lastError: 'retry later' });
+  const outlook = await persistence.workOutlook();
+  assert.equal(outlook.remaining, 1);
+  assert.ok(outlook.wakeInMs > 3_590_000 && outlook.wakeInMs <= 3_600_000, String(outlook.wakeInMs));
+  assert.deepEqual(await persistence.jobCounts(), { operator_stop: 1, pending: 1, retry_wait: 1 });
+});
+
 test('retry transitions spend only the budget they name', async () => {
   await reset();
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });

@@ -324,6 +324,33 @@ export class InMemoryPersistence {
     return { ...cloneJob(current), lease };
   }
 
+  // Job counts by state, without copying jobs or their history.
+  jobCounts() {
+    const counts = {};
+    for (const job of this.jobs.values()) counts[job.state] = (counts[job.state] ?? 0) + 1;
+    return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+  }
+
+  // Same rule as PostgresPersistence.workOutlook: runnable jobs that remain,
+  // and how long until the earliest retry falls due or claim expires.
+  workOutlook() {
+    const now = this.clock().getTime();
+    const stopped = new Set(['operator_stop', 'parse_failed', 'permanently_failed']);
+    const live = (job, depth = 0) => {
+      const parent = job.parentKey ? this.jobs.get(job.parentKey) : null;
+      if (!parent || depth > this.jobs.size) return true;
+      return !stopped.has(parent.state) && live(parent, depth + 1);
+    };
+    let remaining = 0;
+    let wakeAt = null;
+    for (const job of this.jobs.values()) {
+      if (['pending', 'retry_wait', 'fetching', 'fetched'].includes(job.state) && live(job)) remaining += 1;
+      const due = job.state === 'retry_wait' ? job.nextAllowedAt : ['fetching', 'fetched'].includes(job.state) ? job.claim?.expiresAt : null;
+      if (due) wakeAt = Math.min(wakeAt ?? Infinity, Date.parse(due));
+    }
+    return { remaining, wakeInMs: wakeAt == null ? null : Math.max(0, wakeAt - now) };
+  }
+
   renewClaim(key, lease) {
     const job = this.#requireLease(key, lease);
     const now = this.clock();

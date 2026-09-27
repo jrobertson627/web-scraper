@@ -5,6 +5,16 @@ import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
 import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
 import { isTransientStoreError } from '../contracts/jobs.mjs';
 
+// Sleeps for ms, ending early (without throwing) if the signal aborts.
+function abortableDelay(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
 export class IngestionOrchestrator {
@@ -20,6 +30,8 @@ export class IngestionOrchestrator {
     this.clock = clock;
   }
 
+  // Processes every job that is claimable now, then returns. Returns job
+  // counts by state rather than the jobs themselves.
   async runOnce(workerId = 'worker') {
     let processed = 0;
     const events = [];
@@ -31,13 +43,41 @@ export class IngestionOrchestrator {
       if (event) this.events.emit('job.settled', event);
       processed += 1;
     }
-    return { processed, jobs: await this.persistence.listJobs(), events: Object.freeze(events) };
+    return { processed, counts: await this.persistence.jobCounts(), events: Object.freeze(events) };
   }
 
-  async #process(job) {
+  // Long-running worker loop. When nothing is claimable it sleeps until the
+  // earliest retry falls due or claim expires (at most maxIdleMs, at least
+  // minIdleMs), and it returns once no runnable pending, retry_wait, fetching
+  // or fetched work remains. Aborting `signal` stops claiming: the current job
+  // finishes (a request on the wire completes, a request not yet started is
+  // skipped and its host released) and the loop returns. Events are passed to
+  // onEvent and tallied by kind rather than kept.
+  async run({ workerId = 'worker', signal, maxIdleMs = 30_000, minIdleMs = 250, onEvent = () => {}, sleep = abortableDelay } = {}) {
+    let processed = 0;
+    const outcomes = {};
+    while (!signal?.aborted) {
+      const job = await this.persistence.claimNextJob(this.clock(), workerId);
+      if (job) {
+        const event = await this.#process(job, signal);
+        processed += 1;
+        if (event) {
+          outcomes[event.kind] = (outcomes[event.kind] ?? 0) + 1;
+          onEvent(Object.freeze(event));
+        }
+        continue;
+      }
+      const outlook = await this.persistence.workOutlook();
+      if (!outlook.remaining) break;
+      await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, outlook.wakeInMs ?? maxIdleMs)), signal);
+    }
+    return { processed, stopped: Boolean(signal?.aborted), outcomes, counts: await this.persistence.jobCounts() };
+  }
+
+  async #process(job, signal) {
     let phase = 'fetch';
     try {
-      const result = await this.fetcher.fetch(job, job.lease);
+      const result = await this.fetcher.fetch(job, job.lease, { signal });
       if (result.kind === 'retry_wait') {
         await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, {
           nextAllowedAt: result.nextAllowedAt,

@@ -93,8 +93,10 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   async function runWorkerOnce(workerId = 'fixture-worker') {
     await ready;
     const result = await orchestrator.runOnce(workerId);
-    events.summary?.({ jobStates: jobStateCounts(result.jobs) });
-    return { ...result, transportCalls: transport.calls.length };
+    // The fixture corpus is small, so the local run still reports every job.
+    const jobs = await persistence.listJobs();
+    events.summary?.({ jobStates: jobStateCounts(jobs) });
+    return { ...result, jobs, transportCalls: transport.calls.length };
   }
 
   function previewDryRun() {

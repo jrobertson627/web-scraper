@@ -19,5 +19,9 @@ BEGIN
   END IF;
 END $$;
 
-INSERT INTO schema_migrations(version) VALUES ('009_retry_budgets') ON CONFLICT DO NOTHING;
+-- The long-running worker walks the job tree from the roots to decide whether
+-- any runnable work remains.
+CREATE INDEX IF NOT EXISTS crawl_jobs_parent_idx ON crawl_jobs (parent_job_id);
+
+INSERT INTO schema_migrations(version) VALUES ('009_worker_robustness') ON CONFLICT DO NOTHING;
 COMMIT;
