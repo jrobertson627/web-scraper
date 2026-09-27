@@ -108,13 +108,14 @@ test('5xx retries use bounded exponential backoff and stop at the attempt limit'
   const first = await run.fetcher.fetch(run.job, run.job.lease);
   assert.equal(first.kind, 'retry_wait');
   assert.equal(Date.parse(first.nextAllowedAt) - run.clock().getTime(), 2_000);
-  run.persistence.transitionJob(run.job.key, 'retry_wait', run.job.lease, { nextAllowedAt: first.nextAllowedAt });
+  assert.equal(first.charge, 'failure');
+  run.persistence.transitionJob(run.job.key, 'retry_wait', run.job.lease, { nextAllowedAt: first.nextAllowedAt, charge: first.charge });
   run.advance(2_000);
   const secondJob = run.persistence.claimNextJob(run.clock(), 'worker');
   const second = await run.fetcher.fetch(secondJob, secondJob.lease);
   assert.equal(second.kind, 'retry_wait');
   assert.equal(Date.parse(second.nextAllowedAt) - run.clock().getTime(), 3_000);
-  run.persistence.transitionJob(secondJob.key, 'retry_wait', secondJob.lease, { nextAllowedAt: second.nextAllowedAt });
+  run.persistence.transitionJob(secondJob.key, 'retry_wait', secondJob.lease, { nextAllowedAt: second.nextAllowedAt, charge: second.charge });
   run.advance(3_000);
   const thirdJob = run.persistence.claimNextJob(run.clock(), 'worker');
   assert.equal((await run.fetcher.fetch(thirdJob, thirdJob.lease)).kind, 'permanently_failed');

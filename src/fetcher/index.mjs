@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createSourceUrl, isAllowedSourceUrl } from '../contracts/source.mjs';
 import { createFetchResult } from '../contracts/boundaries.mjs';
-import { chargedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
+import { chargedRetry, rateLimitedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { HttpTransport } from './http-transport.mjs';
 
 function header(headers, name) {
@@ -169,7 +169,7 @@ export class Fetcher {
           return createFetchResult({ kind: 'operator_stop', code: 'retry_after_too_long', reason: 'Retry-After exceeds the configured maximum; operator review required' });
         }
         const earliest = this.#nextTime(this.policy.minIntervalMs);
-        return createFetchResult({ kind: 'retry_wait', reason: 'rate limited', nextAllowedAt: new Date(Math.max(retryAt.getTime(), Date.parse(earliest))).toISOString() });
+        return createFetchResult(rateLimitedRetry(this.policy, job, new Date(Math.max(retryAt.getTime(), Date.parse(earliest))).toISOString()));
       }
       if (response.status === 403 || response.challenge) return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: 'operator review required for challenge response' });
       if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`);

@@ -41,6 +41,7 @@ export class IngestionOrchestrator {
         await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, {
           nextAllowedAt: result.nextAllowedAt,
           lastError: result.reason,
+          ...(result.charge ? { charge: result.charge } : {}),
         });
         return { kind: 'retry_wait', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason, nextAllowedAt: result.nextAllowedAt };
       }
@@ -145,7 +146,7 @@ export class IngestionOrchestrator {
     const reason = `${phase} failed: ${error?.message ?? String(error)}`;
     const outcome = chargedRetry(this.fetcher.policy ?? REQUEST_POLICY_DEFAULTS, job, reason, error?.code ?? 'infrastructure', this.clock());
     const details = outcome.kind === 'retry_wait'
-      ? { nextAllowedAt: outcome.nextAllowedAt, lastError: reason, failurePhase: phase }
+      ? { nextAllowedAt: outcome.nextAllowedAt, lastError: reason, failurePhase: phase, charge: outcome.charge }
       : { lastError: outcome.reason, failurePhase: phase };
     try {
       await this.persistence.transitionJob(job.key, outcome.kind, job.lease, details);

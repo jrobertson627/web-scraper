@@ -8,6 +8,23 @@ Child work is claimable only after its recorded parent reaches `parsed`. Replayi
 
 Challenge responses enter `operator_stop` and are never retryable by time alone. A configured operator-authorizer must approve a durable `hold`, `release_retry`, or `release_permanent` disposition. Holds preserve the stop; releases record the reviewer and reason before changing state.
 
+## Retry budgets
+
+`attempts` counts every claim and is kept for history only. Whether a job may retry again is decided by three separate counters, each with its own cap:
+
+| Failure | Counter | Cap | When the cap is reached |
+| --- | --- | --- | --- |
+| Transport error, timeout, 5xx, or an infrastructure error while fetching (raw store write, database call, lease renewal) | `failureAttempts` | request policy `maxAttempts` (3) | `permanently_failed` |
+| 429 with a usable `Retry-After` | `rateLimitAttempts` | request policy `maxRateLimitAttempts` (5) | `operator_stop` (`rate_limit_cap`) |
+| Claim expired without the job completing (worker crashed or lost its lease) | `claimRecoveries` | persistence option `maxClaimRecoveries` (3) | `permanently_failed` |
+| Host busy (another job owns the host's request slot) | none | none | retries after one second |
+
+A cap of N means the Nth charged failure is terminal, so `maxAttempts: 3` allows two retries. The Fetcher and the orchestrator attach `charge: 'failure'` or `charge: 'rate_limit'` to a `retry_wait` transition, and the persistence adapter increments the matching counter in the same write. Claim recovery increments `claimRecoveries` itself. A reviewed `release_retry` resets `rateLimitAttempts` and keeps the other counters.
+
+Claim recovery is not charged to `maxAttempts`, because a crash says nothing about the page, but it is still capped so a page that crashes every worker that touches it cannot loop forever.
+
+An infrastructure error while fetching settles only that job: the orchestrator records a charged `retry_wait` (or `permanently_failed`) and continues with the next job. If the job cannot be settled because its lease is already gone, claim recovery settles it later. Errors marked `fatal`, such as a throttle clock that does not advance, still stop the worker because they are wiring defects rather than page failures.
+
 ## Decision: time authority for leases
 
 **Status:** accepted (issue #87).

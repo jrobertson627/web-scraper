@@ -67,6 +67,8 @@ function mapJob(row, events = []) {
     parserVersion: row.parser_version,
     state: row.state,
     attempts: row.attempts,
+    failureAttempts: row.failure_attempts ?? 0,
+    rateLimitAttempts: row.rate_limit_attempts ?? 0,
     claimRecoveries: row.claim_recoveries ?? 0,
     generation: Number(row.claim_generation),
     nextAllowedAt: iso(row.next_allowed_at),
@@ -241,12 +243,17 @@ export class PostgresPersistence {
     const active = await client.query('SELECT 1 FROM in_flight_requests WHERE job_id = $1 AND released_at IS NULL', [row.id]);
     if (active.rowCount) throw new Error(`cannot transition job while its host request is still active`);
     const clear = FINAL_STATES.has(nextState);
+    // details.charge names the retry budget this transition spends (see
+    // chargedRetry and rateLimitedRetry in contracts/request-policy.mjs).
     const next = await client.query(`UPDATE crawl_jobs SET state = $2, next_allowed_at = $3,
       last_error = COALESCE($4,last_error), claim_owner = CASE WHEN $5 THEN NULL ELSE claim_owner END,
       claim_expires_at = CASE WHEN $5 THEN NULL ELSE claim_expires_at END,
       lease_generation = CASE WHEN $5 THEN NULL ELSE lease_generation END,
+      failure_attempts = failure_attempts + CASE WHEN $6::text = 'failure' THEN 1 ELSE 0 END,
+      rate_limit_attempts = rate_limit_attempts + CASE WHEN $6::text = 'rate_limit' THEN 1 ELSE 0 END,
       updated_at = clock_timestamp() WHERE id = $1 RETURNING *`,
-    [row.id, nextState, details.nextAllowedAt ?? null, details.lastError ?? details.failureReason ?? null, clear]);
+    [row.id, nextState, details.nextAllowedAt ?? null, details.lastError ?? details.failureReason ?? null, clear,
+      details.charge ?? null]);
     await this.recordEvent(client, row, row.state, nextState, details);
     return next.rows[0];
   }
@@ -372,6 +379,9 @@ export class PostgresPersistence {
       if (!job || job.state !== 'operator_stop') throw new Error('operator disposition requires operator_stop');
       await client.query(`INSERT INTO operator_dispositions (job_id,disposition,operator_id,reason,recorded_at)
         VALUES ($1,$2,$3,$4,$5)`, [job.id, validated.kind, validated.operatorId, validated.reason, validated.at]);
+      // A reviewed release gives the job a fresh 429 budget; the transport/5xx
+      // budget is kept.
+      if (validated.kind === 'release_retry') await client.query('UPDATE crawl_jobs SET rate_limit_attempts = 0 WHERE id = $1', [job.id]);
       if (validated.kind === 'release_retry') await this.transition(client, job, 'retry_wait', {
         nextAllowedAt: validated.at, lastError: validated.reason, operatorId: validated.operatorId,
       });

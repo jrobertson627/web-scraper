@@ -502,3 +502,22 @@ test('claim recovery caps a job whose worker keeps disappearing', async () => {
   assert.equal(failed.failures.at(-1).details.claimRecoveries, 3);
   assert.equal(await persistence.claimNextJob(new Date(), 'worker'), null);
 });
+
+test('retry transitions spend only the budget they name', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
+  const job = rootJob();
+  await persistence.addJob(job);
+  const now = () => new Date().toISOString();
+  for (const charge of ['rate_limit', 'rate_limit', undefined, 'failure']) {
+    const claimed = await persistence.claimNextJob(new Date(), 'budget-worker');
+    await persistence.transitionJob(job.key, 'retry_wait', claimed.lease, { nextAllowedAt: now(), lastError: 'retry', ...(charge ? { charge } : {}) });
+  }
+  let stored = await persistence.getJob(job.key);
+  assert.deepEqual([stored.attempts, stored.rateLimitAttempts, stored.failureAttempts], [4, 2, 1]);
+  const claimed = await persistence.claimNextJob(new Date(), 'budget-worker');
+  await persistence.transitionJob(job.key, 'operator_stop', claimed.lease, { lastError: 'rate limited 3 times' });
+  await persistence.recordOperatorDisposition(job.key, { kind: 'release_retry', operatorId: 'ops', reason: 'resume' });
+  stored = await persistence.getJob(job.key);
+  assert.deepEqual([stored.state, stored.rateLimitAttempts, stored.failureAttempts], ['retry_wait', 0, 1]);
+});

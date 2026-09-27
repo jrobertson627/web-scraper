@@ -18,7 +18,8 @@ import { DEFAULT_MAX_CLAIM_RECOVERIES, positiveInteger } from '../contracts/jobs
 const CLAIM_EXPIRED = 'claim expired before completion';
 
 function newJobRecord(validated, now) {
-  return { ...validated, state: 'pending', attempts: 0, claimRecoveries: 0, createdAt: now, updatedAt: now, history: [], failures: [] };
+  return { ...validated, state: 'pending', attempts: 0, failureAttempts: 0, rateLimitAttempts: 0, claimRecoveries: 0,
+    createdAt: now, updatedAt: now, history: [], failures: [] };
 }
 
 function stableValue(value) {
@@ -576,6 +577,9 @@ export class InMemoryPersistence {
     }
     this.operatorDispositions.push(Object.freeze({ jobKey: key, ...validated }));
     job.history.push(Object.freeze({ type: 'operator_disposition', state: job.state, at: validated.at, operatorId: validated.operatorId, disposition: validated.kind, reason: validated.reason }));
+    // A reviewed release gives the job a fresh 429 budget; the transport/5xx
+    // budget is kept.
+    if (validated.kind === 'release_retry') job.rateLimitAttempts = 0;
     if (validated.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString(), lastError: validated.reason });
     if (validated.kind === 'release_permanent') this.#applyTransition(job, 'permanently_failed', { failureReason: validated.reason });
   }
@@ -735,7 +739,12 @@ export class InMemoryPersistence {
     const previousState = job.state;
     assertTransition(job.state, nextState);
     job.state = nextState;
-    Object.assign(job, details);
+    const { charge, ...fields } = details;
+    Object.assign(job, fields);
+    // charge names the retry budget this transition spends (see chargedRetry
+    // and rateLimitedRetry in contracts/request-policy.mjs).
+    if (charge === 'failure') job.failureAttempts = (job.failureAttempts ?? 0) + 1;
+    if (charge === 'rate_limit') job.rateLimitAttempts = (job.rateLimitAttempts ?? 0) + 1;
     job.updatedAt = at.toISOString();
     job.history.push(createJobStateEvent({ from: previousState, to: nextState, at, attempts: job.attempts, lease: job.claim?.lease, details }));
     if (FAILURE_STATES.includes(nextState)) {
