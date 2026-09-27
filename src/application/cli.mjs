@@ -45,7 +45,7 @@ function parseDataContract(value) {
 function configuredPort(env) {
   const port = Number(env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`invalid PORT: ${env.PORT}. Expected an integer from 1 through 65535.`);
+    throw new Error('invalid PORT. Expected an integer from 1 through 65535. Example: PORT=3000');
   }
   return port;
 }
@@ -55,7 +55,7 @@ function configuredPort(env) {
 function configuredHost(env) {
   const host = env.HOST || '127.0.0.1';
   if (host !== 'localhost' && !isIP(host)) {
-    throw new Error(`invalid HOST: ${host}. Expected an IP address or localhost. Example: HOST=0.0.0.0`);
+    throw new Error('invalid HOST. Expected an IP address or localhost. Example: HOST=0.0.0.0');
   }
   return host;
 }

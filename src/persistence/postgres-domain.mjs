@@ -306,10 +306,12 @@ async function recordLogConflict(client, providerId, schoolSourcePath, observati
     const observed = presentValue(logged);
     const canonical = presentValue(team?.finalScore);
     if (observed !== null && observed !== canonical) {
-      await client.query(`INSERT INTO reconciliation_issues (issue_type,record_key,details,status)
-        VALUES ('conflicting_game_log_fact',$1,$2::jsonb,'open') ON CONFLICT DO NOTHING`,
+      // Deduplicated on the school, field and both values, not on the fetch ids.
+      await client.query(`INSERT INTO reconciliation_issues (issue_type,record_key,details,status,dedup_key)
+        VALUES ('conflicting_game_log_fact',$1,$2::jsonb,'open',$3) ON CONFLICT DO NOTHING`,
       [observation.canonicalBoxScorePath, JSON.stringify({ field, observed, canonical,
-        sourceFetchId: `fetch-${sourceFetchId}`, acceptedProvenance: accepted.provenance })]);
+        sourceFetchId: `fetch-${sourceFetchId}`, acceptedProvenance: accepted.provenance }),
+      JSON.stringify([school, field, observed, canonical])]);
     }
   }
 }
@@ -317,7 +319,7 @@ async function recordLogConflict(client, providerId, schoolSourcePath, observati
 export async function writeNormalizedPage(client, job, page, provenance, sourceFetchId) {
   if (page.jobKey !== `${job.provider_id}:${job.canonical_path}:${job.page_type}`) throw new Error('page job identity mismatch');
   if (!page.identity || !page.kind || !page.data) throw new Error('normalized page is incomplete');
-  const prior = await client.query(`SELECT data,provenance,data = $2::jsonb AS same
+  const prior = await client.query(`SELECT id,data,provenance,data = $2::jsonb AS same
     FROM normalized_page_revisions WHERE provider_id = $1 AND record_key = $3
       AND disposition = 'accepted' ORDER BY id DESC LIMIT 1`,
   [job.provider_id, JSON.stringify(page.data), page.identity]);
@@ -330,9 +332,13 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
   [job.provider_id, page.identity, page.kind, sourceFetchId, provenance.parserName,
     provenance.parserVersion, JSON.stringify(page.data), JSON.stringify(provenance), disposition]);
   if (conflict && revision.rowCount) {
-    await client.query(`INSERT INTO reconciliation_issues (issue_type,record_key,details,status)
-      VALUES ('conflicting_page_reprocess',$1,$2::jsonb,'open') ON CONFLICT DO NOTHING`,
-    [page.identity, JSON.stringify({ previous: prior.rows[0], current: { data: page.data, provenance } })]);
+    // Deduplicated on the accepted revision and the conflicting content, so a
+    // refetch of an unchanged conflicting page does not open a second issue.
+    const { id: previousRevisionId, ...previous } = prior.rows[0];
+    await client.query(`INSERT INTO reconciliation_issues (issue_type,record_key,details,status,dedup_key)
+      VALUES ('conflicting_page_reprocess',$1,$2::jsonb,'open',$3 || ':' || md5($4::jsonb::text)) ON CONFLICT DO NOTHING`,
+    [page.identity, JSON.stringify({ previous, current: { data: page.data, provenance } }),
+      `revision-${previousRevisionId}`, JSON.stringify(page.data)]);
   }
   for (const [index, observation] of (page.observations ?? []).entries()) {
     const key = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;

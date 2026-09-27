@@ -35,7 +35,7 @@ function workerEnv(extra) {
 test('persistence defaults to memory and postgres is opt-in with explicit connection values', () => {
   assert.equal(persistenceSettings({ PGHOST: 'db.internal' }).kind, 'memory');
   const settings = persistenceSettings({ ...PG_ENV, PGPORT: '6543', PGSSLMODE: 'require' });
-  assert.deepEqual({ ...settings.pool }, { host: 'db.internal', port: 6543, database: 'scraper', user: 'scraper', password: 'TOP_SECRET', ssl: true });
+  assert.deepEqual({ ...settings.pool }, { host: 'db.internal', port: 6543, database: 'scraper', user: 'scraper', password: 'TOP_SECRET', ssl: true, statement_timeout: 30000 });
   assert.deepEqual(persistenceSettings({ ...PG_ENV, PGSSLMODE: 'no-verify' }).pool.ssl, { rejectUnauthorized: false });
   assert.equal(persistenceSettings({ ...PG_ENV, PGSSLMODE: 'disable' }).pool.ssl, false);
   assert.throws(() => persistenceSettings({ PERSISTENCE: 'sqlite' }), /PERSISTENCE is invalid/);
@@ -145,5 +145,6 @@ test('API binds loopback by default and HOST opts into another address', async (
   const errors = [];
   const rejected = await runCli({ mode: 'api', env: { ...PG_ENV, HOST: 'example.com' }, stderr: (message) => errors.push(message), openPostgres });
   assert.equal(rejected.exitCode, EXIT_CODES.configurationRejected);
-  assert.match(errors[0], /invalid HOST: example\.com/);
+  assert.match(errors[0], /invalid HOST\. Expected/);
+  assert.doesNotMatch(errors[0], /example\.com/);
 });

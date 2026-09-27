@@ -7,6 +7,9 @@ import { assertTransition, createLeaseToken, createOperatorDisposition } from '.
 import { createJob, createQueryModels } from '../contracts/boundaries.mjs';
 import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
+// Server-side cap on any one statement, so a stuck query fails its transaction
+// instead of holding a lease or a pool client indefinitely.
+import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
 
 const { Pool } = pg;
 const CHECKSUM = /^[0-9a-f]{64}$/;
@@ -59,10 +62,30 @@ function mapJob(row, events = []) {
   };
 }
 
+const guardedPools = new WeakSet();
+
+function logPoolError(error) {
+  console.error(JSON.stringify({ event: 'postgres.pool_error', code: error?.code ?? 'unknown', at: new Date().toISOString() }));
+}
+
+// An idle pooled client that loses its connection (for example a database
+// restart) is emitted as a pool 'error'; with no listener Node would crash the
+// process. Log the error code only, since a driver message can name the host or
+// user, and let the pool replace the client on the next checkout.
+export function guardPool(pool, onError = logPoolError) {
+  if (!pool || typeof pool.on !== 'function' || guardedPools.has(pool)) return pool;
+  guardedPools.add(pool);
+  pool.on('error', (error) => {
+    try { onError(error); } catch { /* a failing logger must not crash the process either */ }
+  });
+  return pool;
+}
+
 export class PostgresPersistence {
-  constructor({ pool = new Pool(), claimTimeoutMs = 30_000, authorizeOperator = (id) => Boolean(id) } = {}) {
+  constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
+    authorizeOperator = (id) => Boolean(id), onPoolError } = {}) {
     if (!Number.isInteger(claimTimeoutMs) || claimTimeoutMs < 1) throw new Error('claimTimeoutMs must be positive');
-    this.pool = pool;
+    this.pool = guardPool(pool, onPoolError);
     this.claimTimeoutMs = claimTimeoutMs;
     this.authorizeOperator = authorizeOperator;
   }
@@ -71,15 +94,18 @@ export class PostgresPersistence {
 
   async transaction(action) {
     const client = await this.pool.connect();
+    // A client whose ROLLBACK failed may still be inside the aborted
+    // transaction, so it is destroyed rather than returned to the pool.
+    let broken;
     try {
       await client.query('BEGIN');
       const result = await action(client);
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      try { await client.query('ROLLBACK'); } catch { /* preserve the original error */ }
+      try { await client.query('ROLLBACK'); } catch (rollbackError) { broken = rollbackError; /* preserve the original error */ }
       throw error;
-    } finally { client.release(); }
+    } finally { client.release(broken); }
   }
 
   async addJob(job) {
@@ -437,8 +463,9 @@ export async function assertSchemaCurrent(pool, expected = expectedMigrationVers
   if (missing.length) throw new Error(`database schema is behind: apply migrations/ before starting (missing ${missing.join(', ')})`);
 }
 
-export async function openPostgresPersistence({ pool: poolConfig, claimTimeoutMs } = {}) {
-  const persistence = new PostgresPersistence({ pool: new Pool(poolConfig), claimTimeoutMs });
+export async function openPostgresPersistence({ pool: poolConfig, claimTimeoutMs, onPoolError } = {}) {
+  const pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError });
   try {
     await assertSchemaCurrent(persistence.pool);
   } catch (error) {

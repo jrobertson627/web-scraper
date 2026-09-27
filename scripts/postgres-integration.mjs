@@ -12,6 +12,8 @@ import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contra
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
 import { boxScoreDocument, gameLogDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
 import { present, unavailable } from '../src/contracts/value-state.mjs';
+// Adapter-hardening and API read-query checks share this disposable database.
+import './postgres-ops-integration.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
   throw new Error('PostgreSQL integration tests require an explicitly disposable PG* database');

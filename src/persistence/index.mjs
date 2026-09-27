@@ -462,7 +462,12 @@ export class InMemoryPersistence {
     const unavailableCoverage = new Map(this.unavailableCoverage);
     const reconciliationIssues = [...this.reconciliationIssues];
     const jobs = new Map(this.jobs);
-    if (conflict) {
+    // An open issue for the same accepted record and the same conflicting data
+    // already covers a refetch; provenance alone does not make a new issue.
+    const alreadyOpen = conflict && reconciliationIssues.some((issue) => issue.status === 'open'
+      && issue.issueType === 'conflicting_page_reprocess' && issue.recordKey === key
+      && jsonEqual(issue.details.previous.data, previous.data) && jsonEqual(issue.details.current.data, record.data));
+    if (conflict && !alreadyOpen) {
       reconciliationIssues.push(createReconciliationIssue({
         issueType: 'conflicting_page_reprocess',
         recordKey: key,
@@ -472,9 +477,8 @@ export class InMemoryPersistence {
         },
         status: 'open',
       }));
-    } else {
-      pages.set(key, record);
     }
+    if (!conflict) pages.set(key, record);
     for (const [index, observation] of (page.observations ?? []).entries()) {
       const observationKey = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
       const storedObservation = Object.freeze({ ...observation, provenance });
