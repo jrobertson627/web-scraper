@@ -3,8 +3,12 @@ import { readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { assertTransition, createLeaseToken, createOperatorDisposition } from '../contracts/jobs.mjs';
-import { createJob, createPageRequest, createReadPage, decodePageCursor, deepFreeze } from '../contracts/boundaries.mjs';
+import {
+  DEFAULT_MAX_CLAIM_RECOVERIES, assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
+} from '../contracts/jobs.mjs';
+import {
+  createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
+} from '../contracts/boundaries.mjs';
 import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
@@ -15,6 +19,7 @@ const { Pool } = pg;
 const CHECKSUM = /^[0-9a-f]{64}$/;
 const FINAL_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 const FAILURE_STATES = new Set(['retry_wait', 'operator_stop', 'parse_failed', 'permanently_failed']);
+const CLAIM_EXPIRED = 'claim expired before completion';
 
 function iso(value) { return value == null ? null : new Date(value).toISOString(); }
 // A job key is `${providerId}:${canonicalPath}:${pageType}`. Provider ids never
@@ -62,6 +67,7 @@ function mapJob(row, events = []) {
     parserVersion: row.parser_version,
     state: row.state,
     attempts: row.attempts,
+    claimRecoveries: row.claim_recoveries ?? 0,
     generation: Number(row.claim_generation),
     nextAllowedAt: iso(row.next_allowed_at),
     lastError: row.last_error,
@@ -97,11 +103,13 @@ export function guardPool(pool, onError = logPoolError) {
 
 export class PostgresPersistence {
   constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
-    authorizeOperator = (id) => Boolean(id), onPoolError } = {}) {
+    authorizeOperator = (id) => Boolean(id), onPoolError,
+    maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES } = {}) {
     if (!Number.isInteger(claimTimeoutMs) || claimTimeoutMs < 1) throw new Error('claimTimeoutMs must be positive');
     this.pool = guardPool(pool, onPoolError);
     this.claimTimeoutMs = claimTimeoutMs;
     this.authorizeOperator = authorizeOperator;
+    this.maxClaimRecoveries = positiveInteger('maxClaimRecoveries', maxClaimRecoveries);
   }
 
   async close() { await this.pool.end(); }
@@ -196,10 +204,17 @@ export class PostgresPersistence {
         AND NOT EXISTS (SELECT 1 FROM in_flight_requests r WHERE r.job_id = j.id AND r.released_at IS NULL)
         FOR UPDATE OF j SKIP LOCKED`);
       for (const row of expired.rows) {
-        const updated = await client.query(`UPDATE crawl_jobs SET state = 'retry_wait', next_allowed_at = clock_timestamp(),
-          last_error = 'claim expired before completion', claim_owner = NULL, claim_expires_at = NULL,
-          lease_generation = NULL, updated_at = clock_timestamp() WHERE id = $1 RETURNING next_allowed_at`, [row.id]);
-        await this.recordEvent(client, row, row.state, 'retry_wait', { nextAllowedAt: iso(updated.rows[0].next_allowed_at), lastError: 'claim expired before completion' });
+        const exhausted = row.claim_recoveries + 1 >= this.maxClaimRecoveries;
+        const lastError = exhausted ? `${CLAIM_EXPIRED}; claim recovery limit reached` : CLAIM_EXPIRED;
+        const updated = await client.query(`UPDATE crawl_jobs SET state = $2,
+          next_allowed_at = CASE WHEN $3 THEN NULL ELSE clock_timestamp() END, claim_recoveries = claim_recoveries + 1,
+          last_error = $4, claim_owner = NULL, claim_expires_at = NULL,
+          lease_generation = NULL, updated_at = clock_timestamp() WHERE id = $1 RETURNING next_allowed_at, claim_recoveries`,
+        [row.id, exhausted ? 'permanently_failed' : 'retry_wait', exhausted, lastError]);
+        const { next_allowed_at: nextAllowedAt, claim_recoveries: claimRecoveries } = updated.rows[0];
+        await this.recordEvent(client, row, row.state, exhausted ? 'permanently_failed' : 'retry_wait', exhausted
+          ? { lastError, claimRecoveries, previousError: row.last_error }
+          : { nextAllowedAt: iso(nextAllowedAt), lastError, claimRecoveries });
       }
       return expired.rowCount;
     });

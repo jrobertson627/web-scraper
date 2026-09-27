@@ -13,6 +13,13 @@ import {
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
+import { DEFAULT_MAX_CLAIM_RECOVERIES, positiveInteger } from '../contracts/jobs.mjs';
+
+const CLAIM_EXPIRED = 'claim expired before completion';
+
+function newJobRecord(validated, now) {
+  return { ...validated, state: 'pending', attempts: 0, claimRecoveries: 0, createdAt: now, updatedAt: now, history: [], failures: [] };
+}
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -242,10 +249,12 @@ export class InMemoryPersistence {
   constructor(clock = () => new Date(), {
     authorizeOperator = (operatorId) => Boolean(operatorId),
     claimTimeoutMs = 30_000,
+    maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES,
   } = {}) {
     this.clock = clock;
     this.authorizeOperator = authorizeOperator;
     this.claimTimeoutMs = claimTimeoutMs;
+    this.maxClaimRecoveries = positiveInteger('maxClaimRecoveries', maxClaimRecoveries);
     this.jobs = new Map();
     this.sourceFetches = [];
     this.parseRuns = [];
@@ -267,7 +276,7 @@ export class InMemoryPersistence {
     const existing = this.jobs.get(validated.key);
     if (existing) return existing;
     const now = this.clock().toISOString();
-    const stored = { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now, history: [], failures: [] };
+    const stored = newJobRecord(validated, now);
     this.jobs.set(validated.key, stored);
     return stored;
   }
@@ -319,7 +328,16 @@ export class InMemoryPersistence {
     for (const job of this.jobs.values()) {
       if (!job.claim || new Date(job.claim.expiresAt) > now || this.inFlight.has(job.key)) continue;
       if (job.state === 'fetching' || job.state === 'fetched') {
-        this.#applyTransition(job, 'retry_wait', { nextAllowedAt: now.toISOString(), lastError: 'claim expired before completion' }, now);
+        const claimRecoveries = (job.claimRecoveries ?? 0) + 1;
+        const exhausted = claimRecoveries >= this.maxClaimRecoveries;
+        const previousError = job.lastError ?? null;
+        job.claimRecoveries = claimRecoveries;
+        if (exhausted) {
+          job.nextAllowedAt = null;
+          this.#applyTransition(job, 'permanently_failed', { lastError: `${CLAIM_EXPIRED}; claim recovery limit reached`, claimRecoveries, previousError }, now);
+        } else {
+          this.#applyTransition(job, 'retry_wait', { nextAllowedAt: now.toISOString(), lastError: CLAIM_EXPIRED, claimRecoveries }, now);
+        }
         recovered += 1;
       } else {
         job.claim = null;
@@ -523,7 +541,7 @@ export class InMemoryPersistence {
         const validated = createJob(child);
         if (jobs.has(validated.key)) continue;
         const now = this.clock().toISOString();
-        jobs.set(validated.key, { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now, history: [], failures: [] });
+        jobs.set(validated.key, newJobRecord(validated, now));
       }
     }
     return { key, conflict, pages, observations, observationHistory, unavailableCoverage, reconciliationIssues, jobs };

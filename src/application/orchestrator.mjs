@@ -2,6 +2,7 @@ import { createProvenance } from '../contracts/provenance.mjs';
 import { createSourceUrl } from '../contracts/source.mjs';
 import { createSnapshot } from '../contracts/boundaries.mjs';
 import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
+import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
 
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
@@ -109,7 +110,7 @@ export class IngestionOrchestrator {
       const committed = await this.persistence.commitPageAndTransition(page, provenance, job.lease);
       return { kind: 'parsed', jobKey: job.key, pageType: job.pageType, warnings: [...(parsed.warnings ?? []), ...discovered.warnings], reconciliationIssues: committed.conflict ? 1 : 0 };
     } catch (error) {
-      if (phase === 'fetch' || phase === 'snapshot') throw error;
+      if (phase === 'fetch' || phase === 'snapshot') return this.#containFetchFailure(job, error, phase);
       const current = await this.persistence.getJob(job.key);
       if (current?.claim && ['fetching', 'fetched'].includes(current.state)) {
         try {
@@ -133,5 +134,28 @@ export class IngestionOrchestrator {
       }
       return { kind: 'parse_failed', jobKey: job.key, pageType: job.pageType, reason: error.message, phase };
     }
+  }
+
+  // An infrastructure error while fetching (raw store write, database call,
+  // lease renewal) settles only this job: it becomes a charged retry with
+  // bounded backoff, or permanently_failed once the budget is spent, and the
+  // run moves on. Errors marked fatal are wiring defects and still stop it.
+  async #containFetchFailure(job, error, phase) {
+    if (error?.fatal) throw error;
+    const reason = `${phase} failed: ${error?.message ?? String(error)}`;
+    const outcome = chargedRetry(this.fetcher.policy ?? REQUEST_POLICY_DEFAULTS, job, reason, error?.code ?? 'infrastructure', this.clock());
+    const details = outcome.kind === 'retry_wait'
+      ? { nextAllowedAt: outcome.nextAllowedAt, lastError: reason, failurePhase: phase }
+      : { lastError: outcome.reason, failurePhase: phase };
+    try {
+      await this.persistence.transitionJob(job.key, outcome.kind, job.lease, details);
+    } catch (transitionError) {
+      // The lease is gone or the host request could not be released. Claim
+      // recovery (and orphaned-request release) settles the job later.
+      return { kind: 'unsettled', code: outcome.code, jobKey: job.key, pageType: job.pageType, reason, phase,
+        settleError: transitionError?.message ?? String(transitionError) };
+    }
+    return { kind: outcome.kind, code: outcome.code, jobKey: job.key, pageType: job.pageType, reason: outcome.reason, phase,
+      ...(outcome.nextAllowedAt ? { nextAllowedAt: outcome.nextAllowedAt } : {}) };
   }
 }

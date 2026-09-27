@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createSourceUrl, isAllowedSourceUrl } from '../contracts/source.mjs';
 import { createFetchResult } from '../contracts/boundaries.mjs';
-import { validateRequestPolicy } from '../contracts/request-policy.mjs';
+import { chargedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { HttpTransport } from './http-transport.mjs';
 
 function header(headers, name) {
@@ -217,7 +217,9 @@ export class Fetcher {
       this.events.emit('throttle.paused', { jobKey: job.key, host, waitMs: Math.min(delay, maxChunkMs) });
       await this.sleep(Math.min(delay, maxChunkMs));
       const after = this.clock().getTime();
-      if (after <= before) throw new Error('throttle sleep did not advance the injected clock');
+      // A clock that does not advance is a wiring defect, not a page failure,
+      // so it is marked fatal and stops the worker instead of being retried.
+      if (after <= before) throw Object.assign(new Error('throttle sleep did not advance the injected clock'), { code: 'clock_not_advancing', fatal: true });
       await this.persistence.renewClaim(job.key, lease, this.clock());
     }
   }
@@ -258,9 +260,7 @@ export class Fetcher {
   }
 
   #retry(job, reason, code) {
-    if (job.attempts >= this.policy.maxAttempts) return createFetchResult({ kind: 'permanently_failed', code, reason: `${reason}; retry limit reached` });
-    const delay = Math.min(this.policy.retryBaseMs * (2 ** Math.max(0, job.attempts - 1)), this.policy.retryMaxMs);
-    return createFetchResult({ kind: 'retry_wait', code, reason, nextAllowedAt: this.#nextTime(delay) });
+    return createFetchResult(chargedRetry(this.policy, job, reason, code, this.clock()));
   }
 
   #nextTime(delay) { return new Date(this.clock().getTime() + delay).toISOString(); }

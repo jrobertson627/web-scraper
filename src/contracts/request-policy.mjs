@@ -9,6 +9,16 @@ export const REQUEST_POLICY_DEFAULTS = Object.freeze({
   maxRetryAfterMs: 86_400_000,
 });
 
+// The outcome of a failure that counts against policy.maxAttempts: a
+// retry_wait with bounded exponential backoff, or permanently_failed once the
+// budget is spent.
+export function chargedRetry(policy, job, reason, code, now) {
+  const attempt = job.attempts ?? 1;
+  if (attempt >= policy.maxAttempts) return { kind: 'permanently_failed', code, reason: `${reason}; retry limit reached` };
+  const delay = Math.min(policy.retryBaseMs * (2 ** Math.max(0, attempt - 1)), policy.retryMaxMs);
+  return { kind: 'retry_wait', code, reason, nextAllowedAt: new Date(now.getTime() + delay).toISOString() };
+}
+
 function invalid(field, expected, example) {
   throw new Error(`${field} is invalid. Expected ${expected}. Example: ${example}`);
 }

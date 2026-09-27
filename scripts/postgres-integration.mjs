@@ -483,3 +483,22 @@ test('a process clock skewed from the database clock neither rejects a valid lea
     });
   }
 });
+
+test('claim recovery caps a job whose worker keeps disappearing', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 300, maxClaimRecoveries: 3 });
+  const job = rootJob();
+  await persistence.addJob(job);
+  for (let recovery = 1; recovery <= 3; recovery += 1) {
+    const claimed = await persistence.claimNextJob(new Date(), `crashing-worker-${recovery}`);
+    assert.equal(claimed.key, job.key);
+    await delay(400);
+    assert.equal(await persistence.recoverExpiredClaims(), 1);
+    assert.equal((await persistence.getJob(job.key)).claimRecoveries, recovery);
+  }
+  const failed = await persistence.getJob(job.key);
+  assert.equal(failed.state, 'permanently_failed');
+  assert.match(failed.lastError, /claim recovery limit reached/);
+  assert.equal(failed.failures.at(-1).details.claimRecoveries, 3);
+  assert.equal(await persistence.claimNextJob(new Date(), 'worker'), null);
+});

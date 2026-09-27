@@ -7,13 +7,26 @@ export const FAILURE_STATES = Object.freeze(['retry_wait', 'operator_stop', 'par
 const TRANSITIONS = new Map([
   ['pending', new Set(['fetching'])],
   ['fetching', new Set(['fetched', 'retry_wait', 'permanently_failed', 'parse_failed', 'operator_stop'])],
-  ['fetched', new Set(['parsed', 'parse_failed', 'retry_wait', 'operator_stop'])],
+  // fetched -> permanently_failed is only taken by claim recovery once a job
+  // has exhausted its claim-recovery budget.
+  ['fetched', new Set(['parsed', 'parse_failed', 'retry_wait', 'operator_stop', 'permanently_failed'])],
   ['retry_wait', new Set(['fetching', 'permanently_failed'])],
   ['operator_stop', new Set(['retry_wait', 'permanently_failed'])],
   ['parsed', new Set()],
   ['parse_failed', new Set()],
   ['permanently_failed', new Set()],
 ]);
+
+// Both persistence adapters apply this cap when recovering jobs whose worker
+// disappeared: a job whose claim expires this many times without completing
+// becomes permanently_failed instead of retry_wait. Claim recovery never draws
+// on the transport/5xx budget (policy.maxAttempts). See JOB_LIFECYCLE.md.
+export const DEFAULT_MAX_CLAIM_RECOVERIES = 3;
+
+export function positiveInteger(name, value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
 
 export function canTransition(from, to) {
   return TRANSITIONS.get(from)?.has(to) ?? false;
