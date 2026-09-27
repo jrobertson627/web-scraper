@@ -302,7 +302,7 @@ test('real PostgreSQL persistence and process restart', async (t) => {
       WHERE canonical_box_score_path IN ('fixture.example/box/one.html','fixture.example/box/four.html') ORDER BY 1`);
     assert.deepEqual(neutral.rows, [{ path: 'fixture.example/box/four.html', neutral_site: true },
       { path: 'fixture.example/box/one.html', neutral_site: false }]);
-    assert.equal((await app.queries.listGames()).length, 6);
+    assert.equal((await app.queries.listGames()).items.length, 6);
     const server = app.createApiServer();
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {

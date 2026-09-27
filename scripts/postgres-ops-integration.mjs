@@ -10,6 +10,8 @@ import pg from 'pg';
 import { PostgresPersistence, openPostgresPersistence } from '../src/persistence/postgres.mjs';
 import { createRawStore } from '../src/persistence/index.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
+import { createFixtureApplication } from '../src/application/composition-root.mjs';
+import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
   throw new Error('PostgreSQL integration tests require an explicitly disposable PG* database');
@@ -84,4 +86,80 @@ test('refetching an unchanged conflicting page does not open a second issue', as
   assert.equal((await pool.query("SELECT count(*)::int AS n FROM normalized_page_revisions WHERE disposition = 'quarantined'")).rows[0].n, 2);
   await persistence.commitPage(page('Renamed again'), provenance(index, await fetch('conflict-3')), claimed.lease);
   assert.equal(await open(), 2, 'different conflicting content is a separate issue');
+});
+
+// Every (node type, relation) in an EXPLAIN (FORMAT JSON) plan.
+function planNodes(node, found = []) {
+  found.push({ type: node['Node Type'], relation: node['Relation Name'] });
+  for (const child of node.Plans ?? []) planNodes(child, found);
+  return found;
+}
+
+test('API reads are keyed or keyset-paged statements that PostgreSQL can serve from indexes', async (t) => {
+  const pool = new Pool({ max: 4 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const ingest = new PostgresPersistence({ pool, claimTimeoutMs: 10000 });
+  const raw = createRawStore('filesystem', join(localRoot, 'raw-reads'));
+  const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: { persistence: ingest, rawStore: raw } });
+  await app.runWorkerOnce();
+
+  const statements = [];
+  const recorded = new Proxy(pool, { get(target, name) {
+    if (name !== 'query') return typeof target[name] === 'function' ? target[name].bind(target) : target[name];
+    return (sql, params) => { statements.push({ sql, params }); return target.query(sql, params); };
+  } });
+  const reads = new PostgresPersistence({ pool: recorded });
+
+  const games = [];
+  let cursor = null;
+  do {
+    const page = await reads.listGames({ limit: 4, cursor });
+    games.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.equal(games.length, 6);
+  assert.equal(new Set(games.map((game) => game.gameKey)).size, 6);
+  assert.equal(statements.length, 2, 'two pages, one statement each');
+  const pagedGames = statements.at(-1);
+
+  statements.length = 0;
+  for (const game of games) assert.deepEqual(await reads.getGame(game.gameKey), game);
+  assert.equal(statements.length, games.length, 'one statement per game lookup');
+  const gameLookup = statements[0];
+  assert.equal(await reads.getGame('fixture-provider:fixture.example/box/missing.html'), null);
+
+  statements.length = 0;
+  const health = await reads.health();
+  assert.equal(statements.length, 1);
+  assert.equal(health.jobStates.parsed, foundationCorpus().length);
+  assert.equal(health.sourceFetches, foundationCorpus().length);
+
+  const schools = await reads.listSchools({ limit: 2 });
+  const seasons = await reads.listSeasons({ limit: 2 });
+  assert.equal(schools.items.length, 2);
+  assert.ok(schools.nextCursor);
+  const moreSeasons = await reads.listSeasons({ limit: 50, cursor: seasons.nextCursor });
+  const allSeasons = await reads.listSeasons({ limit: 50 });
+  assert.deepEqual([...seasons.items, ...moreSeasons.items], [...allSeasons.items]);
+
+  // With sequential scans disabled the planner still falls back to one when no
+  // index can serve the statement, so their absence proves an index path.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL enable_seqscan = off');
+    // statements: health, listSchools, listSeasons, listSeasons after a cursor, listSeasons in full.
+    for (const statement of [gameLookup, pagedGames, statements[1], statements[3], statements[4]]) {
+      const plan = (await client.query(`EXPLAIN (FORMAT JSON) ${statement.sql}`, statement.params)).rows[0]['QUERY PLAN'][0].Plan;
+      const nodes = planNodes(plan);
+      for (const table of ['games', 'schools', 'school_seasons', 'normalized_page_revisions']) {
+        assert.equal(nodes.some((node) => node.type === 'Seq Scan' && node.relation === table), false,
+          `no sequential scan of ${table}: ${JSON.stringify(nodes)}`);
+      }
+    }
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
 });

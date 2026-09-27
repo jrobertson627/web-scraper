@@ -18,9 +18,15 @@ async function availablePort() {
 }
 
 function fakePersistence(models = {}) {
+  const { schools, seasons, games, health } = createQueryModels(models);
+  const page = (items) => ({ items, nextCursor: null });
   return {
     closed: 0,
-    async queryModels() { return createQueryModels(models); },
+    async listSchools() { return page(schools); },
+    async listSeasons() { return page(seasons); },
+    async listGames() { return page(games); },
+    async getGame(key) { return games.find((game) => game.gameKey === key) ?? null; },
+    async health() { return health; },
     async close() { this.closed += 1; },
   };
 }
