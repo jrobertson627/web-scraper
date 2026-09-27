@@ -16,6 +16,7 @@ export class ParserRegistry {
     this.#parsers.set(key, parser);
     return this;
   }
+  has(pageType, version = '1') { return this.#parsers.has(`${assertPageType(pageType)}@${version}`); }
   get(pageType, version = '1') {
     assertPageType(pageType);
     const parser = this.#parsers.get(`${pageType}@${version}`);
@@ -52,4 +53,23 @@ export class FixtureParser {
       return createParseResult({ kind: 'structural_failure', error: `document could not be parsed: ${error.message}`, warnings: [] });
     }
   }
+}
+
+// Production parsers for real provider pages, one per page type, registered by
+// the worker assembly. The five Sports Reference parsers land in phase 2
+// (#39-#42); until then this list is empty and the worker refuses to start.
+export const PRODUCTION_PARSERS = Object.freeze([]);
+
+export function createProductionParserRegistry(parsers = PRODUCTION_PARSERS) {
+  const registry = new ParserRegistry();
+  for (const parser of parsers) registry.register(parser);
+  return registry;
+}
+
+// `pageType@version` entries the worker needs but the registry lacks. Fixture
+// parsers read synthetic JSON pages, so they never count for a real crawl.
+export function missingProductionParsers(registry, parserVersions) {
+  return Object.entries(parserVersions)
+    .filter(([pageType, version]) => !registry.has(pageType, version) || registry.get(pageType, version) instanceof FixtureParser)
+    .map(([pageType, version]) => `${pageType}@${version}`);
 }

@@ -143,7 +143,7 @@ test('raw repair inventories retained orphans and unsafe metadata references', a
   assert.equal(unsafePersistence.parseRuns.length, 0);
 });
 
-test('worker CLI uses distinct sanitized configuration and adapter exit codes', () => {
+test('worker CLI uses distinct sanitized configuration and readiness exit codes', () => {
   const invalid = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], {
     cwd: process.cwd(), encoding: 'utf8',
     env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: '{"secret":"TOP_SECRET"' },
@@ -158,8 +158,8 @@ test('worker CLI uses distinct sanitized configuration and adapter exit codes', 
     cwd: process.cwd(), encoding: 'utf8',
     env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: authorization, DATA_CONTRACT_JSON: dataContract, RAW_STORE_ROOT: process.cwd() },
   });
-  assert.equal(missingAdapter.status, EXIT_CODES.sourceAdapterMissing);
-  assert.match(missingAdapter.stderr, /no production source adapter/);
+  assert.equal(missingAdapter.status, EXIT_CODES.workerNotReady);
+  assert.match(missingAdapter.stderr, /no production parser is registered/);
   assert.doesNotMatch(missingAdapter.stderr, /\n\s+at /);
 });
 

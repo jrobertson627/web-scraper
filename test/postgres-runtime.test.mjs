@@ -96,7 +96,7 @@ test('API rejects invalid persistence settings before opening anything', async (
   assert.match(errors[0], /api configuration rejected: PGHOST is missing/);
 });
 
-test('worker in postgres mode verifies the store, closes it, and still reports the missing source adapter', async () => {
+test('worker in postgres mode verifies the store, closes it, and still reports the missing production parsers', async () => {
   const persistence = fakePersistence();
   let opened;
   const errors = [];
@@ -104,10 +104,10 @@ test('worker in postgres mode verifies the store, closes it, and still reports t
     mode: 'worker', env: workerEnv(PG_ENV), stderr: (message) => errors.push(message),
     openPostgres: async (settings) => { opened = settings; return persistence; },
   });
-  assert.equal(result.exitCode, EXIT_CODES.sourceAdapterMissing);
+  assert.equal(result.exitCode, EXIT_CODES.workerNotReady);
   assert.equal(opened.claimTimeoutMs, 30_000);
   assert.equal(persistence.closed, 1);
-  assert.match(errors.at(-1), /postgres persistence\), but no production source adapter/);
+  assert.match(errors.at(-1), /postgres persistence\), but no production parser is registered/);
 });
 
 test('worker reports an unavailable store as a runtime failure with the secret redacted', async () => {

@@ -66,7 +66,7 @@ This is the fixture composition input shape, not a file automatically loaded by 
 }
 ```
 
-Production worker configuration additionally requires a matching authorization and versioned data contract. The current `start:worker` command validates those gates and exits because no production source adapter is installed. Do not infer provider authorization from passing fixtures.
+Production worker configuration additionally requires a matching authorization and versioned data contract. The current `start:worker` command validates those gates and exits because no production parsers are registered yet. Do not infer provider authorization from passing fixtures.
 
 ## Dependency ownership
 

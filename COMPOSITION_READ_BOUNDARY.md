@@ -1,6 +1,6 @@
 # Composition and read boundary
 
-The composition root creates the source adapter, fixture transport, validated policy, raw store, persistence, parser registry, discovery, normalization, worker orchestrator, and query service. The worker receives the processing ports. The HTTP server receives only the query service and publication configuration; the CLI binds it to `127.0.0.1`.
+The fixture assembly (`createFixtureApplication`) creates the source adapter, fixture transport, validated policy, raw store, persistence, parser registry, discovery, normalization, worker orchestrator, and query service. The worker receives the processing ports. The HTTP server receives only the query service and publication configuration; the CLI binds it to `127.0.0.1`. The production assembly, `createWorkerApplication`, wires the same ports from real parts only; see `BOUNDARY_CONTRACTS.md`.
 
 After a verified fetch, parsing and normalization build a page result. `commitPageAndTransition` stages the page, observations, coverage, child jobs, reconciliation issues, and final `parsed` transition before installing any of them. Validation or transition failure leaves the previous page and job state intact. The PostgreSQL adapter performs the same operation within one database transaction.
 
