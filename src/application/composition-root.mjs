@@ -15,11 +15,13 @@ import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { buildFixtureReconciliationReport } from './reconciliation.mjs';
+import { NO_CRAWL_EVENTS, jobStateCounts } from './crawl-log.mjs';
 import {
   boxScoreDocument, gameLogDocument, schoolHistoryDocument, schoolIndexDocument, seasonDocument, statLine,
 } from './fixture-documents.mjs';
 
-export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState } = {}) {
+// events is the crawl-log sink (./crawl-log.mjs); the default discards events.
+export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState, events = NO_CRAWL_EVENTS } = {}) {
   const adapter = assertSourceAdapter(sourceAdapter);
   const providerId = adapter.providerId();
   const indexUrl = adapter.indexUrl();
@@ -56,7 +58,7 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
   const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears });
-  const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, policy: config.policy, allowedHosts: [host] });
+  const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, policy: config.policy, allowedHosts: [host], events });
   const normalizer = new Normalizer();
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
@@ -78,11 +80,13 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     persistence: boundaryPorts.persistence,
     rawStore,
     clock,
+    events,
   });
 
   async function runWorkerOnce(workerId = 'fixture-worker') {
     await ready;
     const result = await orchestrator.runOnce(workerId);
+    events.summary?.({ jobStates: jobStateCounts(result.jobs) });
     return { ...result, transportCalls: transport.calls.length };
   }
 
@@ -134,7 +138,12 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     orchestrator,
     runWorkerOnce,
     previewDryRun,
-    reconcile: () => buildFixtureReconciliationReport(persistence),
+    reconcile: () => {
+      const report = buildFixtureReconciliationReport(persistence);
+      events.emit('reconciliation.completed', { passed: report.passed,
+        failedChecks: report.checks.filter((check) => !check.passed).length, quarantined: report.quarantined.length });
+      return report;
+    },
     queries,
     createApiServer: (apiConfig = config) => createApiServer({ queries, config: apiConfig, clock }),
   };

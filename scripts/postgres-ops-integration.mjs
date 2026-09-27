@@ -12,6 +12,7 @@ import { createRawStore } from '../src/persistence/index.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
+import { summarizeCrawlStatus } from '../src/application/crawl-status.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
   throw new Error('PostgreSQL integration tests require an explicitly disposable PG* database');
@@ -135,6 +136,13 @@ test('API reads are keyed or keyset-paged statements that PostgreSQL can serve f
   assert.equal(health.jobStates.parsed, foundationCorpus().length);
   assert.equal(health.sourceFetches, foundationCorpus().length);
 
+  const crawl = await reads.crawlStatus({ windowMs: 3_600_000 });
+  assert.equal(crawl.jobs.filter((row) => row.state === 'parsed').reduce((sum, row) => sum + row.count, 0), foundationCorpus().length);
+  assert.equal(crawl.fetches.total, foundationCorpus().length);
+  assert.equal(crawl.fetches.inWindow, foundationCorpus().length);
+  assert.equal(summarizeCrawlStatus(crawl).totals.remaining, 0);
+
+  statements.length = 0;
   const schools = await reads.listSchools({ limit: 2 });
   const seasons = await reads.listSeasons({ limit: 2 });
   assert.equal(schools.items.length, 2);
@@ -149,8 +157,8 @@ test('API reads are keyed or keyset-paged statements that PostgreSQL can serve f
   try {
     await client.query('BEGIN');
     await client.query('SET LOCAL enable_seqscan = off');
-    // statements: health, listSchools, listSeasons, listSeasons after a cursor, listSeasons in full.
-    for (const statement of [gameLookup, pagedGames, statements[1], statements[3], statements[4]]) {
+    // statements: listSchools, listSeasons, listSeasons after a cursor, listSeasons in full.
+    for (const statement of [gameLookup, pagedGames, statements[0], statements[2], statements[3]]) {
       const plan = (await client.query(`EXPLAIN (FORMAT JSON) ${statement.sql}`, statement.params)).rows[0]['QUERY PLAN'][0].Plan;
       const nodes = planNodes(plan);
       for (const table of ['games', 'schools', 'school_seasons', 'normalized_page_revisions']) {

@@ -1,11 +1,14 @@
 import { createProvenance } from '../contracts/provenance.mjs';
 import { createSourceUrl } from '../contracts/source.mjs';
 import { createSnapshot } from '../contracts/boundaries.mjs';
+import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
 
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
 export class IngestionOrchestrator {
-  constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock }) {
+  // events is the crawl-log sink (./crawl-log.mjs); hooks below are single emit calls.
+  constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock, events = NO_CRAWL_EVENTS }) {
+    this.events = events;
     this.fetcher = fetcher;
     this.discovery = discovery;
     this.parsers = parsers;
@@ -23,6 +26,7 @@ export class IngestionOrchestrator {
       if (!job) break;
       const event = await this.#process(job);
       if (event) events.push(Object.freeze(event));
+      if (event) this.events.emit('job.settled', event);
       processed += 1;
     }
     return { processed, jobs: await this.persistence.listJobs(), events: Object.freeze(events) };
@@ -85,6 +89,7 @@ export class IngestionOrchestrator {
       }
       phase = 'normalize';
       const discovered = this.discovery.discover(job.pageType, snapshot, parsed.document);
+      this.events.emit('page.discovered', { jobKey: job.key, pageType: job.pageType, childKeys: discovered.childJobs.map((child) => child.key) });
       const page = this.normalizer.normalize(job.pageType, parsed.document, {
         jobKey: job.key,
         canonicalPath: job.canonicalPath,

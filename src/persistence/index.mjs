@@ -667,6 +667,28 @@ export class InMemoryPersistence {
     });
   }
 
+  // Same shape as PostgresPersistence#crawlStatus, for `cli.mjs status`.
+  crawlStatus({ windowMs = 3_600_000 } = {}) {
+    const now = this.clock();
+    const counts = new Map();
+    for (const job of this.jobs.values()) {
+      const key = `${job.pageType}|${job.state}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const network = this.sourceFetches.filter((fetch) => !fetch.cacheHit).map((fetch) => new Date(fetch.fetchedAt).getTime());
+    return deepFreeze({
+      observedAt: now.toISOString(),
+      jobs: [...counts].map(([key, count]) => { const [pageType, state] = key.split('|'); return { pageType, state, count }; }),
+      fetches: {
+        total: network.length,
+        inWindow: network.filter((at) => at > now.getTime() - windowMs).length,
+        windowMs,
+        firstAt: network.length ? new Date(Math.min(...network)).toISOString() : null,
+        lastAt: network.length ? new Date(Math.max(...network)).toISOString() : null,
+      },
+    });
+  }
+
   #schoolModel(page, school, rowIndex) {
     const observation = this.observations.get(`school:${page.jobKey}:${rowIndex}`);
     if (typeof observation?.eligible !== 'boolean') {

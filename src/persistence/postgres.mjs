@@ -469,6 +469,22 @@ export class PostgresPersistence {
       warnings: row.warnings, unavailableCoverage: row.unavailable_coverage, conflicts: row.conflicts,
       observations: row.observations });
   }
+
+  // Operator status for `cli.mjs status`: job counts by page type and state, and
+  // network fetches (cache hits excluded) in the trailing window, in one statement.
+  async crawlStatus({ windowMs = 3_600_000 } = {}) {
+    const result = await this.pool.query(`SELECT clock_timestamp() AS observed_at,
+      (SELECT COALESCE(json_agg(json_build_object('pageType',page_type,'state',state,'count',n)),'[]'::json) FROM
+        (SELECT page_type,state,count(*)::int AS n FROM crawl_jobs GROUP BY page_type,state) j) AS jobs,
+      (SELECT count(*)::int FROM source_fetches WHERE NOT cache_hit) AS fetches,
+      (SELECT count(*)::int FROM source_fetches WHERE NOT cache_hit
+        AND fetched_at > clock_timestamp() - ($1::bigint * interval '1 millisecond')) AS window_fetches,
+      (SELECT min(fetched_at) FROM source_fetches WHERE NOT cache_hit) AS first_fetch_at,
+      (SELECT max(fetched_at) FROM source_fetches WHERE NOT cache_hit) AS last_fetch_at`, [windowMs]);
+    const row = result.rows[0];
+    return deepFreeze({ observedAt: iso(row.observed_at), jobs: row.jobs, fetches: { total: row.fetches, inWindow: row.window_fetches,
+      windowMs, firstAt: iso(row.first_fetch_at), lastAt: iso(row.last_fetch_at) } });
+  }
 }
 
 const LATEST_ACCEPTED_GAME_REVISION = `LEFT JOIN LATERAL

@@ -6,6 +6,8 @@ import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
+import { createCrawlLog } from './crawl-log.mjs';
+import { STATUS_WINDOW_MS, formatCrawlStatus, summarizeCrawlStatus } from './crawl-status.mjs';
 
 export const EXIT_CODES = Object.freeze({
   success: 0,
@@ -105,9 +107,11 @@ export async function runCli({
   stdout = (message) => console.log(message),
   stderr = (message) => console.error(message),
   openPostgres = openPostgresPersistence,
+  args = process.argv.slice(3),
+  crawlLog = createCrawlLog({ write: stderr }),
 } = {}) {
   if (mode === 'local') {
-    const app = createFixtureApplication();
+    const app = createFixtureApplication({ events: crawlLog });
     app.lifecycle.ready();
     stdout('fixture local ready');
     app.lifecycle.running();
@@ -119,6 +123,30 @@ export async function runCli({
     }
     stdout(JSON.stringify({ mode, lifecycle: app.lifecycle.state, ...result }, null, 2));
     return { exitCode: EXIT_CODES.success, app };
+  }
+
+  if (mode === 'status') {
+    // Operator progress report; read-only against the configured store.
+    let settings;
+    try {
+      settings = persistenceSettings(env);
+    } catch (error) {
+      stderr(`status configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    let status;
+    if (settings.kind === 'postgres') {
+      const persistence = await openPostgres(settings);
+      try { status = await persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS }); } finally { await persistence.close(); }
+    } else {
+      // Memory has no durable crawl to report, so show the fixture crawl's.
+      const app = createFixtureApplication();
+      await app.runWorkerOnce();
+      status = await app.persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS });
+    }
+    const summary = summarizeCrawlStatus(status);
+    stdout(args.includes('--json') ? JSON.stringify(summary, null, 2) : formatCrawlStatus(summary));
+    return { exitCode: EXIT_CODES.success, summary };
   }
 
   if (mode === 'api') {
@@ -195,7 +223,7 @@ export async function runCli({
     return { exitCode: EXIT_CODES.sourceAdapterMissing };
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, or api. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 

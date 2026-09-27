@@ -21,6 +21,7 @@
     "start:worker": "node src/application/cli.mjs worker",
     "start:worker:personal": "node scripts/personal-worker.mjs",
     "start:api": "node src/application/cli.mjs api",
+    "status": "node src/application/cli.mjs status",
     "smoke:foundation": "node scripts/foundation-smoke.mjs",
     "migrate": "node scripts/migrate.mjs",
     "smoke:migrations": "node scripts/migration-smoke.mjs",
