@@ -5,3 +5,6 @@ coverage/
 !.env.example
 .tmp/
 .raw/
+
+# Real Sports Reference captures stay local; the repo is public (see fixtures/sports-reference/README.md).
+fixtures/sports-reference/raw/
