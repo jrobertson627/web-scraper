@@ -25,6 +25,24 @@ export function sportsReferenceTable($, id) {
   return matches[0];
 }
 
+// Ids of the direct and commented tables whose id starts with `prefix`, in
+// document order. Pages with one table per team (box scores) name them by slug.
+export function sportsReferenceTableIds($, prefix) {
+  const ids = [];
+  const visit = (node) => {
+    if (node.type === 'comment') {
+      if (!String(node.data).includes(`id="${prefix}`)) return;
+      const comment = load(node.data);
+      comment('table').each((_, table) => { if (comment(table).attr('id')?.startsWith(prefix)) ids.push(comment(table).attr('id')); });
+      return;
+    }
+    if (node.type === 'tag' && node.name === 'table' && node.attribs?.id?.startsWith(prefix)) ids.push(node.attribs.id);
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit($.root()[0]);
+  return ids;
+}
+
 export function assertTableLayout($, table, id, requiredStats) {
   if (!table?.length) throw new Error(`table #${id} is missing`);
   if (!table.find('tbody').length) throw new Error(`table #${id} has no tbody`);
