@@ -108,24 +108,6 @@ function schoolHistory(html, sitePath) {
   };
 }
 
-function season(html, sitePath) {
-  const links = [...html.matchAll(/<a href="([^"]*-gamelogs\.html)"[^>]*>Game Log<\/a>/g)].map((match) => match[1]);
-  const title = decode(/<h1[^>]*>([\s\S]*?)<\/h1>/.exec(html)?.[1] ?? '').replace(/\s+/g, ' ');
-  return {
-    school: title || sitePath,
-    endingYear: Number(/(\d{4})\.html$/.exec(sitePath)[1]),
-    gameLogUrl: links.length ? new URL(links[0], ORIGIN).href : null,
-    summary: {
-      wins: NOT_PARSED, losses: NOT_PARSED, confWins: NOT_PARSED, confLosses: NOT_PARSED,
-      srs: NOT_PARSED, sos: NOT_PARSED, offRtg: NOT_PARSED, defRtg: NOT_PARSED,
-      conference: null, coach: null, ncaaTournament: null,
-    },
-    roster: [],
-    teamTotals: null,
-    players: [],
-  };
-}
-
 const LOCATIONS = Object.freeze({ '': 'home', '@': 'away', N: 'neutral' });
 
 function score(text) { return /^\d+$/.test(text) ? present(Number(text)) : unavailable('not_played'); }
@@ -178,7 +160,7 @@ function boxScore(html) {
   };
 }
 
-const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, season, game_log: gameLog, box_score: boxScore });
+const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, game_log: gameLog, box_score: boxScore });
 const productionParsers = createProductionParserRegistry();
 
 export function captureLinkDocument(pageType, sitePath) {

@@ -3,8 +3,9 @@ import { parsedDocumentError } from '../contracts/parsed-documents.mjs';
 import { assertPageType } from '../contracts/source.mjs';
 import { SchoolHistoryParser } from './school-history.mjs';
 import { SchoolIndexParser } from './school-index.mjs';
+import { SeasonParser } from './season.mjs';
 
-export { SchoolHistoryParser, SchoolIndexParser };
+export { SchoolHistoryParser, SchoolIndexParser, SeasonParser };
 
 export class ParserRegistry {
   #parsers = new Map();
@@ -65,6 +66,7 @@ export class FixtureParser {
 export const PRODUCTION_PARSERS = Object.freeze([
   new SchoolIndexParser(),
   new SchoolHistoryParser(),
+  new SeasonParser(),
 ]);
 
 export function createProductionParserRegistry(parsers = PRODUCTION_PARSERS) {
