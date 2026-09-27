@@ -1,4 +1,28 @@
+import { CORE_STAT_FIELDS } from '../contracts/parsed-documents.mjs';
 import { canonicalPathString, canonicalizeSourceUrl, createSourceUrl } from '../contracts/source.mjs';
+
+const CORE_COLUMNS = CORE_STAT_FIELDS.join(',');
+const CORE_UPDATES = CORE_STAT_FIELDS.map((field) => `${field} = EXCLUDED.${field}`).join(',');
+
+function presentValue(value) { return value?.state === 'present' ? value.value : null; }
+
+// Non-present source-value states, so blank, unavailable and null stay distinct
+// even though their named columns are all NULL.
+function valueStates(values) {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value && value.state !== 'present'));
+}
+
+// The sixteen core stats as column values, plus the value states and extra JSON.
+function statColumns(line) {
+  const core = Object.fromEntries(CORE_STAT_FIELDS.map((field) => [field, line?.[field]]));
+  return {
+    values: CORE_STAT_FIELDS.map((field) => presentValue(core[field])),
+    valueStates: valueStates(core),
+    extra: line?.extra ?? {},
+  };
+}
+
+function placeholders(from, count) { return Array.from({ length: count }, (_, index) => `$${from + index}`).join(','); }
 
 function canonicalFor(providerId, target, baseUrl) {
   if (!target) return null;
@@ -6,6 +30,11 @@ function canonicalFor(providerId, target, baseUrl) {
   const canonical = canonicalizeSourceUrl(sourceUrl);
   if (canonical.host !== new URL(baseUrl).host) throw new Error('linked identity must remain on the source host');
   return canonicalPathString(canonical);
+}
+
+// A link that fails canonicalization (off-host or malformed) is kept as a name only.
+function linkedPath(providerId, target, baseUrl) {
+  try { return canonicalFor(providerId, target, baseUrl); } catch { return null; }
 }
 
 function unprefix(providerId, value) {
@@ -22,13 +51,13 @@ async function schoolId(client, job) {
 }
 
 async function upsertPlayer(client, job, player, provenance) {
-  const path = canonicalFor(job.provider_id, player.sourcePath ?? player.sourceUrl ?? player.url, job.source_url);
+  const path = linkedPath(job.provider_id, player.playerPath, job.source_url);
   if (!path) return null;
   const result = await client.query(`INSERT INTO players (provider_id,canonical_source_path,display_name,provenance)
     VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (provider_id,canonical_source_path)
     WHERE canonical_source_path IS NOT NULL DO UPDATE SET display_name = EXCLUDED.display_name,
     provenance = EXCLUDED.provenance RETURNING id`,
-  [job.provider_id, path, player.name ?? player.playerName, JSON.stringify(provenance)]);
+  [job.provider_id, path, player.name, JSON.stringify(provenance)]);
   return result.rows[0].id;
 }
 
@@ -67,88 +96,216 @@ async function writeSchoolHistory(client, job, page, provenance) {
   }
 }
 
-async function writeSeason(client, job, page, provenance) {
+async function upsertSchoolSeason(client, job, endingYear, provenance) {
   const id = await schoolId(client, job);
-  if (!id) throw new Error('season has no stored school identity');
+  if (!id) return null;
   const season = await client.query(`INSERT INTO school_seasons (school_id,ending_year,coverage_status,provenance)
     VALUES ($1,$2,'linked',$3::jsonb) ON CONFLICT (school_id,ending_year)
     DO UPDATE SET coverage_status = 'linked',provenance = EXCLUDED.provenance RETURNING id`,
-  [id, page.data.endingYear, JSON.stringify(provenance)]);
-  for (const [index, player] of (page.data.roster ?? []).entries()) {
-    const path = canonicalFor(job.provider_id, player.sourcePath ?? player.sourceUrl ?? player.url, job.source_url);
+  [id, endingYear, JSON.stringify(provenance)]);
+  return season.rows[0].id;
+}
+
+// Upserts a row keyed by a player link when there is one, else by source row.
+async function upsertPlayerRow(client, { table, owner, ownerId, rowIndex, playerId, columns, values }) {
+  const names = [owner, 'source_row_index', 'player_id', ...columns];
+  const updates = ['source_row_index', ...columns].map((column) => `${column} = EXCLUDED.${column}`).join(',');
+  const conflict = playerId
+    ? `(${owner},player_id) WHERE player_id IS NOT NULL`
+    : `(${owner},source_row_index) WHERE player_id IS NULL`;
+  await client.query(`INSERT INTO ${table} (${names.join(',')}) VALUES (${placeholders(1, names.length)})
+    ON CONFLICT ${conflict} DO UPDATE SET ${updates}`, [ownerId, rowIndex, playerId, ...values]);
+}
+
+async function writeSeason(client, job, page, provenance) {
+  const data = page.data;
+  const seasonId = await upsertSchoolSeason(client, job, data.endingYear, provenance);
+  if (!seasonId) throw new Error('season has no stored school identity');
+  const summary = data.summary;
+  const tournament = summary.ncaaTournament;
+  const summaryValues = {
+    wins: summary.wins, losses: summary.losses, confWins: summary.confWins, confLosses: summary.confLosses,
+    srs: summary.srs, sos: summary.sos, offRtg: summary.offRtg, defRtg: summary.defRtg,
+    ...(tournament ? { ncaaSeed: tournament.seed } : {}),
+  };
+  await client.query(`INSERT INTO team_seasons
+    (school_season_id,wins,losses,conf_wins,conf_losses,srs,sos,off_rtg,def_rtg,conference_name,conference_path,
+     coach_name,coach_path,ncaa_seed,ncaa_region,ncaa_games,extra,value_states,provenance)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb,$18::jsonb,$19::jsonb)
+    ON CONFLICT (school_season_id) DO UPDATE SET wins = EXCLUDED.wins,losses = EXCLUDED.losses,
+    conf_wins = EXCLUDED.conf_wins,conf_losses = EXCLUDED.conf_losses,srs = EXCLUDED.srs,sos = EXCLUDED.sos,
+    off_rtg = EXCLUDED.off_rtg,def_rtg = EXCLUDED.def_rtg,conference_name = EXCLUDED.conference_name,
+    conference_path = EXCLUDED.conference_path,coach_name = EXCLUDED.coach_name,coach_path = EXCLUDED.coach_path,
+    ncaa_seed = EXCLUDED.ncaa_seed,ncaa_region = EXCLUDED.ncaa_region,ncaa_games = EXCLUDED.ncaa_games,
+    extra = EXCLUDED.extra,value_states = EXCLUDED.value_states,provenance = EXCLUDED.provenance`,
+  [seasonId, ...['wins', 'losses', 'confWins', 'confLosses', 'srs', 'sos', 'offRtg', 'defRtg'].map((field) => presentValue(summary[field])),
+    summary.conference?.name ?? null, linkedPath(job.provider_id, summary.conference?.path, job.source_url),
+    summary.coach?.name ?? null, linkedPath(job.provider_id, summary.coach?.path, job.source_url),
+    presentValue(tournament?.seed), tournament?.region ?? null, JSON.stringify(tournament?.games ?? []),
+    JSON.stringify(summary.extra ?? {}), JSON.stringify(valueStates(summaryValues)), JSON.stringify(provenance)]);
+
+  for (const [index, player] of data.roster.entries()) {
+    const path = linkedPath(job.provider_id, player.playerPath, job.source_url);
     await upsertPlayer(client, job, player, provenance);
+    const conflict = path
+      ? '(school_season_id,player_source_path) WHERE player_source_path IS NOT NULL'
+      : '(school_season_id,source_row_index) WHERE player_source_path IS NULL';
     await client.query(`INSERT INTO season_rosters
-      (school_season_id,source_row_index,player_source_path,player_name,provenance)
-      VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING`,
-    [season.rows[0].id, player.rowIndex ?? index, path, player.name ?? player.playerName, JSON.stringify(provenance)]);
+      (school_season_id,source_row_index,player_source_path,player_name,jersey_number,class,position,height_in,weight,
+       extra,value_states,provenance)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb) ON CONFLICT ${conflict} DO UPDATE SET
+      source_row_index = EXCLUDED.source_row_index,player_name = EXCLUDED.player_name,jersey_number = EXCLUDED.jersey_number,
+      class = EXCLUDED.class,position = EXCLUDED.position,height_in = EXCLUDED.height_in,weight = EXCLUDED.weight,
+      extra = EXCLUDED.extra,value_states = EXCLUDED.value_states,provenance = EXCLUDED.provenance`,
+    [seasonId, index, path, player.name, player.number, player.class, player.position,
+      presentValue(player.heightIn), presentValue(player.weight), JSON.stringify(player.extra ?? {}),
+      JSON.stringify(valueStates({ heightIn: player.heightIn, weight: player.weight })), JSON.stringify(provenance)]);
   }
+
+  for (const side of data.teamTotals ? ['team', 'opponent'] : []) {
+    const totals = data.teamTotals[side];
+    const stats = statColumns(totals.stats);
+    await client.query(`INSERT INTO team_season_stats
+      (school_season_id,side,games,${CORE_COLUMNS},extra,value_states,provenance)
+      VALUES ($1,$2,$3,${placeholders(4, CORE_STAT_FIELDS.length)},$20::jsonb,$21::jsonb,$22::jsonb)
+      ON CONFLICT (school_season_id,side) DO UPDATE SET games = EXCLUDED.games,${CORE_UPDATES},
+      extra = EXCLUDED.extra,value_states = EXCLUDED.value_states,provenance = EXCLUDED.provenance`,
+    [seasonId, side, presentValue(totals.games), ...stats.values, JSON.stringify(stats.extra),
+      JSON.stringify({ ...valueStates({ games: totals.games }), ...stats.valueStates }), JSON.stringify(provenance)]);
+  }
+
+  for (const [index, player] of data.players.entries()) {
+    const playerId = await upsertPlayer(client, job, player, provenance);
+    const stats = statColumns(player.stats);
+    await upsertPlayerRow(client, {
+      table: 'player_season_stats', owner: 'school_season_id', ownerId: seasonId, rowIndex: index, playerId,
+      columns: ['player_name', 'games', 'games_started', ...CORE_STAT_FIELDS, 'advanced', 'extra', 'value_states', 'provenance'],
+      values: [player.name, presentValue(player.games), presentValue(player.gamesStarted), ...stats.values,
+        JSON.stringify(player.advanced), JSON.stringify(stats.extra),
+        JSON.stringify({ ...valueStates({ games: player.games, gamesStarted: player.gamesStarted }), ...stats.valueStates }),
+        JSON.stringify(provenance)],
+    });
+  }
+}
+
+// Box scores do not state neutral-site context; the game-log rows that link a box
+// score do. Any neutral row wins; otherwise a located row means not neutral.
+async function resolveNeutralSite(client, providerId, boxScorePath) {
+  await client.query(`UPDATE games g SET neutral_site = r.neutral FROM
+    (SELECT bool_or(location = 'neutral') AS neutral FROM game_log_rows
+      WHERE provider_id = $1 AND canonical_box_score_path = $2 AND location IS NOT NULL) r
+    WHERE g.provider_id = $1 AND g.canonical_box_score_path = $2 AND r.neutral IS NOT NULL`,
+  [providerId, boxScorePath]);
+}
+
+async function writeGameLog(client, job, page, provenance) {
+  const seasonId = await upsertSchoolSeason(client, job, page.data.endingYear, provenance);
+  if (!seasonId) throw new Error('game log has no stored school identity');
+  const boxScorePaths = new Set();
+  for (const [index, row] of page.data.games.entries()) {
+    const boxScorePath = linkedPath(job.provider_id, row.boxScoreUrl, job.source_url);
+    if (boxScorePath) boxScorePaths.add(boxScorePath);
+    const logRow = await client.query(`INSERT INTO game_log_rows
+      (provider_id,school_season_id,source_row_index,game_number,game_date,location,opponent_name,opponent_school_path,
+       game_type,result,game_status,overtimes,team_score,opponent_score,canonical_box_score_path,extra,value_states,provenance)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb,$18::jsonb)
+      ON CONFLICT (school_season_id,source_row_index) DO UPDATE SET game_number = EXCLUDED.game_number,
+      game_date = EXCLUDED.game_date,location = EXCLUDED.location,opponent_name = EXCLUDED.opponent_name,
+      opponent_school_path = EXCLUDED.opponent_school_path,game_type = EXCLUDED.game_type,result = EXCLUDED.result,
+      game_status = EXCLUDED.game_status,overtimes = EXCLUDED.overtimes,team_score = EXCLUDED.team_score,
+      opponent_score = EXCLUDED.opponent_score,canonical_box_score_path = EXCLUDED.canonical_box_score_path,
+      extra = EXCLUDED.extra,value_states = EXCLUDED.value_states,provenance = EXCLUDED.provenance RETURNING id`,
+    [job.provider_id, seasonId, index, row.gameNumber, row.date, row.location, row.opponent.name,
+      linkedPath(job.provider_id, row.opponent.schoolPath, job.source_url), row.gameType, row.result, row.status,
+      row.overtimes, presentValue(row.teamScore), presentValue(row.opponentScore), boxScorePath,
+      JSON.stringify(row.extra ?? {}), JSON.stringify(valueStates({ teamScore: row.teamScore, opponentScore: row.opponentScore })),
+      JSON.stringify(provenance)]);
+    for (const [side, line] of [['team', row.teamStats], ['opponent', row.opponentStats]]) {
+      if (!line) continue;
+      const stats = statColumns(line);
+      await client.query(`INSERT INTO game_log_row_stats
+        (game_log_row_id,side,${CORE_COLUMNS},extra,value_states,provenance)
+        VALUES ($1,$2,${placeholders(3, CORE_STAT_FIELDS.length)},$19::jsonb,$20::jsonb,$21::jsonb)
+        ON CONFLICT (game_log_row_id,side) DO UPDATE SET ${CORE_UPDATES},
+        extra = EXCLUDED.extra,value_states = EXCLUDED.value_states,provenance = EXCLUDED.provenance`,
+      [logRow.rows[0].id, side, ...stats.values, JSON.stringify(stats.extra), JSON.stringify(stats.valueStates), JSON.stringify(provenance)]);
+    }
+  }
+  for (const path of boxScorePaths) await resolveNeutralSite(client, job.provider_id, path);
 }
 
 async function writeGame(client, job, page, provenance) {
   const data = page.data;
   const game = await client.query(`INSERT INTO games
-    (provider_id,canonical_box_score_path,source_url,game_date,game_status,game_type,neutral_site,overtime,line_scores,provenance)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)
+    (provider_id,canonical_box_score_path,source_url,game_date,game_status,game_type,neutral_site,overtimes,line_scores,
+     description,venue,attendance,extra,provenance)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13::jsonb,$14::jsonb)
     ON CONFLICT (provider_id,canonical_box_score_path) DO UPDATE SET
     source_url = EXCLUDED.source_url,game_date = EXCLUDED.game_date,game_status = EXCLUDED.game_status,
-    game_type = EXCLUDED.game_type,neutral_site = EXCLUDED.neutral_site,overtime = EXCLUDED.overtime,
-    line_scores = EXCLUDED.line_scores,provenance = EXCLUDED.provenance RETURNING id`,
+    game_type = EXCLUDED.game_type,neutral_site = COALESCE(EXCLUDED.neutral_site,games.neutral_site),
+    overtimes = EXCLUDED.overtimes,line_scores = EXCLUDED.line_scores,description = EXCLUDED.description,
+    venue = EXCLUDED.venue,attendance = EXCLUDED.attendance,extra = EXCLUDED.extra,provenance = EXCLUDED.provenance RETURNING id`,
   [job.provider_id, job.canonical_path, job.source_url, data.gameDate ?? null, data.status,
-    data.gameType ?? null, data.neutralSite ?? null, data.overtime == null ? null : String(data.overtime),
-    JSON.stringify(data.lineScores ?? {}), JSON.stringify(provenance)]);
+    data.gameType ?? null, data.neutralSite ?? null, data.overtimes ?? null,
+    JSON.stringify(Object.fromEntries(data.teams.map((team) => [team.side, team.lineScore]))),
+    data.description ?? null, data.venue ?? null, presentValue(data.attendance),
+    JSON.stringify(data.extra ?? {}), JSON.stringify(provenance)]);
   const gameId = game.rows[0].id;
-  for (const team of data.teams ?? []) {
-    const path = canonicalFor(job.provider_id, team.sourcePath ?? team.sourceUrl, job.source_url);
+  for (const team of data.teams) {
     const side = await client.query(`INSERT INTO game_teams
-      (game_id,side,team_source_path,team_name,final_score,provenance)
-      VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (game_id,side) DO UPDATE SET
+      (game_id,side,team_source_path,team_name,final_score,line_score,provenance)
+      VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb) ON CONFLICT (game_id,side) DO UPDATE SET
       team_source_path = EXCLUDED.team_source_path,team_name = EXCLUDED.team_name,
-      final_score = EXCLUDED.final_score,provenance = EXCLUDED.provenance RETURNING id`,
-    [gameId, team.side, path, team.name, team.finalScore ?? null, JSON.stringify(provenance)]);
-    for (const [name, value] of Object.entries(team.stats ?? {})) {
-      await client.query(`INSERT INTO team_game_stats (game_team_id,stat_name,value,provenance)
-        VALUES ($1,$2,$3::jsonb,$4::jsonb) ON CONFLICT (game_team_id,stat_name)
-        DO UPDATE SET value = EXCLUDED.value,provenance = EXCLUDED.provenance`,
-      [side.rows[0].id, name, JSON.stringify(value), JSON.stringify(provenance)]);
+      final_score = EXCLUDED.final_score,line_score = EXCLUDED.line_score,provenance = EXCLUDED.provenance RETURNING id`,
+    [gameId, team.side, linkedPath(job.provider_id, team.schoolPath, job.source_url), team.name,
+      presentValue(team.finalScore), JSON.stringify(team.lineScore), JSON.stringify(provenance)]);
+    const gameTeamId = side.rows[0].id;
+    if (team.stats) {
+      const stats = statColumns(team.stats);
+      await client.query(`INSERT INTO team_game_stats
+        (game_team_id,${CORE_COLUMNS},advanced,extra,value_states,provenance)
+        VALUES ($1,${placeholders(2, CORE_STAT_FIELDS.length)},$18::jsonb,$19::jsonb,$20::jsonb,$21::jsonb)
+        ON CONFLICT (game_team_id) DO UPDATE SET ${CORE_UPDATES},advanced = EXCLUDED.advanced,
+        extra = EXCLUDED.extra,value_states = EXCLUDED.value_states,provenance = EXCLUDED.provenance`,
+      [gameTeamId, ...stats.values, JSON.stringify(team.advanced), JSON.stringify(stats.extra),
+        JSON.stringify({ ...valueStates({ finalScore: team.finalScore }), ...stats.valueStates }), JSON.stringify(provenance)]);
     }
-  }
-  for (const [table, rows] of [['player_game_basic_stats', data.playerBasicStats ?? []],
-    ['player_game_advanced_stats', data.playerAdvancedStats ?? []]]) {
-    for (const [index, player] of rows.entries()) {
+    for (const [index, player] of team.players.entries()) {
       const playerId = await upsertPlayer(client, job, player, provenance);
-      const name = player.name ?? player.playerName;
-      if (playerId) {
-        await client.query(`INSERT INTO ${table} (game_id,source_row_index,player_id,player_name,stats,provenance)
-          VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb) ON CONFLICT (game_id,player_id)
-          WHERE player_id IS NOT NULL DO UPDATE SET source_row_index = EXCLUDED.source_row_index,
-          player_name = EXCLUDED.player_name,stats = EXCLUDED.stats,provenance = EXCLUDED.provenance`,
-        [gameId, player.rowIndex ?? index, playerId, name, JSON.stringify(player.stats ?? {}), JSON.stringify(provenance)]);
-      } else {
-        await client.query(`INSERT INTO ${table} (game_id,source_row_index,player_id,player_name,stats,provenance)
-          VALUES ($1,$2,NULL,$3,$4::jsonb,$5::jsonb) ON CONFLICT (game_id,source_row_index)
-          WHERE player_id IS NULL DO UPDATE SET player_name = EXCLUDED.player_name,
-          stats = EXCLUDED.stats,provenance = EXCLUDED.provenance`,
-        [gameId, player.rowIndex ?? index, name, JSON.stringify(player.stats ?? {}), JSON.stringify(provenance)]);
-      }
+      const stats = statColumns(player.stats);
+      await upsertPlayerRow(client, {
+        table: 'player_game_stats', owner: 'game_team_id', ownerId: gameTeamId, rowIndex: index, playerId,
+        columns: ['player_name', 'starter', ...CORE_STAT_FIELDS, 'advanced', 'extra', 'value_states', 'provenance'],
+        values: [player.name, player.starter, ...stats.values, JSON.stringify(player.advanced), JSON.stringify(stats.extra),
+          JSON.stringify(stats.valueStates), JSON.stringify(provenance)],
+      });
     }
   }
+  await resolveNeutralSite(client, job.provider_id, job.canonical_path);
 }
 
-async function recordLogConflict(client, job, observation, sourceFetchId) {
-  if (!observation.canonicalBoxScorePath) return;
-  const path = unprefix(job.provider_id, observation.canonicalBoxScorePath);
+// A game-log row names its own school; the box score's team with the same school
+// path is that side, so the row's scores are compared side by side.
+async function recordLogConflict(client, providerId, schoolSourcePath, observation, sourceFetchId) {
+  if (!observation.canonicalBoxScorePath || !schoolSourcePath) return;
+  const path = unprefix(providerId, observation.canonicalBoxScorePath);
   const result = await client.query('SELECT id FROM games WHERE provider_id = $1 AND canonical_box_score_path = $2',
-    [job.provider_id, path]);
+    [providerId, path]);
   if (!result.rowCount) return;
   const game = await client.query(`SELECT data,provenance FROM normalized_page_revisions
     WHERE provider_id = $1 AND record_key = $2 AND disposition = 'accepted' ORDER BY id DESC LIMIT 1`,
-  [job.provider_id, observation.canonicalBoxScorePath]);
+  [providerId, observation.canonicalBoxScorePath]);
   const accepted = game.rows[0];
   if (!accepted) return;
-  for (const field of ['homeScore', 'awayScore']) {
-    const observed = observation.game?.[field];
-    const canonical = accepted.data[field];
-    if (typeof observed === 'number' && observed !== canonical) {
+  const school = unprefix(providerId, schoolSourcePath);
+  const baseUrl = accepted.provenance?.sourceUrl?.absoluteUrl;
+  const own = (accepted.data.teams ?? []).find((team) => linkedPath(providerId, team.schoolPath, baseUrl) === school);
+  if (!own) return;
+  const other = accepted.data.teams.find((team) => team !== own);
+  for (const [field, logged, team] of [['teamScore', observation.game?.teamScore, own], ['opponentScore', observation.game?.opponentScore, other]]) {
+    const observed = presentValue(logged);
+    const canonical = presentValue(team?.finalScore);
+    if (observed !== null && observed !== canonical) {
       await client.query(`INSERT INTO reconciliation_issues (issue_type,record_key,details,status)
         VALUES ('conflicting_game_log_fact',$1,$2::jsonb,'open') ON CONFLICT DO NOTHING`,
       [observation.canonicalBoxScorePath, JSON.stringify({ field, observed, canonical,
@@ -192,7 +349,7 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
         source_fetch_id = EXCLUDED.source_fetch_id,observation = EXCLUDED.observation`,
       [job.provider_id, observation.canonicalBoxScorePath ? unprefix(job.provider_id, observation.canonicalBoxScorePath) : null,
         job.id, observation.rowIndex, sourceFetchId, JSON.stringify({ ...observation, provenance })]);
-      await recordLogConflict(client, job, observation, sourceFetchId);
+      await recordLogConflict(client, job.provider_id, job.school_source_path, observation, sourceFetchId);
     }
   }
   if (conflict) return { key: page.identity, conflict: true };
@@ -200,6 +357,7 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
   if (page.kind === 'school_index') await writeSchoolIndex(client, job, page, provenance);
   if (page.kind === 'school_history') await writeSchoolHistory(client, job, page, provenance);
   if (page.kind === 'season') await writeSeason(client, job, page, provenance);
+  if (page.kind === 'game_log') await writeGameLog(client, job, page, provenance);
   if (page.kind === 'game') await writeGame(client, job, page, provenance);
 
   for (const missing of page.unavailableCoverage ?? []) {
@@ -225,10 +383,11 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
   }
 
   if (page.kind === 'game') {
-    const logRows = await client.query(`SELECT observation,source_fetch_id FROM game_observations
-      WHERE provider_id = $1 AND canonical_box_score_path = $2`, [job.provider_id, job.canonical_path]);
+    const logRows = await client.query(`SELECT o.observation,o.source_fetch_id,j.school_source_path
+      FROM game_observations o JOIN crawl_jobs j ON j.id = o.parent_job_id
+      WHERE o.provider_id = $1 AND o.canonical_box_score_path = $2`, [job.provider_id, job.canonical_path]);
     for (const row of logRows.rows) {
-      await recordLogConflict(client, job, row.observation, row.source_fetch_id);
+      await recordLogConflict(client, job.provider_id, row.school_source_path, row.observation, row.source_fetch_id);
     }
   }
   return { key: page.identity, conflict: false };

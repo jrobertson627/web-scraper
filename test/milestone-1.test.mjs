@@ -39,7 +39,7 @@ test('personal-use attestation cannot open public publication or a public contra
 });
 
 test('personal worker rejects provider, scope, date, version, and fingerprint mismatches by field', () => {
-  const clock = () => new Date('2026-09-23T00:00:00.000Z');
+  const clock = () => new Date('2026-09-27T00:00:00.000Z');
   const cases = [
     [{ ...authorization, providerId: 'other-provider' }, /authorization provider mismatch/],
     [{ ...authorization, scope: { ...authorization.scope, targetEndingYears: [2026] } }, /authorization scope/],

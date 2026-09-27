@@ -29,10 +29,11 @@ test('integration: full HTML fixture chain is isolated, reconciles, and is idemp
   assert.equal(first.transportCalls, fixtures.length);
   assert.equal(app.persistence.queryModels().games.length, 6);
   const canonicalGame = app.persistence.queryModels().games.find((game) => game.home === 'Fixture A' && game.status === 'final');
-  assert.deepEqual(canonicalGame.valueStates, {
-    blank: { state: 'blank' }, unavailable: { state: 'unavailable', reason: 'not_published' },
-    null: { state: 'null' }, zero: { state: 'present', value: 0 },
-  });
+  const [guard, reserve] = canonicalGame.teams.find((team) => team.side === 'home').players;
+  assert.deepEqual(guard.stats.stl, { state: 'null' });
+  assert.deepEqual(guard.stats.blk, { state: 'present', value: 0 });
+  assert.deepEqual(reserve.stats.minutes, { state: 'blank' });
+  assert.deepEqual(canonicalGame.attendance, { state: 'unavailable', reason: 'not_published' });
   assert.equal(app.persistence.queryModels().schools.filter((school) => school.eligible).length, 2);
   assert.equal(app.persistence.observations.size > 0, true);
   assert.deepEqual(app.transport.calls.sort(), fixtures.map((fixture) => fixture.url).sort());
@@ -96,23 +97,51 @@ test('integration: shifted layout and off-host link identify exact quarantined r
   assert.equal(app.transport.calls.some((url) => url.includes('outside.example')), false);
 });
 
-test('integration: reconciliation identifies incorrect winners and mismatched log totals', async () => {
+test('integration: reconciliation identifies inconsistent results, records, and mismatched log totals', async () => {
   const fixtures = foundationCorpus().map((fixture) => {
-    if (fixture.url.endsWith('/box/one.html')) return { ...fixture, body: fixture.body.replace('"winner":"Fixture A"', '"winner":"Fixture B"') };
-    if (fixture.url.endsWith('/school/a/men/2026-gamelogs.html')) return { ...fixture, body: fixture.body.replace('"homeScore":70', '"homeScore":71') };
+    if (fixture.url.endsWith('/school/a/men/2026-gamelogs.html')) {
+      return { ...fixture, body: fixture.body.replace('"teamScore":{"state":"present","value":70}', '"teamScore":{"state":"present","value":71}') };
+    }
+    if (fixture.url.endsWith('/school/b/men/2026-gamelogs.html')) return { ...fixture, body: fixture.body.replace('"result":"L"', '"result":"W"') };
+    if (fixture.url.endsWith('/school/a/men/2026.html')) {
+      return { ...fixture, body: fixture.body.replace('"fg":{"state":"present","value":26}', '"fg":{"state":"present","value":27}') };
+    }
     return fixture;
   });
   const app = createFixtureApplication({ fixtureEntries: fixtures });
   await app.runWorkerOnce();
   const report = app.reconcile();
   assert.equal(report.passed, false);
-  const winner = report.checks.find((check) => check.id === 'winner_matches_final_scores');
-  assert.equal(winner.records[0].expectedWinner, 'Fixture A');
-  assert.equal(winner.records[0].winner, 'Fixture B');
-  const totals = report.checks.find((check) => check.id === 'box_score_game_log_totals');
-  assert.equal(totals.records[0].field, 'homeScore');
-  assert.equal(totals.records[0].gameLog, 71);
-  assert.equal(totals.records[0].boxScore, 70);
+  const check = (id) => report.checks.find((entry) => entry.id === id);
+
+  const result = check('game_log_result_matches_scores');
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].expectedResult, 'L');
+  assert.equal(result.records[0].result, 'W');
+
+  const totals = check('box_score_game_log_totals');
+  assert.deepEqual(totals.records.map(({ field, gameLog, boxScore }) => ({ field, gameLog, boxScore })),
+    [{ field: 'teamScore', gameLog: 71, boxScore: 70 }]);
+
+  const record = check('season_record_matches_game_logs');
+  assert.deepEqual(record.records.map(({ field, season, gameLog }) => ({ field, season, gameLog })),
+    [{ field: 'wins', season: 1, gameLog: 2 }, { field: 'losses', season: 1, gameLog: 0 }]);
+
+  for (const id of ['season_totals_match_game_logs', 'season_totals_match_box_scores']) {
+    assert.deepEqual(check(id).records.map((entry) => entry.field), ['team.fg'], id);
+  }
+  assert.equal(check('player_season_totals_match_box_scores').passed, true);
+});
+
+test('integration: reconciliation compares player season totals with box-score lines', async () => {
+  const fixtures = foundationCorpus().map((fixture) => (fixture.url.endsWith('/school/b/men/2026.html')
+    ? { ...fixture, body: fixture.body.replace('"pts":{"state":"present","value":47}', '"pts":{"state":"present","value":45}') }
+    : fixture));
+  const app = createFixtureApplication({ fixtureEntries: fixtures });
+  await app.runWorkerOnce();
+  const players = app.reconcile().checks.find((entry) => entry.id === 'player_season_totals_match_box_scores');
+  assert.deepEqual(players.records.map(({ field, season, boxScores }) => ({ field, season, boxScores })),
+    [{ field: '/players/b-forward.pts', season: 45, boxScores: 47 }]);
 });
 
 test('smoke: local read API remains available after fixture worker completion', async () => {

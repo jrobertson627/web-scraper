@@ -1,5 +1,6 @@
 export * from './boundaries.mjs';
 export * from './jobs.mjs';
+export * from './parsed-documents.mjs';
 export * from './provenance.mjs';
 export * from './request-policy.mjs';
 export * from './source-adapter.mjs';
