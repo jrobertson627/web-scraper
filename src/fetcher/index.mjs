@@ -59,7 +59,9 @@ function forbidsStoredReuse(cacheControl) {
 }
 
 export class Fetcher {
-  constructor({ transport = new HttpTransport(), rawStore, persistence, clock, policy, allowedHosts, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+  // events is the application's crawl-log sink (src/application/crawl-log.mjs).
+  constructor({ transport = new HttpTransport(), rawStore, persistence, clock, policy, allowedHosts, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), events = { emit() {} } }) {
+    this.events = events;
     this.transport = transport;
     this.rawStore = rawStore;
     this.persistence = persistence;
@@ -84,6 +86,7 @@ export class Fetcher {
           etag: prior.etag, lastModified: prior.lastModified, cacheControl: prior.cacheControl,
           reusedBody: true, cacheHit: true,
         }, lease, this.rawStore);
+        this.events.emit('cache.hit', { jobKey: job.key, pageType: job.pageType });
         return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum });
       }
     }
@@ -113,6 +116,7 @@ export class Fetcher {
         await this.#waitForPolicy(job, lease, host);
         startedAt = this.clock();
         await this.#recordRequestStart(host, startedAt);
+        this.events.emit('request.started', { jobKey: job.key, pageType: job.pageType, host });
         try {
           response = await this.#requestWithRenewal(job, lease, { method: 'GET', url: sourceUrl.absoluteUrl, headers, redirect: 'manual', timeoutMs: this.policy.requestTimeoutMs, maxResponseBytes: this.policy.maxResponseBytes });
         } catch (error) {
@@ -154,6 +158,7 @@ export class Fetcher {
           fetchedAt: startedAt.toISOString(),
           reusedBody: true,
         }, lease, this.rawStore);
+        this.events.emit('cache.not_modified', { jobKey: job.key, pageType: job.pageType });
         return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum });
       }
       if (response.status === 429) {
@@ -209,6 +214,7 @@ export class Fetcher {
       if (delay === 0) return;
       await this.persistence.renewClaim(job.key, lease, now);
       const before = this.clock().getTime();
+      this.events.emit('throttle.paused', { jobKey: job.key, host, waitMs: Math.min(delay, maxChunkMs) });
       await this.sleep(Math.min(delay, maxChunkMs));
       const after = this.clock().getTime();
       if (after <= before) throw new Error('throttle sleep did not advance the injected clock');

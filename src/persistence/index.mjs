@@ -10,7 +10,9 @@ import {
   createOperatorDisposition,
   sameLease,
 } from '../contracts/jobs.mjs';
-import { createJob, createQueryModels, createReconciliationIssue } from '../contracts/boundaries.mjs';
+import {
+  createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
+} from '../contracts/boundaries.mjs';
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -49,6 +51,26 @@ function cloneJob(job) {
     history: (job.history ?? []).map((event) => ({ ...event, details: { ...event.details } })),
     failures: (job.failures ?? []).map((failure) => ({ ...failure, details: { ...failure.details } })),
   };
+}
+
+function compareKeys(left, right) {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] < right[index]) return -1;
+    if (left[index] > right[index]) return 1;
+  }
+  return 0;
+}
+
+// entries are { key, item() }; only the rows of the returned page are built.
+function memoryPage(entries, request, shape) {
+  const { limit, cursor } = createPageRequest(request);
+  const after = decodePageCursor(cursor, shape);
+  const ordered = entries.filter((entry) => !after || compareKeys(entry.key, after) > 0).sort((a, b) => compareKeys(a.key, b.key));
+  return createReadPage(ordered.slice(0, limit + 1), limit, (entry) => entry.key, (entry) => entry.item());
+}
+
+function gameModel(page) {
+  return { ...page.data, gameKey: page.identity, provenance: page.provenance };
 }
 
 export class MemoryRawStore {
@@ -462,7 +484,12 @@ export class InMemoryPersistence {
     const unavailableCoverage = new Map(this.unavailableCoverage);
     const reconciliationIssues = [...this.reconciliationIssues];
     const jobs = new Map(this.jobs);
-    if (conflict) {
+    // An open issue for the same accepted record and the same conflicting data
+    // already covers a refetch; provenance alone does not make a new issue.
+    const alreadyOpen = conflict && reconciliationIssues.some((issue) => issue.status === 'open'
+      && issue.issueType === 'conflicting_page_reprocess' && issue.recordKey === key
+      && jsonEqual(issue.details.previous.data, previous.data) && jsonEqual(issue.details.current.data, record.data));
+    if (conflict && !alreadyOpen) {
       reconciliationIssues.push(createReconciliationIssue({
         issueType: 'conflicting_page_reprocess',
         recordKey: key,
@@ -472,9 +499,8 @@ export class InMemoryPersistence {
         },
         status: 'open',
       }));
-    } else {
-      pages.set(key, record);
     }
+    if (!conflict) pages.set(key, record);
     for (const [index, observation] of (page.observations ?? []).entries()) {
       const observationKey = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
       const storedObservation = Object.freeze({ ...observation, provenance });
@@ -595,6 +621,80 @@ export class InMemoryPersistence {
         observations: this.observations.size,
       },
     });
+  }
+
+  // Read port for the query service, with the same keyset paging contract as
+  // the PostgreSQL adapter (see BOUNDARY_CONTRACTS.md).
+  listSchools(request) {
+    const entries = [];
+    for (const page of this.pages.values()) {
+      if (page.kind !== 'school_index') continue;
+      for (const [rowIndex, school] of (page.data.schools ?? []).entries()) {
+        entries.push({ key: [page.identity, school.path], item: () => this.#schoolModel(page, school, rowIndex) });
+      }
+    }
+    return memoryPage(entries, request, ['string', 'string']);
+  }
+
+  listSeasons(request) {
+    const entries = [...this.pages.values()].filter((page) => page.kind === 'season')
+      .map((page) => ({ key: [page.identity], item: () => ({ ...page.data, provenance: page.provenance }) }));
+    return memoryPage(entries, request, ['string']);
+  }
+
+  listGames(request) {
+    const entries = [...this.pages.values()].filter((page) => page.kind === 'game')
+      .map((page) => ({ key: [page.identity], item: () => gameModel(page) }));
+    return memoryPage(entries, request, ['string']);
+  }
+
+  getGame(key) {
+    const page = typeof key === 'string' ? this.pages.get(key) : undefined;
+    return page?.kind === 'game' ? deepFreeze(gameModel(page)) : null;
+  }
+
+  health() {
+    const jobStates = {};
+    for (const job of this.jobs.values()) jobStates[job.state] = (jobStates[job.state] ?? 0) + 1;
+    return deepFreeze({
+      jobStates,
+      sourceFetches: this.sourceFetches.length,
+      parseRuns: this.parseRuns.length,
+      warnings: this.parseRuns.reduce((total, run) => total + (run.warnings?.length ?? 0), 0),
+      unavailableCoverage: this.unavailableCoverage.size,
+      conflicts: this.reconciliationIssues.filter((issue) => issue.status === 'open').length,
+      observations: this.observations.size,
+    });
+  }
+
+  // Same shape as PostgresPersistence#crawlStatus, for `cli.mjs status`.
+  crawlStatus({ windowMs = 3_600_000 } = {}) {
+    const now = this.clock();
+    const counts = new Map();
+    for (const job of this.jobs.values()) {
+      const key = `${job.pageType}|${job.state}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const network = this.sourceFetches.filter((fetch) => !fetch.cacheHit).map((fetch) => new Date(fetch.fetchedAt).getTime());
+    return deepFreeze({
+      observedAt: now.toISOString(),
+      jobs: [...counts].map(([key, count]) => { const [pageType, state] = key.split('|'); return { pageType, state, count }; }),
+      fetches: {
+        total: network.length,
+        inWindow: network.filter((at) => at > now.getTime() - windowMs).length,
+        windowMs,
+        firstAt: network.length ? new Date(Math.min(...network)).toISOString() : null,
+        lastAt: network.length ? new Date(Math.max(...network)).toISOString() : null,
+      },
+    });
+  }
+
+  #schoolModel(page, school, rowIndex) {
+    const observation = this.observations.get(`school:${page.jobKey}:${rowIndex}`);
+    if (typeof observation?.eligible !== 'boolean') {
+      throw new Error(`school eligibility observation is missing for ${page.jobKey} row ${rowIndex}`);
+    }
+    return { ...school, eligible: observation.eligible, provenance: page.provenance };
   }
 
   #findClaimableJob(now) {

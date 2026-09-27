@@ -7,6 +7,8 @@ import { persistenceSettings } from '../config/persistence.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { createProductionParserRegistry, missingProductionParsers } from '../parsers/index.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
+import { createCrawlLog } from './crawl-log.mjs';
+import { STATUS_WINDOW_MS, formatCrawlStatus, summarizeCrawlStatus } from './crawl-status.mjs';
 
 export const EXIT_CODES = Object.freeze({
   success: 0,
@@ -48,17 +50,18 @@ function parseDataContract(value) {
 function configuredPort(env) {
   const port = Number(env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`invalid PORT: ${env.PORT}. Expected an integer from 1 through 65535.`);
+    throw new Error('invalid PORT. Expected an integer from 1 through 65535. Example: PORT=3000');
   }
   return port;
 }
 
-// Loopback by default so a local run is never exposed; hosted platforms such
-// as Render need HOST=0.0.0.0 to route traffic to the process.
+// Loopback by default. The API has no authentication of its own, so binding
+// another address (HOST=0.0.0.0) is only for use behind an authenticating
+// layer; see DEPLOYMENT.md.
 function configuredHost(env) {
   const host = env.HOST || '127.0.0.1';
   if (host !== 'localhost' && !isIP(host)) {
-    throw new Error(`invalid HOST: ${host}. Expected an IP address or localhost. Example: HOST=0.0.0.0`);
+    throw new Error('invalid HOST. Expected an IP address or localhost. Example: HOST=0.0.0.0');
   }
   return host;
 }
@@ -108,9 +111,11 @@ export async function runCli({
   stdout = (message) => console.log(message),
   stderr = (message) => console.error(message),
   openPostgres = openPostgresPersistence,
+  args = process.argv.slice(3),
+  crawlLog = createCrawlLog({ write: stderr }),
 } = {}) {
   if (mode === 'local') {
-    const app = createFixtureApplication();
+    const app = createFixtureApplication({ events: crawlLog });
     app.lifecycle.ready();
     stdout('fixture local ready');
     app.lifecycle.running();
@@ -122,6 +127,30 @@ export async function runCli({
     }
     stdout(JSON.stringify({ mode, lifecycle: app.lifecycle.state, ...result }, null, 2));
     return { exitCode: EXIT_CODES.success, app };
+  }
+
+  if (mode === 'status') {
+    // Operator progress report; read-only against the configured store.
+    let settings;
+    try {
+      settings = persistenceSettings(env);
+    } catch (error) {
+      stderr(`status configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    let status;
+    if (settings.kind === 'postgres') {
+      const persistence = await openPostgres(settings);
+      try { status = await persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS }); } finally { await persistence.close(); }
+    } else {
+      // Memory has no durable crawl to report, so show the fixture crawl's.
+      const app = createFixtureApplication();
+      await app.runWorkerOnce();
+      status = await app.persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS });
+    }
+    const summary = summarizeCrawlStatus(status);
+    stdout(args.includes('--json') ? JSON.stringify(summary, null, 2) : formatCrawlStatus(summary));
+    return { exitCode: EXIT_CODES.success, summary };
   }
 
   if (mode === 'api') {
@@ -201,7 +230,7 @@ export async function runCli({
     return { exitCode: EXIT_CODES.workerNotReady };
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, or api. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 

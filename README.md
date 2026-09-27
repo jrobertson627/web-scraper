@@ -18,6 +18,7 @@ npm run start:local   # deterministic fixture/local mode; exits after the fixtur
 npm run start:worker  # validates authorization/configuration; exits until the production parsers exist
 npm run start:worker:personal  # loads the private, self-attested M1 records; set USER_AGENT and RAW_STORE_ROOT first
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
+npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
 npm test
 npm run test:postgres    # real, explicitly disposable PostgreSQL database
 npm run smoke:migrations # applies all migrations twice to a disposable database
@@ -35,7 +36,25 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 
 `api` and `worker` use PostgreSQL only when `PERSISTENCE=postgres`; otherwise they stay in memory, and `local` always does. Connection values come from `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `PGSSLMODE` (`require` for external hosts). At startup both modes confirm that every file in `migrations/` is recorded in `schema_migrations` and refuse to start otherwise. With Postgres, `api` serves the durable projections read-only and runs no fixture ingestion. `worker` verifies the database, then still exits `4` until the production parsers exist.
 
-The API binds `127.0.0.1` unless `HOST` names another IP address (or `localhost`). A hosted platform such as Render needs `HOST=0.0.0.0` so its router can reach the process; Render supplies `PORT` itself.
+The API binds `127.0.0.1` unless `HOST` names another IP address (or `localhost`). The API has no authentication of its own, so it stays loopback-only unless it gets its own; the production topology, environment, and secrets rules are in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+### Crawl logs and status
+
+The fetcher and orchestrator report crawl operations to an injected `events` sink, passed through the composition root; parsers, discovery, and domain normalization never receive it. `createCrawlLog` (`src/application/crawl-log.mjs`) writes one JSON object per line to stderr and keeps counters:
+
+| Event | Emitted by | Counters |
+| --- | --- | --- |
+| `request.started` | fetcher, per upstream request | `requestsStarted` |
+| `cache.hit`, `cache.not_modified` | fetcher, fresh-cache reuse and 304 | `cacheHits`, `notModified` |
+| `throttle.paused` | fetcher, each pacing sleep | `throttlePauses`, `throttleWaitMs` |
+| `page.discovered` | orchestrator, after discovery | `discoveredChildren`, `duplicateDiscoveries` |
+| `job.settled` | orchestrator, one per processed job | `parsed`, `retryWaits`, `operatorStops`, `challengeStops`, `permanentFailures`, `parseFailures`, `parseWarnings`, `mergeConflicts` |
+| `reconciliation.completed` | composition root, `reconcile()` | `reconciliationFailures` |
+| `crawl.summary` | every 100 settled jobs and at the end of a run | all counters, settled jobs by page type, and job-state counts |
+
+Duplicate discovery is counted within one process; persistence still deduplicates jobs durably. Log lines carry job keys, page types, hosts, codes, counts, and timings, never configuration or environment values. `start:local` writes this log to stderr.
+
+`npm run status` reads the configured store (PostgreSQL with `PERSISTENCE=postgres`; otherwise it runs the fixture crawl) and prints job progress by page type, network requests in the last hour, the observed pace against the request-policy ceiling, and the projected time remaining for the jobs already discovered. While discovery is still queueing pages, that projection is a lower bound.
 
 ## Layout
 

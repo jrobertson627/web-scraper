@@ -12,7 +12,7 @@ function configError(field, problem, expected, example) {
 export function validateConfiguration(input, { clock = () => new Date() } = {}) {
   const config = structuredClone(input);
   if (!['local', 'worker', 'api'].includes(config.mode)) {
-    throw configError('mode', `is invalid: ${config.mode}`, 'Expected local, worker, or api', 'mode: local');
+    throw configError('mode', 'is invalid', 'Expected local, worker, or api', 'mode: local');
   }
   config.policy = validateRequestPolicy(config.policy);
   if (!Array.isArray(config.allowedHosts) || config.allowedHosts.length === 0 ||
@@ -23,14 +23,14 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
     throw configError('providerId', 'is missing', 'Expected a non-empty provider identifier', 'providerId: provider');
   }
   if (config.eligibilityPredicate !== REQUIRED_ELIGIBILITY_PREDICATE) {
-    throw configError('eligibilityPredicate', `is invalid: ${config.eligibilityPredicate}`, `Expected exactly ${REQUIRED_ELIGIBILITY_PREDICATE}`, `eligibilityPredicate: '${REQUIRED_ELIGIBILITY_PREDICATE}'`);
+    throw configError('eligibilityPredicate', 'is invalid', `Expected exactly ${REQUIRED_ELIGIBILITY_PREDICATE}`, `eligibilityPredicate: '${REQUIRED_ELIGIBILITY_PREDICATE}'`);
   }
   const years = [...(config.targetEndingYears ?? [])].sort((a, b) => a - b);
   if (JSON.stringify(years) !== JSON.stringify(TARGET_ENDING_YEARS)) {
-    throw configError('targetEndingYears', `is invalid: ${JSON.stringify(config.targetEndingYears)}`, `Expected exactly ${JSON.stringify(TARGET_ENDING_YEARS)}`, 'targetEndingYears: [2022, 2023, 2024, 2025, 2026]');
+    throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(TARGET_ENDING_YEARS)}`, 'targetEndingYears: [2022, 2023, 2024, 2025, 2026]');
   }
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
-    throw configError('rawStore', `is invalid: ${config.rawStore}`, 'Expected memory or filesystem', 'rawStore: memory');
+    throw configError('rawStore', 'is invalid', 'Expected memory or filesystem', 'rawStore: memory');
   }
   if (config.rawStore === 'filesystem' && (typeof config.rawStoreRoot !== 'string' || !isAbsolute(config.rawStoreRoot))) {
     throw configError('rawStoreRoot', 'is invalid', 'Expected an absolute filesystem path', 'rawStoreRoot: /var/lib/web-scraper/raw');

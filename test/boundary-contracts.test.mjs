@@ -70,7 +70,7 @@ test('boundary implementation imports obey one-way dependency rules', () => {
     ['src/parsers/index.mjs', ['../contracts/']],
     ['src/domain/index.mjs', ['../contracts/']],
     ['src/persistence/index.mjs', ['node:', '../contracts/']],
-    ['src/api/index.mjs', ['node:', '../config/']],
+    ['src/api/index.mjs', ['node:', '../config/', '../contracts/']],
   ]);
   for (const [file, allowedPrefixes] of rules) {
     const source = readFileSync(file, 'utf8');

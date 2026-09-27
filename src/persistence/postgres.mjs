@@ -4,9 +4,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { assertTransition, createLeaseToken, createOperatorDisposition } from '../contracts/jobs.mjs';
-import { createJob, createQueryModels } from '../contracts/boundaries.mjs';
+import { createJob, createPageRequest, createReadPage, decodePageCursor, deepFreeze } from '../contracts/boundaries.mjs';
 import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
+// Server-side cap on any one statement, so a stuck query fails its transaction
+// instead of holding a lease or a pool client indefinitely.
+import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
 
 const { Pool } = pg;
 const CHECKSUM = /^[0-9a-f]{64}$/;
@@ -59,10 +62,30 @@ function mapJob(row, events = []) {
   };
 }
 
+const guardedPools = new WeakSet();
+
+function logPoolError(error) {
+  console.error(JSON.stringify({ event: 'postgres.pool_error', code: error?.code ?? 'unknown', at: new Date().toISOString() }));
+}
+
+// An idle pooled client that loses its connection (for example a database
+// restart) is emitted as a pool 'error'; with no listener Node would crash the
+// process. Log the error code only, since a driver message can name the host or
+// user, and let the pool replace the client on the next checkout.
+export function guardPool(pool, onError = logPoolError) {
+  if (!pool || typeof pool.on !== 'function' || guardedPools.has(pool)) return pool;
+  guardedPools.add(pool);
+  pool.on('error', (error) => {
+    try { onError(error); } catch { /* a failing logger must not crash the process either */ }
+  });
+  return pool;
+}
+
 export class PostgresPersistence {
-  constructor({ pool = new Pool(), claimTimeoutMs = 30_000, authorizeOperator = (id) => Boolean(id) } = {}) {
+  constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
+    authorizeOperator = (id) => Boolean(id), onPoolError } = {}) {
     if (!Number.isInteger(claimTimeoutMs) || claimTimeoutMs < 1) throw new Error('claimTimeoutMs must be positive');
-    this.pool = pool;
+    this.pool = guardPool(pool, onPoolError);
     this.claimTimeoutMs = claimTimeoutMs;
     this.authorizeOperator = authorizeOperator;
   }
@@ -71,15 +94,18 @@ export class PostgresPersistence {
 
   async transaction(action) {
     const client = await this.pool.connect();
+    // A client whose ROLLBACK failed may still be inside the aborted
+    // transaction, so it is destroyed rather than returned to the pool.
+    let broken;
     try {
       await client.query('BEGIN');
       const result = await action(client);
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      try { await client.query('ROLLBACK'); } catch { /* preserve the original error */ }
+      try { await client.query('ROLLBACK'); } catch (rollbackError) { broken = rollbackError; /* preserve the original error */ }
       throw error;
-    } finally { client.release(); }
+    } finally { client.release(broken); }
   }
 
   async addJob(job) {
@@ -373,44 +399,111 @@ export class PostgresPersistence {
     return { observedAt, healthy, pending, orphans };
   }
 
-  async queryModels() {
-    return this.transaction(async (client) => {
-      await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
-      const statements = [
-        'SELECT * FROM schools ORDER BY provider_id,canonical_source_path',
-        `SELECT s.*,sc.provider_id,sc.canonical_source_path FROM school_seasons s
-          JOIN schools sc ON sc.id = s.school_id ORDER BY sc.provider_id,sc.canonical_source_path,s.ending_year`,
-        `SELECT g.*,r.data FROM games g LEFT JOIN LATERAL
-          (SELECT data FROM normalized_page_revisions WHERE provider_id = g.provider_id
-           AND record_key = g.provider_id || ':' || g.canonical_box_score_path
-           AND disposition = 'accepted' ORDER BY id DESC LIMIT 1) r ON true
-          ORDER BY g.provider_id,g.canonical_box_score_path`,
-        'SELECT state,count(*)::int AS count FROM crawl_jobs GROUP BY state',
-        'SELECT count(*)::int AS count FROM source_fetches',
-        `SELECT count(*)::int AS count,
-          COALESCE(sum(jsonb_array_length(warnings)),0)::int AS warnings FROM parse_runs`,
-        'SELECT count(*)::int AS count FROM unavailable_coverage',
-        "SELECT count(*)::int AS count FROM reconciliation_issues WHERE status = 'open'",
-        'SELECT count(*)::int AS count FROM page_observation_revisions WHERE accepted',
-      ];
-      const results = [];
-      for (const statement of statements) results.push(await client.query(statement));
-      const [schoolRows, seasonRows, gameRows, stateRows, fetchRows, parseRows, coverageRows, conflictRows, observationRows] = results;
-      return createQueryModels({
-        schools: schoolRows.rows.map((row) => ({ path: new URL(row.source_url).pathname, name: row.display_name,
-          city: row.city, state: row.state, from: row.from_year, to: row.to_year,
-          eligible: row.eligible, provenance: row.provenance })),
-        seasons: seasonRows.rows.map((row) => ({ schoolSourcePath: `${row.provider_id}:${row.canonical_source_path}`,
-          endingYear: row.ending_year, coverageStatus: row.coverage_status, provenance: row.provenance })),
-        games: gameRows.rows.map((row) => ({ ...(row.data ?? {}),
-          gameKey: `${row.provider_id}:${row.canonical_box_score_path}`, provenance: row.provenance })),
-        health: { jobStates: Object.fromEntries(stateRows.rows.map((row) => [row.state, row.count])),
-          sourceFetches: fetchRows.rows[0].count, parseRuns: parseRows.rows[0].count,
-          warnings: parseRows.rows[0].warnings, unavailableCoverage: coverageRows.rows[0].count,
-          conflicts: conflictRows.rows[0].count, observations: observationRows.rows[0].count },
-      });
-    });
+  // Read port for the query service: each route runs one statement. Lists are
+  // keyset-paged on a unique index and a game is fetched by its unique key, so
+  // neither loads more rows than the page, however large the tables grow.
+  async listSchools(request) {
+    const { limit, cursor } = createPageRequest(request);
+    const after = decodePageCursor(cursor, ['string', 'string']);
+    const result = await this.pool.query(`SELECT * FROM schools
+      ${after ? 'WHERE (provider_id,canonical_source_path) > ($2,$3)' : ''}
+      ORDER BY provider_id,canonical_source_path LIMIT $1`, [limit + 1, ...(after ?? [])]);
+    return createReadPage(result.rows, limit, (row) => [row.provider_id, row.canonical_source_path], mapSchool);
   }
+
+  async listSeasons(request) {
+    const { limit, cursor } = createPageRequest(request);
+    const after = decodePageCursor(cursor, ['string', 'string', 'integer']);
+    // The redundant two-column bound lets the planner start the schools index
+    // scan at the cursor instead of filtering from the first school.
+    const result = await this.pool.query(`SELECT s.*,sc.provider_id,sc.canonical_source_path FROM school_seasons s
+      JOIN schools sc ON sc.id = s.school_id
+      ${after ? `WHERE (sc.provider_id,sc.canonical_source_path) >= ($2,$3)
+        AND (sc.provider_id,sc.canonical_source_path,s.ending_year) > ($2,$3,$4::int)` : ''}
+      ORDER BY sc.provider_id,sc.canonical_source_path,s.ending_year LIMIT $1`, [limit + 1, ...(after ?? [])]);
+    return createReadPage(result.rows, limit, (row) => [row.provider_id, row.canonical_source_path, row.ending_year], mapSeason);
+  }
+
+  async listGames(request) {
+    const { limit, cursor } = createPageRequest(request);
+    const after = decodePageCursor(cursor, ['string', 'string']);
+    const result = await this.pool.query(`SELECT g.*,r.data FROM games g ${LATEST_ACCEPTED_GAME_REVISION}
+      ${after ? 'WHERE (g.provider_id,g.canonical_box_score_path) > ($2,$3)' : ''}
+      ORDER BY g.provider_id,g.canonical_box_score_path LIMIT $1`, [limit + 1, ...(after ?? [])]);
+    return createReadPage(result.rows, limit, (row) => [row.provider_id, row.canonical_box_score_path], mapGame);
+  }
+
+  // A game key is "<providerId>:<canonical box-score path>". Either part may
+  // contain ':' (a host with a port), so every split is tried in one indexed
+  // lookup on the (provider_id, canonical_box_score_path) unique key.
+  async getGame(key) {
+    if (typeof key !== 'string' || !key || key.length > 2048) return null;
+    const providers = [];
+    const paths = [];
+    for (let index = key.indexOf(':'); index > 0; index = key.indexOf(':', index + 1)) {
+      providers.push(key.slice(0, index));
+      paths.push(key.slice(index + 1));
+    }
+    if (!providers.length) return null;
+    const result = await this.pool.query(`SELECT g.*,r.data FROM unnest($1::text[],$2::text[]) k(provider_id,path)
+      JOIN games g ON g.provider_id = k.provider_id AND g.canonical_box_score_path = k.path
+      ${LATEST_ACCEPTED_GAME_REVISION} LIMIT 1`, [providers, paths]);
+    return result.rowCount ? deepFreeze(mapGame(result.rows[0])) : null;
+  }
+
+  // Counts only, in one statement (one snapshot); no entity rows are loaded.
+  // The counts still scan their tables, so this is bounded in statements and
+  // memory, not in time; see BOUNDARY_CONTRACTS.md.
+  async health() {
+    const result = await this.pool.query(`SELECT
+      (SELECT COALESCE(json_object_agg(state,count),'{}'::json) FROM
+        (SELECT state,count(*)::int AS count FROM crawl_jobs GROUP BY state) s) AS job_states,
+      (SELECT count(*)::int FROM source_fetches) AS source_fetches,
+      (SELECT count(*)::int FROM parse_runs) AS parse_runs,
+      (SELECT COALESCE(sum(jsonb_array_length(warnings)),0)::int FROM parse_runs) AS warnings,
+      (SELECT count(*)::int FROM unavailable_coverage) AS unavailable_coverage,
+      (SELECT count(*)::int FROM reconciliation_issues WHERE status = 'open') AS conflicts,
+      (SELECT count(*)::int FROM page_observation_revisions WHERE accepted) AS observations`);
+    const row = result.rows[0];
+    return deepFreeze({ jobStates: row.job_states, sourceFetches: row.source_fetches, parseRuns: row.parse_runs,
+      warnings: row.warnings, unavailableCoverage: row.unavailable_coverage, conflicts: row.conflicts,
+      observations: row.observations });
+  }
+
+  // Operator status for `cli.mjs status`: job counts by page type and state, and
+  // network fetches (cache hits excluded) in the trailing window, in one statement.
+  async crawlStatus({ windowMs = 3_600_000 } = {}) {
+    const result = await this.pool.query(`SELECT clock_timestamp() AS observed_at,
+      (SELECT COALESCE(json_agg(json_build_object('pageType',page_type,'state',state,'count',n)),'[]'::json) FROM
+        (SELECT page_type,state,count(*)::int AS n FROM crawl_jobs GROUP BY page_type,state) j) AS jobs,
+      (SELECT count(*)::int FROM source_fetches WHERE NOT cache_hit) AS fetches,
+      (SELECT count(*)::int FROM source_fetches WHERE NOT cache_hit
+        AND fetched_at > clock_timestamp() - ($1::bigint * interval '1 millisecond')) AS window_fetches,
+      (SELECT min(fetched_at) FROM source_fetches WHERE NOT cache_hit) AS first_fetch_at,
+      (SELECT max(fetched_at) FROM source_fetches WHERE NOT cache_hit) AS last_fetch_at`, [windowMs]);
+    const row = result.rows[0];
+    return deepFreeze({ observedAt: iso(row.observed_at), jobs: row.jobs, fetches: { total: row.fetches, inWindow: row.window_fetches,
+      windowMs, firstAt: iso(row.first_fetch_at), lastAt: iso(row.last_fetch_at) } });
+  }
+}
+
+const LATEST_ACCEPTED_GAME_REVISION = `LEFT JOIN LATERAL
+  (SELECT data FROM normalized_page_revisions WHERE provider_id = g.provider_id
+   AND record_key = g.provider_id || ':' || g.canonical_box_score_path
+   AND disposition = 'accepted' ORDER BY id DESC LIMIT 1) r ON true`;
+
+function mapSchool(row) {
+  return { path: new URL(row.source_url).pathname, name: row.display_name, city: row.city, state: row.state,
+    from: row.from_year, to: row.to_year, eligible: row.eligible, provenance: row.provenance };
+}
+
+function mapSeason(row) {
+  return { schoolSourcePath: `${row.provider_id}:${row.canonical_source_path}`, endingYear: row.ending_year,
+    coverageStatus: row.coverage_status, provenance: row.provenance };
+}
+
+function mapGame(row) {
+  return { ...(row.data ?? {}), gameKey: `${row.provider_id}:${row.canonical_box_score_path}`, provenance: row.provenance };
 }
 
 export function createPostgresPersistence(options) { return new PostgresPersistence(options); }
@@ -437,8 +530,9 @@ export async function assertSchemaCurrent(pool, expected = expectedMigrationVers
   if (missing.length) throw new Error(`database schema is behind: apply migrations/ before starting (missing ${missing.join(', ')})`);
 }
 
-export async function openPostgresPersistence({ pool: poolConfig, claimTimeoutMs } = {}) {
-  const persistence = new PostgresPersistence({ pool: new Pool(poolConfig), claimTimeoutMs });
+export async function openPostgresPersistence({ pool: poolConfig, claimTimeoutMs, onPoolError } = {}) {
+  const pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError });
   try {
     await assertSchemaCurrent(persistence.pool);
   } catch (error) {
