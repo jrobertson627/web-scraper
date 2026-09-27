@@ -15,6 +15,9 @@ import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { buildFixtureReconciliationReport } from './reconciliation.mjs';
+import {
+  boxScoreDocument, gameLogDocument, schoolHistoryDocument, schoolIndexDocument, seasonDocument, statLine,
+} from './fixture-documents.mjs';
 
 export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState } = {}) {
   const adapter = assertSourceAdapter(sourceAdapter);
@@ -26,14 +29,19 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   let currentTime = Date.parse('2026-01-01T00:00:00.000Z');
   const clock = sharedState?.clock ?? (() => new Date(currentTime));
   const sleep = sharedState?.sleep ?? (async (milliseconds) => { currentTime += milliseconds; });
+  const home = { location: 'home', opponent: { name: 'Opponent', schoolPath: null }, boxScoreUrl: `${base}/box/one.html`, status: 'final',
+    date: '2026-01-02', teamScore: 70, opponentScore: 65, teamStats: statLine({ pts: 70 }), opponentStats: statLine({ pts: 65 }) };
+  const upcoming = { location: 'away', opponent: { name: 'Opponent', schoolPath: null }, status: 'scheduled' };
   const fixtureData = [
-    fixture('/cbb/schools/', { schools: [{ path: '/school/a', name: 'Fixture A', to: 2026, historyUrl: `${base}/school/a/men/` }, { path: '/school/b', name: 'Fixture B', to: 2025, historyUrl: `${base}/school/b/men/` }] }),
-    fixture('/school/a/men/', { seasons: [{ endingYear: 2026, url: `${base}/school/a/men/2026.html` }, { endingYear: 2024, url: `${base}/school/a/men/2024.html` }] }),
-    fixture('/school/a/men/2026.html', { school: 'Fixture A', endingYear: 2026, gameLogUrl: `${base}/school/a/men/2026-gamelogs.html` }),
-    fixture('/school/a/men/2024.html', { school: 'Fixture A', endingYear: 2024, gameLogUrl: `${base}/school/a/men/2024-gamelogs.html` }),
-    fixture('/school/a/men/2026-gamelogs.html', { games: [{ boxScoreUrl: `${base}/box/one.html`, context: 'home', status: 'final' }] }),
-    fixture('/school/a/men/2024-gamelogs.html', { games: [{ boxScoreUrl: `${base}/box/one.html`, context: 'away', status: 'final' }] }),
-    fixture('/box/one.html', { date: '2026-01-02', home: 'Fixture A', away: 'Opponent', homeScore: 70, awayScore: 65, context: 'neutral', status: 'final', playerSourceId: null }),
+    fixture('/cbb/schools/', schoolIndexDocument([{ path: '/school/a', name: 'Fixture A', to: 2026, historyUrl: `${base}/school/a/men/` }, { path: '/school/b', name: 'Fixture B', to: 2025, historyUrl: `${base}/school/b/men/` }])),
+    fixture('/school/a/men/', schoolHistoryDocument([{ endingYear: 2026, url: `${base}/school/a/men/2026.html` }, { endingYear: 2024, url: `${base}/school/a/men/2024.html` }])),
+    fixture('/school/a/men/2026.html', seasonDocument({ school: 'Fixture A', endingYear: 2026, gameLogUrl: `${base}/school/a/men/2026-gamelogs.html`, games: [home] })),
+    fixture('/school/a/men/2024.html', seasonDocument({ school: 'Fixture A', endingYear: 2024, gameLogUrl: `${base}/school/a/men/2024-gamelogs.html`, games: [upcoming] })),
+    fixture('/school/a/men/2026-gamelogs.html', gameLogDocument(2026, [home])),
+    fixture('/school/a/men/2024-gamelogs.html', gameLogDocument(2024, [upcoming])),
+    fixture('/box/one.html', boxScoreDocument({ date: '2026-01-02', status: 'final',
+      away: { name: 'Opponent', schoolPath: null, score: 65, stats: statLine({ pts: 65 }) },
+      home: { name: 'Fixture A', schoolPath: '/school/a', score: 70, stats: statLine({ pts: 70 }) } })),
   ];
   const fixtureMap = new Map((fixtureEntries ?? fixtureData).map((item) => [item.url, item]));
   const transport = sharedState?.transport ?? new FixtureTransport(fixtureMap);

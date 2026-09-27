@@ -19,8 +19,11 @@ export class Normalizer {
     if (pageType === 'box_score') {
       if (!document.status) throw new Error('box score is missing game status; status must be explicit or unavailable');
       assertGameStatus(document.status);
-      if (!document.context) throw new Error('box score is missing game context; context must be explicit or unavailable');
-      assertGameContext(document.context);
+      // Sports Reference box scores do not state neutral-site context; when absent it
+      // is resolved from the game-log rows that link this box score.
+      if (document.context !== undefined) assertGameContext(document.context);
+      const side = (name) => document.teams.find((team) => team.side === name);
+      const score = (team) => (team?.finalScore?.state === 'present' ? team.finalScore.value : null);
       const identity = gameKey(context.canonicalPath);
       return createNormalizedPage({
         jobKey: context.jobKey,
@@ -29,16 +32,12 @@ export class Normalizer {
         data: {
           ...document,
           gameDate: document.date ?? null,
-          status: document.status,
-          gameType: document.gameType ?? null,
-          neutralSite: document.context === 'neutral',
-          overtime: document.overtime ?? null,
-          lineScores: document.lineScores ?? {},
-          playerSourceId: document.playerSourceId ?? null,
-          teams: document.teams ?? [
-            { side: 'home', name: document.home ?? null, finalScore: document.homeScore ?? null },
-            { side: 'away', name: document.away ?? null, finalScore: document.awayScore ?? null },
-          ],
+          context: document.context ?? null,
+          neutralSite: document.context === undefined ? null : document.context === 'neutral',
+          home: side('home')?.name ?? null,
+          away: side('away')?.name ?? null,
+          homeScore: score(side('home')),
+          awayScore: score(side('away')),
         },
         observations: context.observations ?? [],
         childJobs: context.childJobs,

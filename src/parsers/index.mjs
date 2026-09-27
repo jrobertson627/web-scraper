@@ -1,4 +1,5 @@
 import { createParseResult } from '../contracts/boundaries.mjs';
+import { parsedDocumentError } from '../contracts/parsed-documents.mjs';
 import { assertPageType } from '../contracts/source.mjs';
 
 export class ParserRegistry {
@@ -24,7 +25,12 @@ export class ParserRegistry {
 
   parse(pageType, version, snapshot) {
     if (!snapshot || !Buffer.isBuffer(snapshot.body)) throw new Error('parser input must be an immutable raw snapshot with a Buffer body');
-    return createParseResult(this.get(pageType, version).parse(snapshot));
+    const result = createParseResult(this.get(pageType, version).parse(snapshot));
+    if (result.kind !== 'valid') return result;
+    // A document outside the frozen contract is quarantined like a layout change.
+    const shapeError = parsedDocumentError(pageType, result.document);
+    if (!shapeError) return result;
+    return createParseResult({ kind: 'structural_failure', error: `parsed document breaks the ${pageType} contract: ${shapeError}`, warnings: result.warnings });
   }
 }
 

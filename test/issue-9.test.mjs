@@ -9,6 +9,7 @@ import { assertSourceValue, sourceValue } from '../src/contracts/value-state.mjs
 import { ParserRegistry } from '../src/parsers/index.mjs';
 import { Normalizer } from '../src/domain/index.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
+import { boxScoreDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
 
 function snapshot(body = { score: 0 }) {
   const sourceUrl = createSourceUrl('provider', 'https://allowed.example/page');
@@ -32,32 +33,58 @@ test('source values preserve blank, unavailable, explicit null, and numeric zero
 
 test('versioned parser registry reprocesses immutable snapshots offline', () => {
   const rawStore = new MemoryRawStore();
-  const raw = rawStore.put(snapshot().body);
+  const raw = rawStore.put(snapshot(seasonDocument({ school: 'A', endingYear: 2026, gameLogUrl: null })).body);
   const stored = rawStore.get(raw.checksum);
   const offlineSnapshot = snapshot(JSON.parse(stored.body.toString()));
   const registry = new ParserRegistry()
-    .register(parser('1', (document) => ({ ...document, projection: 'v1' })))
-    .register(parser('2', (document) => ({ ...document, projection: 'v2' })));
+    .register(parser('1', (document) => ({ ...document, extra: { projection: 'v1' } })))
+    .register(parser('2', (document) => ({ ...document, extra: { projection: 'v2' } })));
 
-  assert.equal(registry.parse('season', '1', offlineSnapshot).document.projection, 'v1');
+  assert.equal(registry.parse('season', '1', offlineSnapshot).document.extra.projection, 'v1');
   const upgraded = registry.parse('season', '2', offlineSnapshot);
-  assert.equal(upgraded.document.projection, 'v2');
+  assert.equal(upgraded.document.extra.projection, 'v2');
   assert.deepEqual(upgraded.warnings, ['parser-2']);
   assert.equal(Object.isFrozen(upgraded.document), true);
   assert.throws(() => registry.register(parser('2', (value) => value)), /duplicate/);
   assert.throws(() => registry.get('season', '3'), /no parser registered/);
 });
 
+test('parser registry quarantines documents that break the page-type contract', () => {
+  const registry = new ParserRegistry()
+    .register(parser('1', (document) => ({ ...document, projection: 'undeclared field' })))
+    .register(parser('2', (document) => ({ ...document, endingYear: '2026' })));
+  const offlineSnapshot = snapshot(seasonDocument({ school: 'A', endingYear: 2026, gameLogUrl: null }));
+  const undeclared = registry.parse('season', '1', offlineSnapshot);
+  assert.equal(undeclared.kind, 'structural_failure');
+  assert.match(undeclared.error, /breaks the season contract: season\.projection: expected no such field/);
+  assert.deepEqual(undeclared.warnings, ['parser-1']);
+  const mistyped = registry.parse('season', '2', offlineSnapshot);
+  assert.match(mistyped.error, /season\.endingYear: expected an integer/);
+});
+
 test('normalization retains explicit zero, null identity, status, and warning-bearing observations', () => {
   const canonicalPath = canonicalizeSourceUrl(createSourceUrl('provider', 'https://allowed.example/box/one'));
   const page = new Normalizer().normalize('box_score', {
-    date: null, status: 'final', context: 'neutral', home: 'A', away: 'B', homeScore: 0, awayScore: 1, playerSourceId: null,
+    ...boxScoreDocument({ status: 'final', away: { name: 'B', score: 1, stats: statLine() }, home: { name: 'A', score: 0, stats: statLine() } }),
+    context: 'neutral',
   }, { jobKey: 'box', canonicalPath, observations: [{ kind: 'warning', message: 'partial row' }] });
-  assert.equal(page.data.teams[0].finalScore, 0);
+  assert.deepEqual(page.data.teams[1].finalScore, { state: 'present', value: 0 });
+  assert.equal(page.data.homeScore, 0);
   assert.equal(page.data.gameDate, null);
-  assert.equal(page.data.playerSourceId, null);
+  assert.equal(page.data.teams[1].schoolPath, null);
+  assert.equal(page.data.neutralSite, true);
   assert.equal(page.data.status, 'final');
   assert.equal(page.observations[0].message, 'partial row');
+});
+
+test('box-score normalization leaves neutral-site context unresolved when the page does not state it', () => {
+  const canonicalPath = canonicalizeSourceUrl(createSourceUrl('provider', 'https://allowed.example/box/two'));
+  const page = new Normalizer().normalize('box_score',
+    boxScoreDocument({ status: 'canceled', away: { name: 'B' }, home: { name: 'A' } }),
+    { jobKey: 'box', canonicalPath, observations: [] });
+  assert.equal(page.data.context, null);
+  assert.equal(page.data.neutralSite, null);
+  assert.equal(page.data.homeScore, null);
 });
 
 test('conflicting normalized facts preserve the accepted record and both provenance lineages', () => {
