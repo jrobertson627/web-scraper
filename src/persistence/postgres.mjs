@@ -4,11 +4,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON,
+  assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
+import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
@@ -104,14 +106,18 @@ export function guardPool(pool, onError = logPoolError) {
 }
 
 export class PostgresPersistence {
+  // requestTimeoutMs must be at least the workers' request policy timeout; the
+  // default is the largest timeout a policy may set.
   constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
     authorizeOperator = (id) => Boolean(id), onPoolError,
-    maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES } = {}) {
+    maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES, requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
+    orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS } = {}) {
     if (!Number.isInteger(claimTimeoutMs) || claimTimeoutMs < 1) throw new Error('claimTimeoutMs must be positive');
     this.pool = guardPool(pool, onPoolError);
     this.claimTimeoutMs = claimTimeoutMs;
     this.authorizeOperator = authorizeOperator;
     this.maxClaimRecoveries = positiveInteger('maxClaimRecoveries', maxClaimRecoveries);
+    this.requestDeadlineMs = positiveInteger('requestTimeoutMs', requestTimeoutMs) + positiveInteger('orphanGraceMs', orphanGraceMs);
   }
 
   async close() { await this.pool.end(); }
@@ -199,8 +205,23 @@ export class PostgresPersistence {
     if (!result.rowCount) throw new Error(`stale or missing lease for job ${key}`);
   }
 
+  // Cancels host requests whose worker died mid-request (see
+  // DEFAULT_ORPHAN_GRACE_MS). A request is released only once both its start
+  // and its owner's lease expiry are further in the past than the request
+  // deadline, judged by the database clock.
+  async releaseOrphanedRequests(client = this.pool) {
+    const released = await client.query(`UPDATE in_flight_requests r SET released_at = clock_timestamp(),
+      outcome = 'canceled', cancellation_reason = $2
+      FROM crawl_jobs j WHERE j.id = r.job_id AND r.released_at IS NULL
+        AND GREATEST(r.started_at, CASE WHEN j.lease_generation = r.lease_generation THEN j.claim_expires_at END)
+          + ($1::bigint * interval '1 millisecond') < clock_timestamp()
+      RETURNING r.request_id`, [this.requestDeadlineMs, ORPHANED_REQUEST_REASON]);
+    return released.rowCount;
+  }
+
   async recoverExpiredClaims() {
     return this.transaction(async (client) => {
+      await this.releaseOrphanedRequests(client);
       const expired = await client.query(`SELECT j.* FROM crawl_jobs j
         WHERE j.state IN ('fetching','fetched') AND j.claim_expires_at <= clock_timestamp()
         AND NOT EXISTS (SELECT 1 FROM in_flight_requests r WHERE r.job_id = j.id AND r.released_at IS NULL)

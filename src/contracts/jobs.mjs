@@ -23,6 +23,15 @@ const TRANSITIONS = new Map([
 // on the transport/5xx budget (policy.maxAttempts). See JOB_LIFECYCLE.md.
 export const DEFAULT_MAX_CLAIM_RECOVERIES = 3;
 
+// An unreleased host request is orphaned (its worker died mid-request) once
+// both its start and its owner's lease expiry are more than the request
+// timeout plus this grace in the past. The worker renews its lease at least
+// every claimTimeoutMs / 3 while a request runs and the transport ends every
+// request within requestTimeoutMs, so no live request can still be running
+// by then. Both adapters then cancel it with ORPHANED_REQUEST_REASON.
+export const DEFAULT_ORPHAN_GRACE_MS = 10_000;
+export const ORPHANED_REQUEST_REASON = 'owner lease expired past request deadline';
+
 export function positiveInteger(name, value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
   return value;

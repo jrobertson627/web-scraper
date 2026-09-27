@@ -13,7 +13,10 @@ import {
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
-import { DEFAULT_MAX_CLAIM_RECOVERIES, positiveInteger } from '../contracts/jobs.mjs';
+import {
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, positiveInteger,
+} from '../contracts/jobs.mjs';
+import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 
 const CLAIM_EXPIRED = 'claim expired before completion';
 
@@ -251,11 +254,16 @@ export class InMemoryPersistence {
     authorizeOperator = (operatorId) => Boolean(operatorId),
     claimTimeoutMs = 30_000,
     maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES,
+    // At least the workers' request policy timeout; the default is the
+    // largest timeout a policy may set.
+    requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
+    orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS,
   } = {}) {
     this.clock = clock;
     this.authorizeOperator = authorizeOperator;
     this.claimTimeoutMs = claimTimeoutMs;
     this.maxClaimRecoveries = positiveInteger('maxClaimRecoveries', maxClaimRecoveries);
+    this.requestDeadlineMs = positiveInteger('requestTimeoutMs', requestTimeoutMs) + positiveInteger('orphanGraceMs', orphanGraceMs);
     this.jobs = new Map();
     this.sourceFetches = [];
     this.parseRuns = [];
@@ -323,7 +331,26 @@ export class InMemoryPersistence {
     job.updatedAt = now.toISOString();
   }
 
+  // Cancels host requests whose worker died mid-request (see
+  // DEFAULT_ORPHAN_GRACE_MS). A request is released only once both its start
+  // and its owner's lease expiry are further in the past than the request
+  // deadline, judged by this store's clock.
+  releaseOrphanedRequests() {
+    const now = this.clock();
+    let released = 0;
+    for (const [key, request] of [...this.inFlight]) {
+      const job = this.jobs.get(key);
+      const ownerExpiry = job?.claim && sameLease(job.claim.lease, request.lease) ? Date.parse(job.claim.expiresAt) : -Infinity;
+      if (Math.max(Date.parse(request.startedAt), ownerExpiry) + this.requestDeadlineMs >= now.getTime()) continue;
+      this.inFlight.delete(key);
+      this.requestHistory.push(Object.freeze({ ...request, outcome: 'canceled', cancellationReason: ORPHANED_REQUEST_REASON, releasedAt: now.toISOString() }));
+      released += 1;
+    }
+    return released;
+  }
+
   recoverExpiredClaims() {
+    this.releaseOrphanedRequests();
     const now = this.clock();
     let recovered = 0;
     for (const job of this.jobs.values()) {

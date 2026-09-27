@@ -503,12 +503,47 @@ test('claim recovery caps a job whose worker keeps disappearing', async () => {
   assert.equal(await persistence.claimNextJob(new Date(), 'worker'), null);
 });
 
+test('a worker killed mid-request leaves no permanent host stall', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 2000, requestTimeoutMs: 1000, orphanGraceMs: 500 });
+  const run = childRun('hang', join(localRoot, 'raw-hang'));
+  const checkpoint = await run.message;
+  assert.equal(checkpoint.checkpoint, 'in-request');
+  run.child.kill();
+  await run.exit;
+  const host = new URL(checkpoint.url).host;
+  const orphan = await pool.query('SELECT j.provider_id, j.canonical_path, j.page_type FROM in_flight_requests r JOIN crawl_jobs j ON j.id = r.job_id WHERE r.released_at IS NULL');
+  assert.equal(orphan.rowCount, 1);
+  const orphanKey = `${orphan.rows[0].provider_id}:${orphan.rows[0].canonical_path}:${orphan.rows[0].page_type}`;
+
+  // Inside the deadline the request is never released and the host stays owned.
+  const other = rootJob('/other/page.html', 'season');
+  await persistence.addJob(other);
+  assert.equal(await persistence.releaseOrphanedRequests(), 0);
+  const blocked = await persistence.claimNextJob(new Date(), 'probe-worker');
+  assert.equal(blocked.key, other.key);
+  assert.equal(await persistence.acquireRequest(other.key, blocked.lease, host), null);
+  await persistence.transitionJob(other.key, 'retry_wait', blocked.lease, { nextAllowedAt: new Date(Date.now() - 60_000).toISOString(), lastError: 'host busy' });
+
+  // After lease expiry + request timeout + grace, recovery needs no manual step.
+  await delay(2000 + 1000 + 500 + 500);
+  assert.equal(await persistence.recoverExpiredClaims(), 1);
+  const released = await pool.query('SELECT outcome, cancellation_reason FROM in_flight_requests');
+  assert.deepEqual(released.rows, [{ outcome: 'canceled', cancellation_reason: 'owner lease expired past request deadline' }]);
+  const recovered = await persistence.getJob(orphanKey);
+  assert.equal(recovered.state, 'retry_wait');
+  assert.equal(recovered.claimRecoveries, 1);
+  const next = await persistence.claimNextJob(new Date(), 'replacement-worker');
+  assert.ok(await persistence.acquireRequest(next.key, next.lease, host));
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL AND host = $1', [host])).rows[0].n, 1);
+});
+
 test('retry transitions spend only the budget they name', async () => {
   await reset();
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
   const job = rootJob();
   await persistence.addJob(job);
-  const now = () => new Date().toISOString();
+  const now = () => new Date(Date.now() - 60_000).toISOString(); // ready at once, whatever the clock skew
   for (const charge of ['rate_limit', 'rate_limit', undefined, 'failure']) {
     const claimed = await persistence.claimNextJob(new Date(), 'budget-worker');
     await persistence.transitionJob(job.key, 'retry_wait', claimed.lease, { nextAllowedAt: now(), lastError: 'retry', ...(charge ? { charge } : {}) });

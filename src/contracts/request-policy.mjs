@@ -1,3 +1,7 @@
+// The longest whole-request timeout a policy may set. Persistence uses it as
+// the default request deadline so it can never release a live request early.
+export const MAX_REQUEST_TIMEOUT_MS = 120_000;
+
 export const REQUEST_POLICY_DEFAULTS = Object.freeze({
   requestTimeoutMs: 30_000,
   maxAttempts: 3,
@@ -54,7 +58,7 @@ export function validateRequestPolicy(input) {
   // must contain an @ with a dotted domain and no nested parens.
   if (typeof policy.userAgent !== 'string' || !/\S+.*\([^()\s]+@[^()\s]+\.[^()\s]+\)/.test(policy.userAgent)) invalid('policy.userAgent', 'an application name and operator contact address', 'userAgent: scraper (+ops@example.com)');
   for (const [field, min, max] of [
-    ['requestTimeoutMs', 1_000, 120_000], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
+    ['requestTimeoutMs', 1_000, MAX_REQUEST_TIMEOUT_MS], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
     ['retryMaxMs', 100, 600_000], ['maxRedirects', 0, 10], ['cacheMaxAgeMs', 0, 86_400_000],
     ['maxResponseBytes', 1_024, 64 * 1024 * 1024], ['maxRetryAfterMs', 6_000, 7 * 86_400_000],
     ['maxRateLimitAttempts', 1, 50],
