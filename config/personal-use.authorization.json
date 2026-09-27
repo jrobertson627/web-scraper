@@ -10,6 +10,6 @@
     "eligibilityPredicate": "To == 2026",
     "targetEndingYears": [2022, 2023, 2024, 2025, 2026]
   },
-  "contractVersion": "personal-v1",
-  "contractFingerprint": "755cd5df6cb4fe3e29fb4d1b4215d7a906b91d944b513a6612d104b6e19daf3e"
+  "contractVersion": "personal-v2",
+  "contractFingerprint": "b891a0bcf2a4fec81a2d3551fd234362338a309ac657a84fb54f9e53a01d1494"
 }
