@@ -10,6 +10,8 @@ import { createRawStore } from '../src/persistence/index.mjs';
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
+import { boxScoreDocument, gameLogDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
+import { present, unavailable } from '../src/contracts/value-state.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
   throw new Error('PostgreSQL integration tests require an explicitly disposable PG* database');
@@ -137,11 +139,29 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     const seasonRaw = raw.put(Buffer.from('season'));
     const seasonFetch = await persistence.recordFetch({ jobKey: season.key, status: 200, ...seasonRaw }, seasonClaim.lease, raw);
     await persistence.transitionJob(season.key, 'fetched', seasonClaim.lease, { sourceFetchId: seasonFetch });
-    await persistence.commitPageAndTransition({ jobKey: season.key, kind: 'season', identity: season.key,
-      data: { endingYear: 2026, roster: [
-        { name: 'Linked Player', sourcePath: '/players/linked', stats: { points: 0 } },
-        { name: 'Unlinked Player' },
-      ] } }, sourceProvenance(season, seasonFetch), seasonClaim.lease);
+    const linked = { name: 'Linked Player', playerPath: '/players/linked' };
+    const seasonData = seasonDocument({ school: 'Fixture A', endingYear: 2026, gameLogUrl: null,
+      games: [{ status: 'final', teamScore: 70, opponentScore: 65, teamStats: statLine({ pts: 70 }), opponentStats: statLine({ pts: 65 }) }],
+      players: [{ ...linked, lines: [statLine({ minutes: 32.5, pts: 0 })] }, { name: 'Unlinked Player', lines: [statLine({ pts: 4 })] }] });
+    seasonData.summary.ncaaTournament = { seed: present(4), region: 'South', games: [
+      { round: 'First Round', result: 'W', teamScore: 64, opponentScore: 47, opponent: { name: 'Vermont', seed: 13 } }] };
+    await persistence.commitPageAndTransition({ jobKey: season.key, kind: 'season', identity: season.key, data: seasonData },
+      sourceProvenance(season, seasonFetch), seasonClaim.lease);
+
+    const log = { ...rootJob('/school/a/men/2026-gamelogs.html', 'game_log'), parentKey: season.key,
+      schoolSourcePath: 'fixture-provider:fixture.example/school/a' };
+    await persistence.addJob(log);
+    const logClaim = await persistence.claimNextJob(new Date(), 'domain-worker');
+    assert.equal(logClaim.key, log.key);
+    const logRaw = raw.put(Buffer.from('log'));
+    const logFetch = await persistence.recordFetch({ jobKey: log.key, status: 200, ...logRaw }, logClaim.lease, raw);
+    await persistence.transitionJob(log.key, 'fetched', logClaim.lease, { sourceFetchId: logFetch });
+    await persistence.commitPageAndTransition({ jobKey: log.key, kind: 'game_log', identity: log.key,
+      data: gameLogDocument(2026, [
+        { location: 'neutral', opponent: { name: 'Fixture B', schoolPath: '/school/b' }, boxScoreUrl: '/box/domain.html', status: 'final',
+          date: '2026-01-02', teamScore: 70, opponentScore: 65, teamStats: statLine({ pts: 70 }), opponentStats: statLine({ pts: 65 }) },
+        { location: 'away', opponent: { name: 'Division III', schoolPath: null }, status: 'incomplete' },
+      ]) }, sourceProvenance(log, logFetch), logClaim.lease);
 
     const box = rootJob('/box/domain.html', 'box_score');
     await persistence.addJob(box);
@@ -150,26 +170,45 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     const boxRaw = raw.put(Buffer.from('box'));
     const boxFetch = await persistence.recordFetch({ jobKey: box.key, status: 200, ...boxRaw }, boxClaim.lease, raw);
     await persistence.transitionJob(box.key, 'fetched', boxClaim.lease, { sourceFetchId: boxFetch });
+    const boxData = boxScoreDocument({ date: '2026-01-02', status: 'final',
+      away: { name: 'Fixture B', schoolPath: '/school/b', score: 65, stats: statLine({ pts: 65 }) },
+      home: { name: 'Fixture A', schoolPath: '/school/a', score: 70, stats: statLine({ pts: 70 }), players: [
+        { ...linked, starter: true, stats: statLine({ minutes: 32.5, pts: 0 }) },
+        { name: 'Unlinked Player', starter: false, stats: statLine({ pts: unavailable('not_published') }) },
+      ] } });
     await persistence.commitPageAndTransition({ jobKey: box.key, kind: 'game', identity: 'fixture-provider:fixture.example/box/domain.html',
-      data: { gameDate: '2026-01-02', status: 'final', teams: [
-        { side: 'home', name: 'Fixture A', finalScore: 70, stats: { rebounds: { state: 'present', value: 0 } } },
-        { side: 'away', name: 'Fixture B', finalScore: 65 },
-      ], playerBasicStats: [
-        { name: 'Linked Player', sourcePath: '/players/linked', stats: { points: { state: 'present', value: 0 } } },
-        { name: 'Unlinked Player', stats: { points: { state: 'unavailable', reason: 'not_published' } } },
-      ], playerAdvancedStats: [
-        { name: 'Linked Player', sourcePath: '/players/linked', stats: { usage: { state: 'blank' } } },
-      ] } }, sourceProvenance(box, boxFetch), boxClaim.lease);
+      data: { ...boxData, gameDate: boxData.date, context: null, neutralSite: null } }, sourceProvenance(box, boxFetch), boxClaim.lease);
     const counts = await pool.query(`SELECT
       (SELECT count(*) FROM school_aliases)::int AS aliases,
       (SELECT count(*) FROM school_seasons)::int AS seasons,
       (SELECT count(*) FROM season_rosters)::int AS rosters,
       (SELECT count(*) FROM players)::int AS players,
+      (SELECT count(*) FROM team_seasons)::int AS team_seasons,
+      (SELECT count(*) FROM team_season_stats)::int AS team_season_stats,
+      (SELECT count(*) FROM player_season_stats)::int AS player_season_stats,
+      (SELECT count(*) FROM game_log_rows)::int AS log_rows,
+      (SELECT count(*) FROM game_log_row_stats)::int AS log_row_stats,
       (SELECT count(*) FROM team_game_stats)::int AS team_stats,
-      (SELECT count(*) FROM player_game_basic_stats)::int AS basic_stats,
-      (SELECT count(*) FROM player_game_advanced_stats)::int AS advanced_stats`);
-    assert.deepEqual(counts.rows[0], { aliases: 1, seasons: 1, rosters: 2, players: 1,
-      team_stats: 1, basic_stats: 2, advanced_stats: 1 });
+      (SELECT count(*) FROM player_game_stats)::int AS player_stats`);
+    assert.deepEqual(counts.rows[0], { aliases: 1, seasons: 1, rosters: 2, players: 1, team_seasons: 1, team_season_stats: 2,
+      player_season_stats: 2, log_rows: 2, log_row_stats: 2, team_stats: 2, player_stats: 2 });
+
+    const teamSeason = await pool.query('SELECT wins,losses,ncaa_seed,ncaa_region,value_states FROM team_seasons');
+    assert.deepEqual({ ...teamSeason.rows[0], value_states: Object.keys(teamSeason.rows[0].value_states).sort() },
+      { wins: 1, losses: 0, ncaa_seed: 4, ncaa_region: 'South', value_states: ['confLosses', 'confWins', 'defRtg', 'offRtg', 'sos', 'srs'] });
+    const lines = await pool.query(`SELECT player_name,minutes::float8 AS minutes,pts,value_states FROM player_game_stats ORDER BY source_row_index`);
+    assert.deepEqual(lines.rows, [
+      { player_name: 'Linked Player', minutes: 32.5, pts: 0, value_states: {} },
+      { player_name: 'Unlinked Player', minutes: 0, pts: null, value_states: { pts: { state: 'unavailable', reason: 'not_published' } } },
+    ]);
+    const logRows = await pool.query(`SELECT location,opponent_school_path,result,game_status,team_score,canonical_box_score_path
+      FROM game_log_rows ORDER BY source_row_index`);
+    assert.deepEqual(logRows.rows, [
+      { location: 'neutral', opponent_school_path: 'fixture.example/school/b', result: 'W', game_status: 'final', team_score: 70,
+        canonical_box_score_path: 'fixture.example/box/domain.html' },
+      { location: 'away', opponent_school_path: null, result: null, game_status: 'incomplete', team_score: null, canonical_box_score_path: null },
+    ]);
+    assert.equal((await pool.query('SELECT neutral_site FROM games')).rows[0].neutral_site, true);
   })();
 
   await reset();
@@ -251,6 +290,16 @@ test('real PostgreSQL persistence and process restart', async (t) => {
       WHERE canonical_box_score_path = 'fixture.example/box/one.html'`);
     assert.equal(logSides.rows[0].n, 2);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM unavailable_coverage')).rows[0].n, 7);
+    const stored = await pool.query(`SELECT
+      (SELECT count(*) FROM game_log_rows)::int AS log_rows,
+      (SELECT count(*) FROM game_log_row_stats)::int AS log_row_stats,
+      (SELECT count(*) FROM team_season_stats)::int AS team_season_stats,
+      (SELECT count(*) FROM player_game_stats)::int AS player_stats`);
+    assert.deepEqual(stored.rows[0], { log_rows: 8, log_row_stats: 6, team_season_stats: 6, player_stats: 4 });
+    const neutral = await pool.query(`SELECT canonical_box_score_path AS path,neutral_site FROM games
+      WHERE canonical_box_score_path IN ('fixture.example/box/one.html','fixture.example/box/four.html') ORDER BY 1`);
+    assert.deepEqual(neutral.rows, [{ path: 'fixture.example/box/four.html', neutral_site: true },
+      { path: 'fixture.example/box/one.html', neutral_site: false }]);
     assert.equal((await app.queries.listGames()).length, 6);
     const server = app.createApiServer();
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -270,7 +319,7 @@ test('real PostgreSQL persistence and process restart', async (t) => {
   await reset();
   await (async () => {
     const fixtures = foundationCorpus().map((entry) => entry.url.endsWith('/school/a/men/2026-gamelogs.html')
-      ? { ...entry, body: entry.body.replace('"homeScore":70', '"homeScore":71') } : entry);
+      ? { ...entry, body: entry.body.replace('"teamScore":{"state":"present","value":70}', '"teamScore":{"state":"present","value":71}') } : entry);
     const ingest = new PostgresPersistence({ pool, claimTimeoutMs: 10000 });
     const raw = createRawStore('filesystem', join(localRoot, 'raw-log-conflict'));
     const app = createFixtureApplication({ fixtureEntries: fixtures, sharedState: { persistence: ingest, rawStore: raw } });
