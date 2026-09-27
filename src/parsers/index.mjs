@@ -1,6 +1,10 @@
 import { createParseResult } from '../contracts/boundaries.mjs';
 import { parsedDocumentError } from '../contracts/parsed-documents.mjs';
 import { assertPageType } from '../contracts/source.mjs';
+import { SchoolHistoryParser } from './school-history.mjs';
+import { SchoolIndexParser } from './school-index.mjs';
+
+export { SchoolHistoryParser, SchoolIndexParser };
 
 export class ParserRegistry {
   #parsers = new Map();
@@ -56,9 +60,12 @@ export class FixtureParser {
 }
 
 // Production parsers for real provider pages, one per page type, registered by
-// the worker assembly. The five Sports Reference parsers land in phase 2
-// (#39-#42); until then this list is empty and the worker refuses to start.
-export const PRODUCTION_PARSERS = Object.freeze([]);
+// the worker assembly. The remaining Sports Reference parsers land in #40-#42;
+// until then the worker reports those page types as missing and refuses to start.
+export const PRODUCTION_PARSERS = Object.freeze([
+  new SchoolIndexParser(),
+  new SchoolHistoryParser(),
+]);
 
 export function createProductionParserRegistry(parsers = PRODUCTION_PARSERS) {
   const registry = new ParserRegistry();

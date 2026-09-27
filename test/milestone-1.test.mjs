@@ -64,7 +64,7 @@ test('worker loads personal records and reaches the missing-parser boundary with
   };
   const accepted = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], { cwd: process.cwd(), env, encoding: 'utf8' });
   assert.equal(accepted.status, EXIT_CODES.workerNotReady);
-  assert.match(accepted.stderr, /no production parser is registered for school_index@1/);
+  assert.match(accepted.stderr, /no production parser is registered for season@1/);
   const rejected = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], {
     cwd: process.cwd(), encoding: 'utf8',
     env: { ...env, AUTHORIZATION_JSON: JSON.stringify({ ...authorization, evidenceRef: 'operator-attestation:secret=TOP_SECRET', scope: { ...authorization.scope, targetEndingYears: [2026] } }) },

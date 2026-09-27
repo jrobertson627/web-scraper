@@ -2,7 +2,7 @@
 
 Raw HTML captured from sports-reference.com for discovery and parser regression tests (#38). These are real-provider captures, distinct from the synthetic pages in `fixtures/foundation-corpus.mjs`.
 
-The raw pages in `raw/` are **not committed**. The repository is public, and the data contract (`config/personal-use.data-contract.json`) sets `redistribution: private`. Only `manifest.json` is committed. It records each page's URL, fetch time, size and SHA-256, so a local copy can be checked against it. Tests that need these pages must skip when `raw/` is missing: read them through `captures.mjs` and pass `captureSkip(...paths)` as the test's `skip` option. `captureLinkDocument` builds frozen-shape documents from the link-bearing parts of a capture, a stand-in for the phase 2 parsers used by the discovery tests.
+The raw pages in `raw/` are **not committed**. The repository is public, and the data contract (`config/personal-use.data-contract.json`) sets `redistribution: private`. Only `manifest.json` is committed. It records each page's URL, fetch time, size and SHA-256, so a local copy can be checked against it. Tests that need these pages must skip when `raw/` is missing: read them through `captures.mjs` and pass `captureSkip(...paths)` as the test's `skip` option. `captureLinkDocument` runs registered production parsers and uses link-only stand-ins for page types whose phase 2 parser has not landed yet.
 
 ## Recapturing
 
