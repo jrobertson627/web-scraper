@@ -2,6 +2,18 @@ import { createProvenance } from '../contracts/provenance.mjs';
 import { createSourceUrl } from '../contracts/source.mjs';
 import { createSnapshot } from '../contracts/boundaries.mjs';
 import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
+import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
+import { isTransientStoreError } from '../contracts/jobs.mjs';
+
+// Sleeps for ms, ending early (without throwing) if the signal aborts.
+function abortableDelay(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
 
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
@@ -18,6 +30,8 @@ export class IngestionOrchestrator {
     this.clock = clock;
   }
 
+  // Processes every job that is claimable now, then returns. Returns job
+  // counts by state rather than the jobs themselves.
   async runOnce(workerId = 'worker') {
     let processed = 0;
     const events = [];
@@ -29,17 +43,46 @@ export class IngestionOrchestrator {
       if (event) this.events.emit('job.settled', event);
       processed += 1;
     }
-    return { processed, jobs: await this.persistence.listJobs(), events: Object.freeze(events) };
+    return { processed, counts: await this.persistence.jobCounts(), events: Object.freeze(events) };
   }
 
-  async #process(job) {
+  // Long-running worker loop. When nothing is claimable it sleeps until the
+  // earliest retry falls due or claim expires (at most maxIdleMs, at least
+  // minIdleMs), and it returns once no runnable pending, retry_wait, fetching
+  // or fetched work remains. Aborting `signal` stops claiming: the current job
+  // finishes (a request on the wire completes, a request not yet started is
+  // skipped and its host released) and the loop returns. Events are passed to
+  // onEvent and tallied by kind rather than kept.
+  async run({ workerId = 'worker', signal, maxIdleMs = 30_000, minIdleMs = 250, onEvent = () => {}, sleep = abortableDelay } = {}) {
+    let processed = 0;
+    const outcomes = {};
+    while (!signal?.aborted) {
+      const job = await this.persistence.claimNextJob(this.clock(), workerId);
+      if (job) {
+        const event = await this.#process(job, signal);
+        processed += 1;
+        if (event) {
+          outcomes[event.kind] = (outcomes[event.kind] ?? 0) + 1;
+          onEvent(Object.freeze(event));
+        }
+        continue;
+      }
+      const outlook = await this.persistence.workOutlook();
+      if (!outlook.remaining) break;
+      await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, outlook.wakeInMs ?? maxIdleMs)), signal);
+    }
+    return { processed, stopped: Boolean(signal?.aborted), outcomes, counts: await this.persistence.jobCounts() };
+  }
+
+  async #process(job, signal) {
     let phase = 'fetch';
     try {
-      const result = await this.fetcher.fetch(job, job.lease);
+      const result = await this.fetcher.fetch(job, job.lease, { signal });
       if (result.kind === 'retry_wait') {
         await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, {
           nextAllowedAt: result.nextAllowedAt,
           lastError: result.reason,
+          ...(result.charge ? { charge: result.charge } : {}),
         });
         return { kind: 'retry_wait', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason, nextAllowedAt: result.nextAllowedAt };
       }
@@ -106,10 +149,14 @@ export class IngestionOrchestrator {
         parserVersion: parser.version(),
         parsedAt: this.clock().toISOString(),
       });
+      phase = 'commit';
       const committed = await this.persistence.commitPageAndTransition(page, provenance, job.lease);
       return { kind: 'parsed', jobKey: job.key, pageType: job.pageType, warnings: [...(parsed.warnings ?? []), ...discovered.warnings], reconciliationIssues: committed.conflict ? 1 : 0 };
     } catch (error) {
-      if (phase === 'fetch' || phase === 'snapshot') throw error;
+      // Fetch-phase errors, and transient database errors in any phase, say
+      // nothing about the page: retry. Only the remaining parse, normalize
+      // and commit errors are structural and become parse_failed.
+      if (phase === 'fetch' || phase === 'snapshot' || isTransientStoreError(error)) return this.#retryFailure(job, error, phase);
       const current = await this.persistence.getJob(job.key);
       if (current?.claim && ['fetching', 'fetched'].includes(current.state)) {
         try {
@@ -133,5 +180,28 @@ export class IngestionOrchestrator {
       }
       return { kind: 'parse_failed', jobKey: job.key, pageType: job.pageType, reason: error.message, phase };
     }
+  }
+
+  // An infrastructure error (raw store write, database call or deadlock,
+  // lease renewal) settles only this job: it becomes a charged retry with
+  // bounded backoff, or permanently_failed once the budget is spent, and the
+  // run moves on. Errors marked fatal are wiring defects and still stop it.
+  async #retryFailure(job, error, phase) {
+    if (error?.fatal) throw error;
+    const reason = `${phase} failed: ${error?.message ?? String(error)}`;
+    const outcome = chargedRetry(this.fetcher.policy ?? REQUEST_POLICY_DEFAULTS, job, reason, error?.code ?? 'infrastructure', this.clock());
+    const details = outcome.kind === 'retry_wait'
+      ? { nextAllowedAt: outcome.nextAllowedAt, lastError: reason, failurePhase: phase, charge: outcome.charge }
+      : { lastError: outcome.reason, failurePhase: phase };
+    try {
+      await this.persistence.transitionJob(job.key, outcome.kind, job.lease, details);
+    } catch (transitionError) {
+      // The lease is gone or the host request could not be released. Claim
+      // recovery (and orphaned-request release) settles the job later.
+      return { kind: 'unsettled', code: outcome.code, jobKey: job.key, pageType: job.pageType, reason, phase,
+        settleError: transitionError?.message ?? String(transitionError) };
+    }
+    return { kind: outcome.kind, code: outcome.code, jobKey: job.key, pageType: job.pageType, reason: outcome.reason, phase,
+      ...(outcome.nextAllowedAt ? { nextAllowedAt: outcome.nextAllowedAt } : {}) };
   }
 }

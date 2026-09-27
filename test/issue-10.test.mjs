@@ -8,12 +8,13 @@ const migrations = readdirSync(migrationRoot).filter((name) => /^\d{3}_.*\.sql$/
 const sql = migrations.map((name) => readFileSync(join(migrationRoot, name), 'utf8')).join('\n');
 
 test('foundation migrations are ordered, repeat-safe, and record every applied version', () => {
-  assert.deepEqual(migrations, [
+  assert.deepEqual(migrations.slice(0, 8), [
     '001_foundation.sql', '002_job_lifecycle.sql', '003_authorization_contract.sql', '004_schema_hardening.sql', '005_parser_normalization.sql',
     '006_http_cache_metadata.sql', '007_postgres_repositories.sql', '008_parsed_document_storage.sql',
-    '010_reconciliation_issue_dedup.sql',
   ]);
-  for (const version of ['001_foundation', '002_job_lifecycle', '003_authorization_contract', '004_schema_hardening', '005_parser_normalization', '006_http_cache_metadata', '007_postgres_repositories', '008_parsed_document_storage', '010_reconciliation_issue_dedup']) {
+  assert.ok(migrations.includes('009_worker_robustness.sql'));
+  assert.equal(new Set(migrations.map((name) => name.slice(0, 3))).size, migrations.length, 'migration numbers are unique');
+  for (const version of migrations.map((name) => name.slice(0, -4))) {
     assert.match(sql, new RegExp(`schema_migrations[^;]*${version}|${version}[^;]*schema_migrations`, 's'));
   }
   assert.match(sql, /CREATE TABLE IF NOT EXISTS/);

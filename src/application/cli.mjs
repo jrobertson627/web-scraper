@@ -2,6 +2,7 @@ import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { createFixtureApplication } from './composition-root.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
+import { runWorkerLoop } from './worker-loop.mjs';
 import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
@@ -113,6 +114,7 @@ export async function runCli({
   openPostgres = openPostgresPersistence,
   args = process.argv.slice(3),
   crawlLog = createCrawlLog({ write: stderr }),
+  startWorker,
 } = {}) {
   if (mode === 'local') {
     const app = createFixtureApplication({ events: crawlLog });
@@ -222,6 +224,17 @@ export async function runCli({
         stderr(`worker persistence unavailable: ${safeMessage(error)}`);
         return { exitCode: EXIT_CODES.runtimeFailure };
       }
+    }
+    if (startWorker) {
+      // startWorker assembles the production worker and returns
+      // { orchestrator, workerId?, close? }. The loop runs until the work is
+      // done or SIGTERM/SIGINT stops it, then releases what it opened.
+      const worker = await startWorker({ config, settings, env });
+      try {
+        const result = await runWorkerLoop({ orchestrator: worker.orchestrator, workerId: worker.workerId ?? env.WORKER_ID ?? 'worker', log: stderr });
+        stdout(JSON.stringify({ mode, ...result }));
+        return { exitCode: EXIT_CODES.success, result };
+      } finally { await worker.close?.(); }
     }
     // The production assembly is createWorkerApplication; it needs the phase 2 parsers (#39-#42).
     const missingParsers = missingProductionParsers(createProductionParserRegistry(), config.parserVersions);

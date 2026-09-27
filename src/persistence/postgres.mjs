@@ -3,8 +3,14 @@ import { readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { assertTransition, createLeaseToken, createOperatorDisposition } from '../contracts/jobs.mjs';
-import { createJob, createPageRequest, createReadPage, decodePageCursor, deepFreeze } from '../contracts/boundaries.mjs';
+import {
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON,
+  assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
+} from '../contracts/jobs.mjs';
+import {
+  createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
+} from '../contracts/boundaries.mjs';
+import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
@@ -15,9 +21,24 @@ const { Pool } = pg;
 const CHECKSUM = /^[0-9a-f]{64}$/;
 const FINAL_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 const FAILURE_STATES = new Set(['retry_wait', 'operator_stop', 'parse_failed', 'permanently_failed']);
+const CLAIM_EXPIRED = 'claim expired before completion';
 
 function iso(value) { return value == null ? null : new Date(value).toISOString(); }
-function keySql() { return "provider_id || ':' || canonical_path || ':' || page_type"; }
+// A job key is `${providerId}:${canonicalPath}:${pageType}`. Provider ids never
+// contain ':' (createJob rejects them) and page types are fixed words, so a key
+// splits back into the three columns of UNIQUE (provider_id, canonical_path,
+// page_type) and every lookup is served by that index. A malformed key splits
+// into NULLs, which match no row.
+export function jobKeyParts(key) {
+  const text = typeof key === 'string' ? key : '';
+  const first = text.indexOf(':');
+  const last = text.lastIndexOf(':');
+  if (first < 1 || last <= first + 1 || last === text.length - 1) return [null, null, null];
+  return [text.slice(0, first), text.slice(first + 1, last), text.slice(last + 1)];
+}
+function byKey(from, alias = '') {
+  return `${alias}provider_id = $${from} AND ${alias}canonical_path = $${from + 1} AND ${alias}page_type = $${from + 2}`;
+}
 function dbPath(canonicalPath) { return canonicalPathString(canonicalPath); }
 function canonicalFromRow(row) {
   const url = new URL(`https://${row.canonical_path}`);
@@ -48,6 +69,9 @@ function mapJob(row, events = []) {
     parserVersion: row.parser_version,
     state: row.state,
     attempts: row.attempts,
+    failureAttempts: row.failure_attempts ?? 0,
+    rateLimitAttempts: row.rate_limit_attempts ?? 0,
+    claimRecoveries: row.claim_recoveries ?? 0,
     generation: Number(row.claim_generation),
     nextAllowedAt: iso(row.next_allowed_at),
     lastError: row.last_error,
@@ -82,12 +106,18 @@ export function guardPool(pool, onError = logPoolError) {
 }
 
 export class PostgresPersistence {
+  // requestTimeoutMs must be at least the workers' request policy timeout; the
+  // default is the largest timeout a policy may set.
   constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
-    authorizeOperator = (id) => Boolean(id), onPoolError } = {}) {
+    authorizeOperator = (id) => Boolean(id), onPoolError,
+    maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES, requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
+    orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS } = {}) {
     if (!Number.isInteger(claimTimeoutMs) || claimTimeoutMs < 1) throw new Error('claimTimeoutMs must be positive');
     this.pool = guardPool(pool, onPoolError);
     this.claimTimeoutMs = claimTimeoutMs;
     this.authorizeOperator = authorizeOperator;
+    this.maxClaimRecoveries = positiveInteger('maxClaimRecoveries', maxClaimRecoveries);
+    this.requestDeadlineMs = positiveInteger('requestTimeoutMs', requestTimeoutMs) + positiveInteger('orphanGraceMs', orphanGraceMs);
   }
 
   async close() { await this.pool.end(); }
@@ -113,7 +143,7 @@ export class PostgresPersistence {
     return this.transaction(async (client) => {
       let parentId = null;
       if (validated.parentKey) {
-        const parent = await client.query(`SELECT id FROM crawl_jobs WHERE ${keySql()} = $1`, [validated.parentKey]);
+        const parent = await client.query(`SELECT id FROM crawl_jobs WHERE ${byKey(1)}`, jobKeyParts(validated.parentKey));
         if (!parent.rowCount) throw new Error(`parent job is missing: ${validated.parentKey}`);
         parentId = parent.rows[0].id;
       }
@@ -123,7 +153,8 @@ export class PostgresPersistence {
         ON CONFLICT (provider_id, canonical_path, page_type) DO NOTHING
         RETURNING *`, [validated.sourceUrl.providerId, dbPath(validated.canonicalPath), validated.pageType,
         validated.sourceUrl.absoluteUrl, parentId, validated.schoolSourcePath ?? null, validated.parserVersion ?? '1']);
-      const row = inserted.rows[0] ?? (await client.query(`SELECT * FROM crawl_jobs WHERE ${keySql()} = $1`, [validated.key])).rows[0];
+      const row = inserted.rows[0] ?? (await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)}`,
+        [validated.sourceUrl.providerId, dbPath(validated.canonicalPath), validated.pageType])).rows[0];
       return mapJob(row);
     });
   }
@@ -138,7 +169,7 @@ export class PostgresPersistence {
 
   async getJob(key) {
     const result = await this.pool.query(`SELECT j.*, p.provider_id || ':' || p.canonical_path || ':' || p.page_type AS parent_key
-      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id WHERE j.provider_id || ':' || j.canonical_path || ':' || j.page_type = $1`, [key]);
+      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id WHERE ${byKey(1, 'j.')}`, jobKeyParts(key));
     if (!result.rowCount) return null;
     const events = await this.pool.query('SELECT * FROM job_state_events WHERE job_id = $1 ORDER BY id', [result.rows[0].id]);
     return mapJob(result.rows[0], events.rows);
@@ -166,38 +197,84 @@ export class PostgresPersistence {
     });
   }
 
+  // Job counts by state, without loading jobs or their history.
+  async jobCounts() {
+    const result = await this.pool.query('SELECT state, count(*)::int AS count FROM crawl_jobs GROUP BY state ORDER BY state');
+    return Object.fromEntries(result.rows.map((row) => [row.state, row.count]));
+  }
+
+  // What a worker that found nothing to claim should do next. remaining counts
+  // pending, retry_wait, fetching and fetched jobs that can still run without
+  // an operator (none of their ancestors is stopped or failed); wakeInMs is how
+  // long until the earliest retry falls due or claim expires, by the database
+  // clock, or null when nothing is scheduled.
+  async workOutlook() {
+    const result = await this.pool.query(`WITH RECURSIVE live AS (
+        SELECT id, state FROM crawl_jobs WHERE parent_job_id IS NULL
+        UNION ALL
+        SELECT c.id, c.state FROM crawl_jobs c JOIN live p ON c.parent_job_id = p.id
+        WHERE p.state NOT IN ('operator_stop','parse_failed','permanently_failed'))
+      SELECT (SELECT count(*)::int FROM live WHERE state IN ('pending','retry_wait','fetching','fetched')) AS remaining,
+        (SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (min(CASE WHEN state = 'retry_wait' THEN next_allowed_at ELSE claim_expires_at END)
+          - clock_timestamp())) * 1000))::bigint FROM crawl_jobs WHERE state IN ('retry_wait','fetching','fetched')) AS wake_ms`);
+    const row = result.rows[0];
+    return { remaining: row.remaining, wakeInMs: row.wake_ms == null ? null : Number(row.wake_ms) };
+  }
+
   async renewClaim(key, lease) {
-    const result = await this.pool.query(`UPDATE crawl_jobs SET claim_expires_at = clock_timestamp() + ($4::bigint * interval '1 millisecond'),
-      updated_at = clock_timestamp() WHERE ${keySql()} = $1 AND claim_owner = $2 AND lease_generation = $3
+    const result = await this.pool.query(`UPDATE crawl_jobs SET claim_expires_at = clock_timestamp() + ($6::bigint * interval '1 millisecond'),
+      updated_at = clock_timestamp() WHERE ${byKey(1)} AND claim_owner = $4 AND lease_generation = $5
       AND claim_expires_at > clock_timestamp() AND state IN ('fetching','fetched')`,
-    [key, lease?.workerId, lease?.generation, this.claimTimeoutMs]);
+    [...jobKeyParts(key), lease?.workerId, lease?.generation, this.claimTimeoutMs]);
     if (!result.rowCount) throw new Error(`stale or missing lease for job ${key}`);
+  }
+
+  // Cancels host requests whose worker died mid-request (see
+  // DEFAULT_ORPHAN_GRACE_MS). A request is released only once both its start
+  // and its owner's lease expiry are further in the past than the request
+  // deadline, judged by the database clock.
+  async releaseOrphanedRequests(client = this.pool) {
+    const released = await client.query(`UPDATE in_flight_requests r SET released_at = clock_timestamp(),
+      outcome = 'canceled', cancellation_reason = $2
+      FROM crawl_jobs j WHERE j.id = r.job_id AND r.released_at IS NULL
+        AND GREATEST(r.started_at, CASE WHEN j.lease_generation = r.lease_generation THEN j.claim_expires_at END)
+          + ($1::bigint * interval '1 millisecond') < clock_timestamp()
+      RETURNING r.request_id`, [this.requestDeadlineMs, ORPHANED_REQUEST_REASON]);
+    return released.rowCount;
   }
 
   async recoverExpiredClaims() {
     return this.transaction(async (client) => {
+      await this.releaseOrphanedRequests(client);
       const expired = await client.query(`SELECT j.* FROM crawl_jobs j
         WHERE j.state IN ('fetching','fetched') AND j.claim_expires_at <= clock_timestamp()
         AND NOT EXISTS (SELECT 1 FROM in_flight_requests r WHERE r.job_id = j.id AND r.released_at IS NULL)
         FOR UPDATE OF j SKIP LOCKED`);
       for (const row of expired.rows) {
-        await client.query(`UPDATE crawl_jobs SET state = 'retry_wait', next_allowed_at = clock_timestamp(),
-          last_error = 'claim expired before completion', claim_owner = NULL, claim_expires_at = NULL,
-          lease_generation = NULL, updated_at = clock_timestamp() WHERE id = $1`, [row.id]);
-        await this.recordEvent(client, row, row.state, 'retry_wait', { nextAllowedAt: new Date().toISOString(), lastError: 'claim expired before completion' });
+        const exhausted = row.claim_recoveries + 1 >= this.maxClaimRecoveries;
+        const lastError = exhausted ? `${CLAIM_EXPIRED}; claim recovery limit reached` : CLAIM_EXPIRED;
+        const updated = await client.query(`UPDATE crawl_jobs SET state = $2,
+          next_allowed_at = CASE WHEN $3 THEN NULL ELSE clock_timestamp() END, claim_recoveries = claim_recoveries + 1,
+          last_error = $4, claim_owner = NULL, claim_expires_at = NULL,
+          lease_generation = NULL, updated_at = clock_timestamp() WHERE id = $1 RETURNING next_allowed_at, claim_recoveries`,
+        [row.id, exhausted ? 'permanently_failed' : 'retry_wait', exhausted, lastError]);
+        const { next_allowed_at: nextAllowedAt, claim_recoveries: claimRecoveries } = updated.rows[0];
+        await this.recordEvent(client, row, row.state, exhausted ? 'permanently_failed' : 'retry_wait', exhausted
+          ? { lastError, claimRecoveries, previousError: row.last_error }
+          : { nextAllowedAt: iso(nextAllowedAt), lastError, claimRecoveries });
       }
       return expired.rowCount;
     });
   }
 
+  // The database clock is the only authority for lease validity (see "Time
+  // authority for leases" in JOB_LIFECYCLE.md), so the whole check runs in SQL.
   async leasedJob(client, key, lease) {
-    const result = await client.query(`SELECT * FROM crawl_jobs WHERE ${keySql()} = $1 FOR UPDATE`, [key]);
-    const row = result.rows[0];
-    if (!row || !lease || row.claim_owner !== lease.workerId || Number(row.lease_generation) !== lease.generation ||
-      !row.claim_expires_at || new Date(row.claim_expires_at) <= new Date()) {
-      throw new Error(`stale or missing lease for job ${key}`);
-    }
-    return row;
+    const result = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} AND claim_owner = $4
+      AND lease_generation = $5 AND claim_expires_at > clock_timestamp() FOR UPDATE`,
+    [...jobKeyParts(key), lease?.workerId ?? null, lease?.generation ?? null]);
+    if (!result.rowCount) throw new Error(`stale or missing lease for job ${key}`);
+    return result.rows[0];
   }
 
   async recordEvent(client, row, from, to, details) {
@@ -211,12 +288,17 @@ export class PostgresPersistence {
     const active = await client.query('SELECT 1 FROM in_flight_requests WHERE job_id = $1 AND released_at IS NULL', [row.id]);
     if (active.rowCount) throw new Error(`cannot transition job while its host request is still active`);
     const clear = FINAL_STATES.has(nextState);
+    // details.charge names the retry budget this transition spends (see
+    // chargedRetry and rateLimitedRetry in contracts/request-policy.mjs).
     const next = await client.query(`UPDATE crawl_jobs SET state = $2, next_allowed_at = $3,
       last_error = COALESCE($4,last_error), claim_owner = CASE WHEN $5 THEN NULL ELSE claim_owner END,
       claim_expires_at = CASE WHEN $5 THEN NULL ELSE claim_expires_at END,
       lease_generation = CASE WHEN $5 THEN NULL ELSE lease_generation END,
+      failure_attempts = failure_attempts + CASE WHEN $6::text = 'failure' THEN 1 ELSE 0 END,
+      rate_limit_attempts = rate_limit_attempts + CASE WHEN $6::text = 'rate_limit' THEN 1 ELSE 0 END,
       updated_at = clock_timestamp() WHERE id = $1 RETURNING *`,
-    [row.id, nextState, details.nextAllowedAt ?? null, details.lastError ?? details.failureReason ?? null, clear]);
+    [row.id, nextState, details.nextAllowedAt ?? null, details.lastError ?? details.failureReason ?? null, clear,
+      details.charge ?? null]);
     await this.recordEvent(client, row, row.state, nextState, details);
     return next.rows[0];
   }
@@ -256,18 +338,18 @@ export class PostgresPersistence {
 
   async releaseRequest(key, lease) {
     const result = await this.pool.query(`UPDATE in_flight_requests SET released_at = clock_timestamp(), outcome = 'completed'
-      WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${keySql()} = $1 AND claim_owner = $3
-        AND lease_generation = $2)
-        AND lease_generation = $2 AND released_at IS NULL`, [key, lease?.generation, lease?.workerId]);
+      WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${byKey(3)} AND claim_owner = $2
+        AND lease_generation = $1)
+        AND lease_generation = $1 AND released_at IS NULL`, [lease?.generation, lease?.workerId, ...jobKeyParts(key)]);
     if (result.rowCount !== 1) throw new Error('request ownership mismatch');
   }
 
   async confirmRequestCancellation(key, lease, reason) {
     if (!reason) throw new Error('request cancellation confirmation requires a reason');
     const result = await this.pool.query(`UPDATE in_flight_requests SET released_at = clock_timestamp(), outcome = 'canceled',
-      cancellation_reason = $4 WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${keySql()} = $1
-      AND claim_owner = $3 AND lease_generation = $2)
-      AND lease_generation = $2 AND released_at IS NULL RETURNING *`, [key, lease?.generation, lease?.workerId, reason]);
+      cancellation_reason = $3 WHERE job_id = (SELECT id FROM crawl_jobs WHERE ${byKey(4)}
+      AND claim_owner = $2 AND lease_generation = $1)
+      AND lease_generation = $1 AND released_at IS NULL RETURNING *`, [lease?.generation, lease?.workerId, reason, ...jobKeyParts(key)]);
     if (result.rowCount !== 1) throw new Error('request cancellation requires the current request ownership token');
     return result.rows[0];
   }
@@ -294,8 +376,8 @@ export class PostgresPersistence {
 
   async lastSuccessfulFetch(jobKey) {
     const result = await this.pool.query(`SELECT f.* FROM source_fetches f JOIN crawl_jobs j ON j.id = f.job_id
-      WHERE j.provider_id || ':' || j.canonical_path || ':' || j.page_type = $1 AND f.checksum IS NOT NULL
-      ORDER BY f.fetched_at DESC, f.id DESC LIMIT 1`, [jobKey]);
+      WHERE ${byKey(1, 'j.')} AND f.checksum IS NOT NULL
+      ORDER BY f.fetched_at DESC, f.id DESC LIMIT 1`, jobKeyParts(jobKey));
     const row = result.rows[0];
     return row ? { id: portId('fetch', row.id), jobKey, status: row.http_status, checksum: row.checksum,
       objectPath: row.raw_object_path, etag: row.etag, lastModified: row.last_modified,
@@ -337,11 +419,14 @@ export class PostgresPersistence {
       disposition.at ? new Date(disposition.at) : new Date());
     if (!this.authorizeOperator(validated.operatorId, validated)) throw new Error('operator is not authorized to review operator-stop work');
     return this.transaction(async (client) => {
-      const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${keySql()} = $1 FOR UPDATE`, [key]);
+      const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(key));
       const job = found.rows[0];
       if (!job || job.state !== 'operator_stop') throw new Error('operator disposition requires operator_stop');
       await client.query(`INSERT INTO operator_dispositions (job_id,disposition,operator_id,reason,recorded_at)
         VALUES ($1,$2,$3,$4,$5)`, [job.id, validated.kind, validated.operatorId, validated.reason, validated.at]);
+      // A reviewed release gives the job a fresh 429 budget; the transport/5xx
+      // budget is kept.
+      if (validated.kind === 'release_retry') await client.query('UPDATE crawl_jobs SET rate_limit_attempts = 0 WHERE id = $1', [job.id]);
       if (validated.kind === 'release_retry') await this.transition(client, job, 'retry_wait', {
         nextAllowedAt: validated.at, lastError: validated.reason, operatorId: validated.operatorId,
       });

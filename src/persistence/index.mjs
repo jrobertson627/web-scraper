@@ -13,6 +13,17 @@ import {
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
+import {
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, positiveInteger,
+} from '../contracts/jobs.mjs';
+import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
+
+const CLAIM_EXPIRED = 'claim expired before completion';
+
+function newJobRecord(validated, now) {
+  return { ...validated, state: 'pending', attempts: 0, failureAttempts: 0, rateLimitAttempts: 0, claimRecoveries: 0,
+    createdAt: now, updatedAt: now, history: [], failures: [] };
+}
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -242,10 +253,17 @@ export class InMemoryPersistence {
   constructor(clock = () => new Date(), {
     authorizeOperator = (operatorId) => Boolean(operatorId),
     claimTimeoutMs = 30_000,
+    maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES,
+    // At least the workers' request policy timeout; the default is the
+    // largest timeout a policy may set.
+    requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
+    orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS,
   } = {}) {
     this.clock = clock;
     this.authorizeOperator = authorizeOperator;
     this.claimTimeoutMs = claimTimeoutMs;
+    this.maxClaimRecoveries = positiveInteger('maxClaimRecoveries', maxClaimRecoveries);
+    this.requestDeadlineMs = positiveInteger('requestTimeoutMs', requestTimeoutMs) + positiveInteger('orphanGraceMs', orphanGraceMs);
     this.jobs = new Map();
     this.sourceFetches = [];
     this.parseRuns = [];
@@ -267,7 +285,7 @@ export class InMemoryPersistence {
     const existing = this.jobs.get(validated.key);
     if (existing) return existing;
     const now = this.clock().toISOString();
-    const stored = { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now, history: [], failures: [] };
+    const stored = newJobRecord(validated, now);
     this.jobs.set(validated.key, stored);
     return stored;
   }
@@ -278,9 +296,14 @@ export class InMemoryPersistence {
     return job ? cloneJob(job) : null;
   }
 
-  claimNextJob(now, workerId) {
+  // Like PostgreSQL's clock_timestamp(), this store's own clock is the only
+  // authority for claims, lease expiry and retry readiness. The caller's time
+  // argument is accepted for interface compatibility and ignored, so a skewed
+  // worker clock cannot extend or cut short a lease.
+  claimNextJob(_now, workerId) {
+    const now = this.clock();
     let current = this.#findClaimableJob(now);
-    if (!current && this.recoverExpiredClaims(now) > 0) current = this.#findClaimableJob(now);
+    if (!current && this.recoverExpiredClaims() > 0) current = this.#findClaimableJob(now);
     if (!current) return null;
     const previousState = current.state;
     const generation = (current.generation ?? 0) + 1;
@@ -301,18 +324,75 @@ export class InMemoryPersistence {
     return { ...cloneJob(current), lease };
   }
 
-  renewClaim(key, lease, now) {
+  // Job counts by state, without copying jobs or their history.
+  jobCounts() {
+    const counts = {};
+    for (const job of this.jobs.values()) counts[job.state] = (counts[job.state] ?? 0) + 1;
+    return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+  }
+
+  // Same rule as PostgresPersistence.workOutlook: runnable jobs that remain,
+  // and how long until the earliest retry falls due or claim expires.
+  workOutlook() {
+    const now = this.clock().getTime();
+    const stopped = new Set(['operator_stop', 'parse_failed', 'permanently_failed']);
+    const live = (job, depth = 0) => {
+      const parent = job.parentKey ? this.jobs.get(job.parentKey) : null;
+      if (!parent || depth > this.jobs.size) return true;
+      return !stopped.has(parent.state) && live(parent, depth + 1);
+    };
+    let remaining = 0;
+    let wakeAt = null;
+    for (const job of this.jobs.values()) {
+      if (['pending', 'retry_wait', 'fetching', 'fetched'].includes(job.state) && live(job)) remaining += 1;
+      const due = job.state === 'retry_wait' ? job.nextAllowedAt : ['fetching', 'fetched'].includes(job.state) ? job.claim?.expiresAt : null;
+      if (due) wakeAt = Math.min(wakeAt ?? Infinity, Date.parse(due));
+    }
+    return { remaining, wakeInMs: wakeAt == null ? null : Math.max(0, wakeAt - now) };
+  }
+
+  renewClaim(key, lease) {
     const job = this.#requireLease(key, lease);
+    const now = this.clock();
     job.claim.expiresAt = new Date(now.getTime() + this.claimTimeoutMs).toISOString();
     job.updatedAt = now.toISOString();
   }
 
-  recoverExpiredClaims(now) {
+  // Cancels host requests whose worker died mid-request (see
+  // DEFAULT_ORPHAN_GRACE_MS). A request is released only once both its start
+  // and its owner's lease expiry are further in the past than the request
+  // deadline, judged by this store's clock.
+  releaseOrphanedRequests() {
+    const now = this.clock();
+    let released = 0;
+    for (const [key, request] of [...this.inFlight]) {
+      const job = this.jobs.get(key);
+      const ownerExpiry = job?.claim && sameLease(job.claim.lease, request.lease) ? Date.parse(job.claim.expiresAt) : -Infinity;
+      if (Math.max(Date.parse(request.startedAt), ownerExpiry) + this.requestDeadlineMs >= now.getTime()) continue;
+      this.inFlight.delete(key);
+      this.requestHistory.push(Object.freeze({ ...request, outcome: 'canceled', cancellationReason: ORPHANED_REQUEST_REASON, releasedAt: now.toISOString() }));
+      released += 1;
+    }
+    return released;
+  }
+
+  recoverExpiredClaims() {
+    this.releaseOrphanedRequests();
+    const now = this.clock();
     let recovered = 0;
     for (const job of this.jobs.values()) {
       if (!job.claim || new Date(job.claim.expiresAt) > now || this.inFlight.has(job.key)) continue;
       if (job.state === 'fetching' || job.state === 'fetched') {
-        this.#applyTransition(job, 'retry_wait', { nextAllowedAt: now.toISOString(), lastError: 'claim expired before completion' }, now);
+        const claimRecoveries = (job.claimRecoveries ?? 0) + 1;
+        const exhausted = claimRecoveries >= this.maxClaimRecoveries;
+        const previousError = job.lastError ?? null;
+        job.claimRecoveries = claimRecoveries;
+        if (exhausted) {
+          job.nextAllowedAt = null;
+          this.#applyTransition(job, 'permanently_failed', { lastError: `${CLAIM_EXPIRED}; claim recovery limit reached`, claimRecoveries, previousError }, now);
+        } else {
+          this.#applyTransition(job, 'retry_wait', { nextAllowedAt: now.toISOString(), lastError: CLAIM_EXPIRED, claimRecoveries }, now);
+        }
         recovered += 1;
       } else {
         job.claim = null;
@@ -516,7 +596,7 @@ export class InMemoryPersistence {
         const validated = createJob(child);
         if (jobs.has(validated.key)) continue;
         const now = this.clock().toISOString();
-        jobs.set(validated.key, { ...validated, state: 'pending', attempts: 0, createdAt: now, updatedAt: now, history: [], failures: [] });
+        jobs.set(validated.key, newJobRecord(validated, now));
       }
     }
     return { key, conflict, pages, observations, observationHistory, unavailableCoverage, reconciliationIssues, jobs };
@@ -551,6 +631,9 @@ export class InMemoryPersistence {
     }
     this.operatorDispositions.push(Object.freeze({ jobKey: key, ...validated }));
     job.history.push(Object.freeze({ type: 'operator_disposition', state: job.state, at: validated.at, operatorId: validated.operatorId, disposition: validated.kind, reason: validated.reason }));
+    // A reviewed release gives the job a fresh 429 budget; the transport/5xx
+    // budget is kept.
+    if (validated.kind === 'release_retry') job.rateLimitAttempts = 0;
     if (validated.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString(), lastError: validated.reason });
     if (validated.kind === 'release_permanent') this.#applyTransition(job, 'permanently_failed', { failureReason: validated.reason });
   }
@@ -710,7 +793,12 @@ export class InMemoryPersistence {
     const previousState = job.state;
     assertTransition(job.state, nextState);
     job.state = nextState;
-    Object.assign(job, details);
+    const { charge, ...fields } = details;
+    Object.assign(job, fields);
+    // charge names the retry budget this transition spends (see chargedRetry
+    // and rateLimitedRetry in contracts/request-policy.mjs).
+    if (charge === 'failure') job.failureAttempts = (job.failureAttempts ?? 0) + 1;
+    if (charge === 'rate_limit') job.rateLimitAttempts = (job.rateLimitAttempts ?? 0) + 1;
     job.updatedAt = at.toISOString();
     job.history.push(createJobStateEvent({ from: previousState, to: nextState, at, attempts: job.attempts, lease: job.claim?.lease, details }));
     if (FAILURE_STATES.includes(nextState)) {

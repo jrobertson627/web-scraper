@@ -39,6 +39,11 @@ export function createJob(input) {
     throw new Error('job contract requires key, sourceUrl, and canonicalPath');
   }
   assertPageType(input.pageType);
+  // ':' delimits the parts of a job key, so a provider id containing it would
+  // make keys ambiguous and break PostgreSQL's indexed key lookup.
+  if (String(input.sourceUrl.providerId ?? '').includes(':')) {
+    throw new Error('job provider id must not contain ":". Expected a plain provider identifier. Example: providerId: sports-reference');
+  }
   return deepFreeze({ ...input });
 }
 

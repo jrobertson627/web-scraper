@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
@@ -26,6 +26,7 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 const { Pool } = pg;
 const pool = new Pool({ max: 8 });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-test-'));
+after(async () => { await pool.end(); });
 
 async function reset() {
   const tables = await pool.query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'schema_migrations'`);
@@ -62,8 +63,7 @@ function childRun(mode, rawRoot) {
   return { child, message, exit };
 }
 
-test('real PostgreSQL persistence and process restart', async (t) => {
-  t.after(async () => { await pool.end(); });
+test('real PostgreSQL persistence and process restart', async () => {
   await reset();
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
   const job = rootJob();
@@ -400,4 +400,238 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     await worker.seedRootJob();
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM crawl_jobs')).rows[0].n, 1);
   })();
+});
+
+// Records every statement a persistence call sends, so the exact SQL can be
+// EXPLAINed afterwards.
+function recordingPool(target) {
+  const statements = [];
+  const wrap = (client) => ({ query: (text, values) => { statements.push({ text, values }); return client.query(text, values); },
+    release: () => client.release() });
+  return { statements, query: (text, values) => { statements.push({ text, values }); return target.query(text, values); },
+    connect: async () => wrap(await target.connect()), end: async () => {} };
+}
+
+async function explain(statements, label) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL enable_seqscan = off');
+    for (const { text, values } of statements) {
+      const plan = (await client.query(`EXPLAIN ${text}`, values)).rows.map((row) => row['QUERY PLAN']).join('\n');
+      assert.doesNotMatch(plan, /Seq Scan on crawl_jobs/, `${label}: ${text}\n${plan}`);
+      assert.match(plan, /Index (Only )?Scan|Bitmap Index Scan/, `${label}: ${text}\n${plan}`);
+    }
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+}
+
+test('lease checks, renewals, transitions and fetch records use an index on crawl_jobs', async () => {
+  await reset();
+  const setup = new PostgresPersistence({ pool, claimTimeoutMs: 30_000 });
+  for (let index = 0; index < 50; index += 1) await setup.addJob(rootJob(`/filler/${index}`, 'season'));
+  const job = rootJob();
+  await setup.addJob(job);
+  await pool.query('ANALYZE crawl_jobs');
+  let claimed;
+  while ((claimed = await setup.claimNextJob(new Date(), 'explain-worker')).key !== job.key) { /* claim past the filler */ }
+  const recorder = recordingPool(pool);
+  const persistence = new PostgresPersistence({ pool: recorder, claimTimeoutMs: 30_000 });
+  const raw = createRawStore('filesystem', join(localRoot, 'raw-explain'));
+  const body = raw.put(Buffer.from('explain'));
+  for (const [label, call] of [
+    ['lease check and recordFetch', () => persistence.recordFetch({ jobKey: job.key, status: 200, ...body }, claimed.lease, raw)],
+    ['renewClaim', () => persistence.renewClaim(job.key, claimed.lease)],
+    ['transitionJob', () => persistence.transitionJob(job.key, 'fetched', claimed.lease)],
+  ]) {
+    recorder.statements.length = 0;
+    await call();
+    const lookups = recorder.statements.filter(({ text }) => /crawl_jobs/.test(text) && /^\s*(SELECT|UPDATE)/.test(text));
+    assert.ok(lookups.length > 0, label);
+    await explain(lookups, label);
+  }
+});
+
+// Shifts the process clock (new Date() and Date.now()) while the database
+// clock stays put. Dates built from explicit values are unaffected.
+async function withSkewedProcessClock(skewMs, action) {
+  const RealDate = globalThis.Date;
+  class SkewedDate extends RealDate {
+    constructor(...args) { if (args.length) super(...args); else super(RealDate.now() + skewMs); }
+    static now() { return RealDate.now() + skewMs; }
+  }
+  globalThis.Date = SkewedDate;
+  try { return await action(); } finally { globalThis.Date = RealDate; }
+}
+
+test('a process clock skewed from the database clock neither rejects a valid lease nor accepts an expired one', async () => {
+  for (const skewMs of [3_600_000, -3_600_000]) {
+    await reset();
+    const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 1500 });
+    const job = rootJob();
+    await persistence.addJob(job);
+    await withSkewedProcessClock(skewMs, async () => {
+      const claimed = await persistence.claimNextJob(new Date(), 'skewed-worker');
+      await persistence.renewClaim(job.key, claimed.lease, new Date());
+      await persistence.transitionJob(job.key, 'fetched', claimed.lease);
+      await delay(1700);
+      await assert.rejects(persistence.transitionJob(job.key, 'parsed', claimed.lease), /stale or missing lease/);
+      await assert.rejects(persistence.renewClaim(job.key, claimed.lease, new Date()), /stale or missing lease/);
+      assert.equal(await persistence.recoverExpiredClaims(new Date()), 1);
+    });
+  }
+});
+
+test('claim recovery caps a job whose worker keeps disappearing', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 300, maxClaimRecoveries: 3 });
+  const job = rootJob();
+  await persistence.addJob(job);
+  for (let recovery = 1; recovery <= 3; recovery += 1) {
+    const claimed = await persistence.claimNextJob(new Date(), `crashing-worker-${recovery}`);
+    assert.equal(claimed.key, job.key);
+    await delay(400);
+    assert.equal(await persistence.recoverExpiredClaims(), 1);
+    assert.equal((await persistence.getJob(job.key)).claimRecoveries, recovery);
+  }
+  const failed = await persistence.getJob(job.key);
+  assert.equal(failed.state, 'permanently_failed');
+  assert.match(failed.lastError, /claim recovery limit reached/);
+  assert.equal(failed.failures.at(-1).details.claimRecoveries, 3);
+  assert.equal(await persistence.claimNextJob(new Date(), 'worker'), null);
+});
+
+test('a worker killed mid-request leaves no permanent host stall', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 2000, requestTimeoutMs: 1000, orphanGraceMs: 500 });
+  const run = childRun('hang', join(localRoot, 'raw-hang'));
+  const checkpoint = await run.message;
+  assert.equal(checkpoint.checkpoint, 'in-request');
+  run.child.kill();
+  await run.exit;
+  const host = new URL(checkpoint.url).host;
+  const orphan = await pool.query('SELECT j.provider_id, j.canonical_path, j.page_type FROM in_flight_requests r JOIN crawl_jobs j ON j.id = r.job_id WHERE r.released_at IS NULL');
+  assert.equal(orphan.rowCount, 1);
+  const orphanKey = `${orphan.rows[0].provider_id}:${orphan.rows[0].canonical_path}:${orphan.rows[0].page_type}`;
+
+  // Inside the deadline the request is never released and the host stays owned.
+  const other = rootJob('/other/page.html', 'season');
+  await persistence.addJob(other);
+  assert.equal(await persistence.releaseOrphanedRequests(), 0);
+  const blocked = await persistence.claimNextJob(new Date(), 'probe-worker');
+  assert.equal(blocked.key, other.key);
+  assert.equal(await persistence.acquireRequest(other.key, blocked.lease, host), null);
+  await persistence.transitionJob(other.key, 'retry_wait', blocked.lease, { nextAllowedAt: new Date(Date.now() - 60_000).toISOString(), lastError: 'host busy' });
+
+  // After lease expiry + request timeout + grace, recovery needs no manual step.
+  await delay(2000 + 1000 + 500 + 500);
+  assert.equal(await persistence.recoverExpiredClaims(), 1);
+  const released = await pool.query('SELECT outcome, cancellation_reason FROM in_flight_requests');
+  assert.deepEqual(released.rows, [{ outcome: 'canceled', cancellation_reason: 'owner lease expired past request deadline' }]);
+  const recovered = await persistence.getJob(orphanKey);
+  assert.equal(recovered.state, 'retry_wait');
+  assert.equal(recovered.claimRecoveries, 1);
+  const next = await persistence.claimNextJob(new Date(), 'replacement-worker');
+  assert.ok(await persistence.acquireRequest(next.key, next.lease, host));
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL AND host = $1', [host])).rows[0].n, 1);
+});
+
+// Breaks the first page commit that writes players: either with a simulated
+// deadlock, or by terminating the committing backend for real (57P01).
+function failingCommitPool(target, mode) {
+  let failed = false;
+  return { query: (text, values) => target.query(text, values), end: async () => {},
+    connect: async () => {
+      const client = await target.connect();
+      return { release: (error) => client.release(error), query: async (text, values) => {
+        if (!failed && /INSERT INTO players/.test(text)) {
+          failed = true;
+          if (mode === 'deadlock') throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+          await client.query('SELECT pg_terminate_backend(pg_backend_pid())');
+        }
+        return client.query(text, values);
+      } };
+    } };
+}
+
+test('a deadlock or connection loss during commit leaves the job retryable, and it then completes', async () => {
+  for (const mode of ['deadlock', 'terminate']) {
+    await reset();
+    const target = new Pool({ max: 4 });
+    target.on('error', () => {}); // the terminated connection reports here once it is idle
+    try {
+      const persistence = new PostgresPersistence({ pool: failingCommitPool(target, mode), claimTimeoutMs: 10000 });
+      const raw = createRawStore('filesystem', join(localRoot, `raw-transient-${mode}`));
+      const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: { persistence, rawStore: raw } });
+      const result = await app.runWorkerOnce();
+      const retried = result.events.find((event) => event.kind === 'retry_wait' && event.phase === 'commit');
+      assert.ok(retried, `${mode}: the failed commit became a retry`);
+      assert.equal(result.events.some((event) => event.kind === 'parse_failed'), false, mode);
+      const job = await persistence.getJob(retried.jobKey);
+      assert.equal(job.failures.some((failure) => failure.state === 'parse_failed'), false, mode);
+      assert.equal(job.failureAttempts, 1, mode);
+      // The fixture clock is far behind the database clock, so the retry is already due.
+      const resumed = await app.runWorkerOnce();
+      assert.ok(resumed.processed >= 0);
+      const states = await pool.query('SELECT state, count(*)::int AS n FROM crawl_jobs GROUP BY state');
+      assert.deepEqual(states.rows, [{ state: 'parsed', n: states.rows.reduce((total, row) => total + row.n, 0) }], mode);
+    } finally { await target.end(); }
+  }
+});
+
+test('SIGTERM during a request leaves no unreleased request and no job stuck in fetching', async () => {
+  await reset();
+  const run = childRun('sigterm', join(localRoot, 'raw-sigterm'));
+  const checkpoint = await run.message;
+  assert.equal(checkpoint.checkpoint, 'in-request');
+  const done = new Promise((resolve) => run.child.on('message', (message) => { if (message.done) resolve(message); }));
+  if (process.platform === 'win32') run.child.send({ signal: 'SIGTERM' });
+  else run.child.kill('SIGTERM');
+  const report = await done;
+  assert.equal(await run.exit, 0);
+  assert.equal(report.stopped, true);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL')).rows[0].n, 0);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM crawl_jobs WHERE state IN ('fetching','fetched')")).rows[0].n, 0);
+  assert.ok((await pool.query("SELECT count(*)::int AS n FROM crawl_jobs WHERE state = 'pending'")).rows[0].n > 0, 'the worker stopped claiming');
+});
+
+test('the work outlook ignores work held behind a stopped parent and reports the next wake-up', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
+  const parent = rootJob();
+  await persistence.addJob(parent);
+  await persistence.addJob({ ...rootJob('/school/a/men/', 'school_history'), parentKey: parent.key });
+  const claimed = await persistence.claimNextJob(new Date(), 'outlook-worker');
+  await persistence.transitionJob(parent.key, 'operator_stop', claimed.lease, { lastError: 'challenge' });
+  assert.deepEqual(await persistence.workOutlook(), { remaining: 0, wakeInMs: null });
+  const later = rootJob('/later/page.html', 'season');
+  await persistence.addJob(later);
+  const laterClaim = await persistence.claimNextJob(new Date(), 'outlook-worker');
+  const due = (await pool.query("SELECT clock_timestamp() + interval '1 hour' AS due")).rows[0].due;
+  await persistence.transitionJob(later.key, 'retry_wait', laterClaim.lease, { nextAllowedAt: due.toISOString(), lastError: 'retry later' });
+  const outlook = await persistence.workOutlook();
+  assert.equal(outlook.remaining, 1);
+  assert.ok(outlook.wakeInMs > 3_590_000 && outlook.wakeInMs <= 3_600_000, String(outlook.wakeInMs));
+  assert.deepEqual(await persistence.jobCounts(), { operator_stop: 1, pending: 1, retry_wait: 1 });
+});
+
+test('retry transitions spend only the budget they name', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
+  const job = rootJob();
+  await persistence.addJob(job);
+  const now = () => new Date(Date.now() - 60_000).toISOString(); // ready at once, whatever the clock skew
+  for (const charge of ['rate_limit', 'rate_limit', undefined, 'failure']) {
+    const claimed = await persistence.claimNextJob(new Date(), 'budget-worker');
+    await persistence.transitionJob(job.key, 'retry_wait', claimed.lease, { nextAllowedAt: now(), lastError: 'retry', ...(charge ? { charge } : {}) });
+  }
+  let stored = await persistence.getJob(job.key);
+  assert.deepEqual([stored.attempts, stored.rateLimitAttempts, stored.failureAttempts], [4, 2, 1]);
+  const claimed = await persistence.claimNextJob(new Date(), 'budget-worker');
+  await persistence.transitionJob(job.key, 'operator_stop', claimed.lease, { lastError: 'rate limited 3 times' });
+  await persistence.recordOperatorDisposition(job.key, { kind: 'release_retry', operatorId: 'ops', reason: 'resume' });
+  stored = await persistence.getJob(job.key);
+  assert.deepEqual([stored.state, stored.rateLimitAttempts, stored.failureAttempts], ['retry_wait', 0, 1]);
 });

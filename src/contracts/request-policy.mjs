@@ -1,3 +1,7 @@
+// The longest whole-request timeout a policy may set. Persistence uses it as
+// the default request deadline so it can never release a live request early.
+export const MAX_REQUEST_TIMEOUT_MS = 120_000;
+
 export const REQUEST_POLICY_DEFAULTS = Object.freeze({
   requestTimeoutMs: 30_000,
   maxAttempts: 3,
@@ -7,7 +11,36 @@ export const REQUEST_POLICY_DEFAULTS = Object.freeze({
   cacheMaxAgeMs: 0,
   maxResponseBytes: 16 * 1024 * 1024,
   maxRetryAfterMs: 86_400_000,
+  maxRateLimitAttempts: 5,
 });
+
+// Retry budgets (see JOB_LIFECYCLE.md):
+// - transport errors, 5xx responses and fetch-phase infrastructure errors are
+//   charged to job.failureAttempts and capped by policy.maxAttempts;
+// - 429 responses are charged to job.rateLimitAttempts and capped by
+//   policy.maxRateLimitAttempts, which escalates to operator_stop;
+// - host-busy waits and claim recovery are never charged to either budget.
+// A retry_wait result carries `charge`, which the persistence transition uses
+// to increment the matching counter.
+
+// The outcome of a failure charged to policy.maxAttempts: a retry_wait with
+// bounded exponential backoff, or permanently_failed once the budget is spent.
+export function chargedRetry(policy, job, reason, code, now) {
+  const attempt = (job.failureAttempts ?? 0) + 1;
+  if (attempt >= policy.maxAttempts) return { kind: 'permanently_failed', code, reason: `${reason}; retry limit reached` };
+  const delay = Math.min(policy.retryBaseMs * (2 ** (attempt - 1)), policy.retryMaxMs);
+  return { kind: 'retry_wait', code, reason, charge: 'failure', nextAllowedAt: new Date(now.getTime() + delay).toISOString() };
+}
+
+// The outcome of a 429 with a usable Retry-After: a retry_wait charged to the
+// rate-limit budget, or operator_stop once that budget is spent.
+export function rateLimitedRetry(policy, job, nextAllowedAt) {
+  const attempt = (job.rateLimitAttempts ?? 0) + 1;
+  if (attempt >= policy.maxRateLimitAttempts) {
+    return { kind: 'operator_stop', code: 'rate_limit_cap', reason: `rate limited ${attempt} times; operator review required` };
+  }
+  return { kind: 'retry_wait', reason: 'rate limited', charge: 'rate_limit', nextAllowedAt };
+}
 
 function invalid(field, expected, example) {
   throw new Error(`${field} is invalid. Expected ${expected}. Example: ${example}`);
@@ -25,9 +58,10 @@ export function validateRequestPolicy(input) {
   // must contain an @ with a dotted domain and no nested parens.
   if (typeof policy.userAgent !== 'string' || !/\S+.*\([^()\s]+@[^()\s]+\.[^()\s]+\)/.test(policy.userAgent)) invalid('policy.userAgent', 'an application name and operator contact address', 'userAgent: scraper (+ops@example.com)');
   for (const [field, min, max] of [
-    ['requestTimeoutMs', 1_000, 120_000], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
+    ['requestTimeoutMs', 1_000, MAX_REQUEST_TIMEOUT_MS], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
     ['retryMaxMs', 100, 600_000], ['maxRedirects', 0, 10], ['cacheMaxAgeMs', 0, 86_400_000],
     ['maxResponseBytes', 1_024, 64 * 1024 * 1024], ['maxRetryAfterMs', 6_000, 7 * 86_400_000],
+    ['maxRateLimitAttempts', 1, 50],
   ]) {
     if (!Number.isSafeInteger(policy[field]) || policy[field] < min || policy[field] > max) invalid(`policy.${field}`, `an integer from ${min} through ${max}`, `${field}: ${REQUEST_POLICY_DEFAULTS[field]}`);
   }

@@ -25,7 +25,9 @@ import {
 
 // Tests and local mode only: fake time, fixture pages, in-memory persistence by
 // default. A real crawl goes through createWorkerApplication.
-export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState } = {}) {
+export function createFixtureApplication({
+  sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState, events = NO_CRAWL_EVENTS,
+} = {}) {
   if (sharedState?.transport instanceof HttpTransport) {
     throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
   }
@@ -93,8 +95,10 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
   async function runWorkerOnce(workerId = 'fixture-worker') {
     await ready;
     const result = await orchestrator.runOnce(workerId);
-    events.summary?.({ jobStates: jobStateCounts(result.jobs) });
-    return { ...result, transportCalls: transport.calls.length };
+    // The fixture corpus is small, so the local run still reports every job.
+    const jobs = await persistence.listJobs();
+    events.summary?.({ jobStates: jobStateCounts(jobs) });
+    return { ...result, jobs, transportCalls: transport.calls.length };
   }
 
   function previewDryRun() {

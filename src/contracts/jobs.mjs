@@ -7,13 +7,51 @@ export const FAILURE_STATES = Object.freeze(['retry_wait', 'operator_stop', 'par
 const TRANSITIONS = new Map([
   ['pending', new Set(['fetching'])],
   ['fetching', new Set(['fetched', 'retry_wait', 'permanently_failed', 'parse_failed', 'operator_stop'])],
-  ['fetched', new Set(['parsed', 'parse_failed', 'retry_wait', 'operator_stop'])],
+  // fetched -> permanently_failed is only taken by claim recovery once a job
+  // has exhausted its claim-recovery budget.
+  ['fetched', new Set(['parsed', 'parse_failed', 'retry_wait', 'operator_stop', 'permanently_failed'])],
   ['retry_wait', new Set(['fetching', 'permanently_failed'])],
   ['operator_stop', new Set(['retry_wait', 'permanently_failed'])],
   ['parsed', new Set()],
   ['parse_failed', new Set()],
   ['permanently_failed', new Set()],
 ]);
+
+// Both persistence adapters apply this cap when recovering jobs whose worker
+// disappeared: a job whose claim expires this many times without completing
+// becomes permanently_failed instead of retry_wait. Claim recovery never draws
+// on the transport/5xx budget (policy.maxAttempts). See JOB_LIFECYCLE.md.
+export const DEFAULT_MAX_CLAIM_RECOVERIES = 3;
+
+// An unreleased host request is orphaned (its worker died mid-request) once
+// both its start and its owner's lease expiry are more than the request
+// timeout plus this grace in the past. The worker renews its lease at least
+// every claimTimeoutMs / 3 while a request runs and the transport ends every
+// request within requestTimeoutMs, so no live request can still be running
+// by then. Both adapters then cancel it with ORPHANED_REQUEST_REASON.
+export const DEFAULT_ORPHAN_GRACE_MS = 10_000;
+export const ORPHANED_REQUEST_REASON = 'owner lease expired past request deadline';
+
+// PostgreSQL errors that say nothing about the page: serialization failures
+// (40001), deadlocks (40P01), connection exceptions (class 08) and an
+// administrator shutdown (57P01), plus a socket dropped under the driver.
+// A page commit that fails this way is retried rather than recorded as
+// parse_failed.
+const TRANSIENT_STORE_CODES = new Set(['40001', '40P01', '57P01', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+
+export function isTransientStoreError(error, seen = new Set()) {
+  if (!error || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  const code = typeof error.code === 'string' ? error.code : '';
+  if (TRANSIENT_STORE_CODES.has(code) || /^08[0-9A-Z]{3}$/.test(code)) return true;
+  if (/^Connection terminated\b/.test(error.message ?? '')) return true;
+  return isTransientStoreError(error.cause, seen) || (error.errors ?? []).some((inner) => isTransientStoreError(inner, seen));
+}
+
+export function positiveInteger(name, value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
 
 export function canTransition(from, to) {
   return TRANSITIONS.get(from)?.has(to) ?? false;
