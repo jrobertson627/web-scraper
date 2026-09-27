@@ -126,38 +126,7 @@ function season(html, sitePath) {
   };
 }
 
-const LOCATIONS = Object.freeze({ '': 'home', '@': 'away', N: 'neutral' });
-
 function score(text) { return /^\d+$/.test(text) ? present(Number(text)) : unavailable('not_played'); }
-
-function gameLog(html, sitePath) {
-  return {
-    endingYear: Number(/(\d{4})-gamelogs\.html$/.exec(sitePath)[1]),
-    games: dataRows(tableBody(html, 'team_game_log')).flatMap((row) => {
-      const date = cell(row, 'date');
-      if (!date?.text) return [];
-      const opponent = cell(row, 'opp_name_abbr');
-      const result = cell(row, 'team_game_result')?.text;
-      const final = result === 'W' || result === 'L';
-      const overtimes = cell(row, 'overtimes')?.text ?? '';
-      return [{
-        gameNumber: integerOrNull(cell(row, 'team_game_num_season')?.text),
-        date: date.text,
-        location: LOCATIONS[cell(row, 'game_location')?.text ?? ''] ?? null,
-        opponent: { name: opponent?.text || null, schoolPath: schoolPathOf(opponent?.href) },
-        gameType: cell(row, 'game_type')?.text || null,
-        result: final ? result : null,
-        status: final ? 'final' : 'incomplete',
-        overtimes: final ? (overtimes ? Number(/^(\d*)OT$/.exec(overtimes)?.[1] || 1) : 0) : null,
-        teamScore: score(cell(row, 'team_game_score')?.text ?? ''),
-        opponentScore: score(cell(row, 'opp_team_game_score')?.text ?? ''),
-        teamStats: null,
-        opponentStats: null,
-        boxScoreUrl: date.href ? new URL(date.href, ORIGIN).href : null,
-      }];
-    }),
-  };
-}
 
 function boxScore(html) {
   const team = (side, index) => {
@@ -178,7 +147,7 @@ function boxScore(html) {
   };
 }
 
-const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, season, game_log: gameLog, box_score: boxScore });
+const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, season, box_score: boxScore });
 const productionParsers = createProductionParserRegistry();
 
 export function captureLinkDocument(pageType, sitePath) {
