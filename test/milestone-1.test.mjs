@@ -52,7 +52,7 @@ test('personal worker rejects provider, scope, date, version, and fingerprint mi
   }
 });
 
-test('worker loads personal records and reaches the missing-adapter boundary without leaking evidence', () => {
+test('worker loads personal records and reaches the missing-parser boundary without leaking evidence', () => {
   const env = {
     ...process.env,
     PROVIDER_ID: authorization.providerId,
@@ -63,8 +63,8 @@ test('worker loads personal records and reaches the missing-adapter boundary wit
     DATA_CONTRACT_JSON: JSON.stringify(dataContract),
   };
   const accepted = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], { cwd: process.cwd(), env, encoding: 'utf8' });
-  assert.equal(accepted.status, EXIT_CODES.sourceAdapterMissing);
-  assert.match(accepted.stderr, /no production source adapter/);
+  assert.equal(accepted.status, EXIT_CODES.workerNotReady);
+  assert.match(accepted.stderr, /no production parser is registered for school_index@1/);
   const rejected = spawnSync(process.execPath, ['src/application/cli.mjs', 'worker'], {
     cwd: process.cwd(), encoding: 'utf8',
     env: { ...env, AUTHORIZATION_JSON: JSON.stringify({ ...authorization, evidenceRef: 'operator-attestation:secret=TOP_SECRET', scope: { ...authorization.scope, targetEndingYears: [2026] } }) },

@@ -1,16 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { PostgresPersistence } from '../src/persistence/postgres.mjs';
 import { createRawStore } from '../src/persistence/index.mjs';
-import { createFixtureApplication } from '../src/application/composition-root.mjs';
+import { createFixtureApplication, createWorkerApplication } from '../src/application/composition-root.mjs';
+import { HttpTransport } from '../src/fetcher/http-transport.mjs';
+import { createParseResult } from '../src/contracts/boundaries.mjs';
+import { PAGE_TYPES } from '../src/contracts/source.mjs';
+import { createProductionParserRegistry } from '../src/parsers/index.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
-import { boxScoreDocument, gameLogDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
+import { boxScoreDocument, gameLogDocument, schoolIndexDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
 import { present, unavailable } from '../src/contracts/value-state.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
@@ -357,5 +361,41 @@ test('real PostgreSQL persistence and process restart', async (t) => {
     assert.equal(formerlyClaimed.attempts, 2);
     assert.ok(formerlyClaimed.history.some((event) => event.to === 'retry_wait'));
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM games')).rows[0].n, 6);
+  })();
+
+  await reset();
+  await (async () => {
+    // The production worker assembly against real PostgreSQL, with the real clock
+    // and sleep. The transport is an HttpTransport that answers locally, and the
+    // index lists no eligible school, so the run makes exactly one request.
+    class LocalHttpTransport extends HttpTransport {
+      calls = [];
+      async request({ url }) { this.calls.push(url); return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') }; }
+    }
+    const indexParser = { pageType: () => 'school_index', version: () => '1', parse: () => createParseResult({ kind: 'valid',
+      document: schoolIndexDocument([{ name: 'Former School', path: '/cbb/schools/former/men/', historyUrl: 'https://www.sports-reference.com/cbb/schools/former/men/', to: 2020 }]) }) };
+    const unused = (pageType) => ({ pageType: () => pageType, version: () => '1', parse: () => createParseResult({ kind: 'structural_failure', error: 'not expected' }) });
+    const record = (name) => JSON.parse(readFileSync(new URL(`../config/personal-use.${name}.json`, import.meta.url), 'utf8'));
+    const transport = new LocalHttpTransport();
+    const worker = await createWorkerApplication({
+      config: {
+        mode: 'worker', providerId: 'sports-reference', allowedHosts: ['www.sports-reference.com'],
+        rawStore: 'filesystem', rawStoreRoot: join(localRoot, 'raw-worker'), publication: 'private',
+        policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-test (+ops@example.com)' },
+        eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+        authorization: record('authorization'), dataContract: record('data-contract'),
+      },
+      transport,
+      persistence: new PostgresPersistence({ pool, claimTimeoutMs: 10000 }),
+      parsers: createProductionParserRegistry([indexParser, ...PAGE_TYPES.filter((type) => type !== 'school_index').map(unused)]),
+    });
+    const result = await worker.runWorkerOnce('assembly-worker');
+    assert.deepEqual(transport.calls, ['https://www.sports-reference.com/cbb/schools/']);
+    assert.equal(result.processed, 1);
+    assert.deepEqual(result.jobs.map((job) => [job.key, job.state]), [['sports-reference:www.sports-reference.com/cbb/schools:school_index', 'parsed']]);
+    const schedule = await pool.query('SELECT last_request_started_at FROM host_request_schedule WHERE host = $1', ['www.sports-reference.com']);
+    assert.ok(Math.abs(new Date(schedule.rows[0].last_request_started_at).getTime() - Date.now()) < 60_000, 'request schedule holds real time');
+    await worker.seedRootJob();
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM crawl_jobs')).rows[0].n, 1);
   })();
 });

@@ -4,22 +4,30 @@ import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
 import { assertBoundaryPort, createJob } from '../contracts/boundaries.mjs';
 import { Fetcher } from '../fetcher/public.mjs';
 import { FixtureTransport } from '../fetcher/index.mjs';
+import { HttpTransport } from '../fetcher/http-transport.mjs';
 import { Discovery } from '../discovery/public.mjs';
 import { ParserRegistry } from '../parsers/public.mjs';
-import { FixtureParser } from '../parsers/index.mjs';
+import { FixtureParser, createProductionParserRegistry, missingProductionParsers } from '../parsers/index.mjs';
 import { Normalizer } from '../domain/public.mjs';
 import { createRawStore } from '../persistence/public.mjs';
-import { InMemoryPersistence } from '../persistence/index.mjs';
+import { FileRawStore, InMemoryPersistence } from '../persistence/index.mjs';
+import { PostgresPersistence } from '../persistence/postgres.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
+import { SportsReferenceSourceAdapter } from './sports-reference-source-adapter.mjs';
 import { buildFixtureReconciliationReport } from './reconciliation.mjs';
 import {
   boxScoreDocument, gameLogDocument, schoolHistoryDocument, schoolIndexDocument, seasonDocument, statLine,
 } from './fixture-documents.mjs';
 
+// Tests and local mode only: fake time, fixture pages, in-memory persistence by
+// default. A real crawl goes through createWorkerApplication.
 export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState } = {}) {
+  if (sharedState?.transport instanceof HttpTransport) {
+    throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
+  }
   const adapter = assertSourceAdapter(sourceAdapter);
   const providerId = adapter.providerId();
   const indexUrl = adapter.indexUrl();
@@ -137,5 +145,104 @@ export function createFixtureApplication({ sourceAdapter = new FixtureSourceAdap
     reconcile: () => buildFixtureReconciliationReport(persistence),
     queries,
     createApiServer: (apiConfig = config) => createApiServer({ queries, config: apiConfig, clock }),
+  };
+}
+
+export const systemClock = () => new Date();
+export const realSleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const CLOCK_DRIFT_LIMIT_MS = 5_000;
+const SLEEP_PROBE_MS = 40;
+
+// Proves the injected clock reads wall time and sleep(ms) really waits while the
+// clock advances with it. A fake sleep would let paced requests go out back to
+// back and write fake timestamps to the host request schedule.
+export async function assertRealTime({ clock, sleep } = {}) {
+  if (typeof clock !== 'function' || typeof sleep !== 'function') throw new Error('real time check requires clock() and sleep(ms) functions');
+  const drift = Math.abs(clock().getTime() - Date.now());
+  if (!(drift <= CLOCK_DRIFT_LIMIT_MS)) throw new Error(`clock is ${Number.isNaN(drift) ? 'invalid' : `${drift}ms away from system time`}; a real crawl needs the system clock`);
+  const started = performance.now();
+  const before = clock().getTime();
+  await sleep(SLEEP_PROBE_MS);
+  const waited = performance.now() - started;
+  const advanced = clock().getTime() - before;
+  if (waited < SLEEP_PROBE_MS / 2) throw new Error(`sleep(${SLEEP_PROBE_MS}) returned after ${Math.round(waited)}ms; a real crawl needs a sleep that waits`);
+  if (advanced < SLEEP_PROBE_MS / 2) throw new Error(`clock advanced ${advanced}ms across a ${Math.round(waited)}ms sleep; a real crawl needs the system clock`);
+}
+
+// Production assembly for worker mode (#36). It accepts only real parts: the
+// system clock and sleep, HttpTransport, PostgresPersistence, a filesystem raw
+// store, a production parser for every page type, and a source adapter matching
+// the authorized provider. The configuration is validated here in worker mode,
+// so the authorization and data-contract gate must pass before anything is built.
+export async function createWorkerApplication({
+  config: configInput,
+  sourceAdapter = new SportsReferenceSourceAdapter(),
+  transport,
+  persistence,
+  rawStore,
+  parsers = createProductionParserRegistry(),
+  clock = systemClock,
+  sleep = realSleep,
+} = {}) {
+  const refuse = (reason) => new Error(`worker assembly refused: ${reason}`);
+  if (!(transport instanceof HttpTransport)) throw refuse('transport must be HttpTransport; fixture and stub transports belong to createFixtureApplication');
+  try {
+    await assertRealTime({ clock, sleep });
+  } catch (error) {
+    throw refuse(error.message);
+  }
+  const config = validateConfiguration(configInput, { clock });
+  if (config.mode !== 'worker') throw refuse(`configuration mode is ${config.mode}, expected worker`);
+  const adapter = assertSourceAdapter(sourceAdapter);
+  const providerId = adapter.providerId();
+  if (providerId !== config.providerId) throw refuse(`source adapter provider ${providerId} does not match configured provider ${config.providerId}`);
+  const indexUrl = adapter.indexUrl();
+  if (!config.allowedHosts.includes(indexUrl.host)) throw refuse(`source adapter host ${indexUrl.host} is not in allowedHosts`);
+  if (!(persistence instanceof PostgresPersistence)) throw refuse('persistence must be PostgresPersistence');
+  const store = rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
+  if (!(store instanceof FileRawStore)) throw refuse('raw store must be the filesystem raw store');
+  if (!(parsers instanceof ParserRegistry)) throw refuse('parsers must be a ParserRegistry');
+  const missing = missingProductionParsers(parsers, config.parserVersions);
+  if (missing.length) throw refuse(`no production parser is registered for ${missing.join(', ')}`);
+
+  const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter });
+  const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts });
+  const indexPath = adapter.canonicalize(indexUrl);
+  const indexPageType = adapter.classify(indexUrl);
+  const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
+  const orchestrator = new IngestionOrchestrator({
+    fetcher: assertBoundaryPort('fetcher', fetcher),
+    discovery: assertBoundaryPort('discovery', discovery),
+    parsers: assertBoundaryPort('parsers', parsers),
+    normalizer: assertBoundaryPort('domain', new Normalizer()),
+    persistence: assertBoundaryPort('persistence', persistence),
+    rawStore: store,
+    clock,
+  });
+  let seeded;
+  // Queues the school index once; addJob keeps an existing root job as it is.
+  const seedRootJob = () => {
+    seeded ??= Promise.resolve(persistence.addJob(rootJob)).catch((error) => { seeded = undefined; throw error; });
+    return seeded;
+  };
+
+  return {
+    config,
+    sourceAdapter: adapter,
+    lifecycle: new ApplicationLifecycle('worker'),
+    clock,
+    sleep,
+    transport,
+    rawStore: store,
+    persistence,
+    parsers,
+    orchestrator,
+    rootJob,
+    seedRootJob,
+    async runWorkerOnce(workerId = 'worker') {
+      await seedRootJob();
+      return orchestrator.runOnce(workerId);
+    },
   };
 }

@@ -9,13 +9,13 @@
 - **Production persistence:** ordered PostgreSQL migrations and a durable adapter behind the persistence port; fixture/local mode retains deterministic in-memory adapters and never opens a network connection.
 - **Raw storage seam:** immutable filesystem/object-store port; fixture mode uses an in-memory content-addressed store.
 
-The implementation has a source-neutral HTTPS transport, but no provider-specific parser or production source adapter. Those require provider authorization and a versioned data contract. The reusable orchestrator, fetcher, discovery, parser, normalizer, and persistence seams are exercised end-to-end by the fixture application; local TLS integration tests exercise the real transport without contacting an upstream provider.
+The implementation has a source-neutral HTTPS transport, the production Sports Reference source adapter and real-page discovery, and a production worker assembly (`createWorkerApplication`). The provider-specific parsers are not written yet (phase 2), so the worker cannot crawl. The reusable orchestrator, fetcher, discovery, parser, normalizer, and persistence seams are exercised end-to-end by the fixture application; local TLS integration tests exercise the real transport without contacting an upstream provider.
 
 ## Runtime modes
 
 ```sh
 npm run start:local   # deterministic fixture/local mode; exits after the fixture chain
-npm run start:worker  # validates authorization/configuration; exits until a production adapter is wired
+npm run start:worker  # validates authorization/configuration; exits until the production parsers exist
 npm run start:worker:personal  # loads the private, self-attested M1 records; set USER_AGENT and RAW_STORE_ROOT first
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
 npm test
@@ -23,17 +23,17 @@ npm run test:postgres    # real, explicitly disposable PostgreSQL database
 npm run smoke:migrations # applies all migrations twice to a disposable database
 ```
 
-`local` is the only mode enabled by default. `worker` validates its safety gates but does not pretend to crawl without a configured production source adapter. API reads use local projections only and never start or claim crawl work.
+`local` is the only mode enabled by default. `worker` validates its safety gates but does not pretend to crawl without production parsers. API reads use local projections only and never start or claim crawl work.
 
 Milestone 1 includes a private, single-operator configuration in `config/personal-use.*.json`. Set a transparent contact-bearing `USER_AGENT` and an absolute `RAW_STORE_ROOT`, then run `npm run start:worker:personal` to validate it. This record is an operator attestation, not evidence of a provider grant; it never enables public publication or a live crawl. See [`AUTHORIZATION_CONTRACT.md`](AUTHORIZATION_CONTRACT.md) for its retained fields, attribution, and source-link convention.
 
 Start with an empty disposable PostgreSQL database and explicit `PGHOST`, `PGDATABASE`, and `PGUSER`. Run `smoke:migrations` first with `PG_SMOKE_CONFIRM=disposable` and `psql` on `PATH`; then run `test:postgres` with `PG_TEST_CONFIRM=disposable`. The PostgreSQL adapter can be injected into the fixture composition with a filesystem raw store for offline integration and restart tests. These tests make no external source requests.
 
-The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, and `4` means configuration is valid but no production source adapter is installed.
+The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, and `4` means configuration is valid but the worker cannot crawl yet (no production parsers are registered).
 
 ### Durable persistence
 
-`api` and `worker` use PostgreSQL only when `PERSISTENCE=postgres`; otherwise they stay in memory, and `local` always does. Connection values come from `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `PGSSLMODE` (`require` for external hosts). At startup both modes confirm that every file in `migrations/` is recorded in `schema_migrations` and refuse to start otherwise. With Postgres, `api` serves the durable projections read-only and runs no fixture ingestion. `worker` verifies the database, then still exits `4` until a production source adapter exists.
+`api` and `worker` use PostgreSQL only when `PERSISTENCE=postgres`; otherwise they stay in memory, and `local` always does. Connection values come from `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `PGSSLMODE` (`require` for external hosts). At startup both modes confirm that every file in `migrations/` is recorded in `schema_migrations` and refuse to start otherwise. With Postgres, `api` serves the durable projections read-only and runs no fixture ingestion. `worker` verifies the database, then still exits `4` until the production parsers exist.
 
 The API binds `127.0.0.1` unless `HOST` names another IP address (or `localhost`). A hosted platform such as Render needs `HOST=0.0.0.0` so its router can reach the process; Render supplies `PORT` itself.
 

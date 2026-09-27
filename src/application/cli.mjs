@@ -5,6 +5,7 @@ import { ApplicationLifecycle } from './lifecycle.mjs';
 import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
+import { createProductionParserRegistry, missingProductionParsers } from '../parsers/index.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
 
 export const EXIT_CODES = Object.freeze({
@@ -12,7 +13,9 @@ export const EXIT_CODES = Object.freeze({
   runtimeFailure: 1,
   invalidMode: 2,
   configurationRejected: 3,
-  sourceAdapterMissing: 4,
+  // Configuration is valid, but the worker cannot crawl yet (a production part is missing).
+  workerNotReady: 4,
+  sourceAdapterMissing: 4, // earlier name for workerNotReady
 });
 
 // Best-effort scrub for stderr/console output. Matches "key=value" (env-style)
@@ -182,7 +185,7 @@ export async function runCli({
     }
     if (settings.kind === 'postgres') {
       // Verify the durable store up front so a deploy surfaces an unreachable
-      // or unmigrated database now rather than once a source adapter exists.
+      // or unmigrated database now rather than once the worker can crawl.
       try {
         const persistence = await openPostgres({ ...settings, claimTimeoutMs: config.claimTimeoutMs });
         await persistence.close();
@@ -191,8 +194,11 @@ export async function runCli({
         return { exitCode: EXIT_CODES.runtimeFailure };
       }
     }
-    stderr(`worker configuration accepted for ${config.providerId} (${settings.kind} persistence), but no production source adapter is configured; no crawl started`);
-    return { exitCode: EXIT_CODES.sourceAdapterMissing };
+    // The production assembly is createWorkerApplication; it needs the phase 2 parsers (#39-#42).
+    const missingParsers = missingProductionParsers(createProductionParserRegistry(), config.parserVersions);
+    const blocker = missingParsers.length ? `no production parser is registered for ${missingParsers.join(', ')}` : 'worker mode does not start createWorkerApplication yet';
+    stderr(`worker configuration accepted for ${config.providerId} (${settings.kind} persistence), but ${blocker}; no crawl started`);
+    return { exitCode: EXIT_CODES.workerNotReady };
   }
 
   stderr(`invalid runtime mode: ${mode}. Expected local, worker, or api. Example: npm run start:local`);
