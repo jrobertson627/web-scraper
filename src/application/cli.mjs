@@ -52,8 +52,9 @@ function configuredPort(env) {
   return port;
 }
 
-// Loopback by default so a local run is never exposed; hosted platforms such
-// as Render need HOST=0.0.0.0 to route traffic to the process.
+// Loopback by default. The API has no authentication of its own, so binding
+// another address (HOST=0.0.0.0) is only for use behind an authenticating
+// layer; see DEPLOYMENT.md.
 function configuredHost(env) {
   const host = env.HOST || '127.0.0.1';
   if (host !== 'localhost' && !isIP(host)) {

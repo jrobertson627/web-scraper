@@ -1,0 +1,41 @@
+# Render Blueprint for the crawl worker. See DEPLOYMENT.md before applying it.
+# The PostgreSQL instance already exists and is deliberately not declared here,
+# so applying this Blueprint can never create or replace the database. Values
+# marked sync: false are entered in the Render dashboard and never committed.
+services:
+  - type: worker
+    name: web-scraper-worker
+    runtime: node
+    plan: starter
+    # Must match the database's region so the internal connection works.
+    region: oregon
+    buildCommand: npm ci
+    preDeployCommand: npm run migrate
+    startCommand: npm run start:worker:personal
+    autoDeploy: false
+    disk:
+      name: raw-store
+      mountPath: /var/data
+      # Enough for the #78 sample; resize before the full backfill (#45).
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PERSISTENCE
+        value: postgres
+      - key: RAW_STORE_ROOT
+        value: /var/data/raw
+      # Internal connection values of the existing database.
+      - key: PGHOST
+        sync: false
+      - key: PGPORT
+        sync: false
+      - key: PGDATABASE
+        sync: false
+      - key: PGUSER
+        sync: false
+      - key: PGPASSWORD
+        sync: false
+      # Application name plus the operator's contact address.
+      - key: USER_AGENT
+        sync: false

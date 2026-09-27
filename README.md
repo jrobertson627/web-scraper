@@ -36,7 +36,7 @@ The fixture API completes its deterministic ingestion pass before it binds the l
 
 `api` and `worker` use PostgreSQL only when `PERSISTENCE=postgres`; otherwise they stay in memory, and `local` always does. Connection values come from `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `PGSSLMODE` (`require` for external hosts). At startup both modes confirm that every file in `migrations/` is recorded in `schema_migrations` and refuse to start otherwise. With Postgres, `api` serves the durable projections read-only and runs no fixture ingestion. `worker` verifies the database, then still exits `4` until a production source adapter exists.
 
-The API binds `127.0.0.1` unless `HOST` names another IP address (or `localhost`). A hosted platform such as Render needs `HOST=0.0.0.0` so its router can reach the process; Render supplies `PORT` itself.
+The API binds `127.0.0.1` unless `HOST` names another IP address (or `localhost`). The API has no authentication of its own, so it stays loopback-only unless it gets its own; the production topology, environment, and secrets rules are in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ### Crawl logs and status
 
