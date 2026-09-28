@@ -43,6 +43,12 @@ The sixteen core counting stats, each a source value:
 
 `status` is one of `scheduled`, `final`, `canceled`, `rescheduled`, `incomplete`. A box score sets `context` only when the page states it. Sports Reference box scores do not, so neutral-site context comes from the `location` of the game-log rows that link the box score.
 
+## Retained fields
+
+Only fields the data contract retains are stored and served (#89). `src/contracts/retained-fields.mjs` maps every document field, normalized field and API field to a name in the contract's `retainedFields` (for example `box_scores.venue`). The normalizer drops every field whose name the contract doesn't list, before revision `data` and the named-column tables are written. The query service applies the same filter to every API item. A field with no mapping is always dropped. This includes the contents of a generic `extra` object unless the map names them: `season.summary.extra` keeps only `conf_finish` and `ap_final_rank`. A stat line's `extra`, and the roster and team-total `extra` objects, belong to their parent field.
+
+A parser that emits a new field fails `test/data-contract-retained-fields.test.mjs` until the field is mapped and listed in the contract. Changing the contract changes its fingerprint, so the authorization record must be updated too.
+
 ## Sports Reference notes
 
 From the captured pages (`fixtures/sports-reference/README.md`):

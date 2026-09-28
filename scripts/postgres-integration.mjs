@@ -10,6 +10,7 @@ import { createRawStore } from '../src/persistence/index.mjs';
 import { createFixtureApplication, createWorkerApplication } from '../src/application/composition-root.mjs';
 import { HttpTransport } from '../src/fetcher/http-transport.mjs';
 import { createParseResult } from '../src/contracts/boundaries.mjs';
+import { createQueryService } from '../src/api/index.mjs';
 import { PAGE_TYPES } from '../src/contracts/source.mjs';
 import { createProductionParserRegistry } from '../src/parsers/index.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
@@ -482,6 +483,36 @@ test('a process clock skewed from the database clock neither rejects a valid lea
       assert.equal(await persistence.recoverExpiredClaims(new Date()), 1);
     });
   }
+});
+
+test('a field the data contract does not list is neither stored in PostgreSQL nor served', async () => {
+  // #89: every box score gains an unlisted `extra.broadcast` and every season
+  // an unlisted `summary.extra.preseason_poll` beside the listed conf_finish.
+  await reset();
+  const retainedFields = JSON.parse(readFileSync(new URL('../config/personal-use.data-contract.json', import.meta.url), 'utf8')).retainedFields;
+  const corpus = foundationCorpus().map((entry) => {
+    const match = /(<script id="fixture-document" type="application\/json">)([\s\S]*?)(<\/script>)/.exec(entry.body);
+    const document = JSON.parse(match[2]);
+    if (entry.url.includes('/box/')) document.extra = { broadcast: present('Network') };
+    else if (document.summary) document.summary.extra = { conf_finish: present(1), preseason_poll: present(3) };
+    else return entry;
+    return { ...entry, body: entry.body.replace(match[0], `${match[1]}${JSON.stringify(document)}${match[3]}`) };
+  });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 10000 });
+  const app = createFixtureApplication({ fixtureEntries: corpus, retainedFields,
+    sharedState: { persistence, rawStore: createRawStore('filesystem', join(localRoot, 'raw-retained')) } });
+  const result = await app.runWorkerOnce();
+  assert.equal(result.jobs.every((entry) => entry.state === 'parsed'), true);
+  const revisions = await pool.query(`SELECT data FROM normalized_page_revisions WHERE data::text LIKE '%broadcast%' OR data::text LIKE '%preseason_poll%'`);
+  assert.equal(revisions.rowCount, 0, 'revision data holds no unlisted field');
+  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM games WHERE extra::text LIKE '%broadcast%'`)).rows[0].n, 0);
+  const seasons = await pool.query('SELECT extra FROM team_seasons');
+  assert.ok(seasons.rowCount > 0);
+  for (const row of seasons.rows) assert.deepEqual(Object.keys(row.extra), ['conf_finish']);
+  const queries = createQueryService(persistence, { retainedFields });
+  const games = (await queries.listGames({ limit: 100 })).items;
+  assert.equal(games.length, 6);
+  assert.ok(games.every((game) => !('extra' in game)));
 });
 
 test('claim recovery caps a job whose worker keeps disappearing', async () => {

@@ -73,6 +73,7 @@ test('worker assembly wires the Sports Reference adapter, real time, and the sch
   assert.equal(app.orchestrator.fetcher.transport, parts.transport);
   assert.equal(app.orchestrator.fetcher.sleep, realSleep);
   assert.deepEqual([...app.orchestrator.fetcher.allowedHosts], ['www.sports-reference.com']);
+  assert.deepEqual(app.orchestrator.normalizer.retainedFields, dataContract.retainedFields, 'only the data contract retained fields are stored');
 });
 
 test('worker assembly refuses a fake clock or sleep with the real transport', async () => {

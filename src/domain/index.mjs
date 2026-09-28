@@ -1,9 +1,24 @@
 import { gameKey } from '../contracts/source.mjs';
 import { assertGameContext, assertGameStatus } from '../contracts/value-state.mjs';
 import { createNormalizedPage } from '../contracts/boundaries.mjs';
+import { MAPPED_RETAINED_FIELDS, NORMALIZED_FIELDS, retainFields } from '../contracts/retained-fields.mjs';
 
+// Normalized page data keeps only the fields the data contract retains (#89),
+// so revision data, the named-column tables and the API never hold the rest.
+// Without a contract (fixture and local mode) every mapped field is retained;
+// unmapped fields are still dropped.
 export class Normalizer {
+  constructor({ retainedFields = MAPPED_RETAINED_FIELDS } = {}) {
+    this.retainedFields = Object.freeze([...retainedFields]);
+  }
+
   normalize(pageType, document, context) {
+    const page = this.#normalize(pageType, document, context);
+    const { value: data } = retainFields(NORMALIZED_FIELDS[page.kind], page.data, this.retainedFields);
+    return createNormalizedPage({ ...page, data });
+  }
+
+  #normalize(pageType, document, context) {
     if (pageType === 'school_index') {
       return createNormalizedPage({ jobKey: context.jobKey, kind: 'school_index', identity: context.jobKey, data: document, ...context });
     }

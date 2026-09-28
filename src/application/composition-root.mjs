@@ -19,14 +19,17 @@ import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { SportsReferenceSourceAdapter } from './sports-reference-source-adapter.mjs';
 import { buildFixtureReconciliationReport } from './reconciliation.mjs';
 import { NO_CRAWL_EVENTS, jobStateCounts } from './crawl-log.mjs';
+import { MAPPED_RETAINED_FIELDS } from '../contracts/retained-fields.mjs';
 import {
   boxScoreDocument, gameLogDocument, schoolHistoryDocument, schoolIndexDocument, seasonDocument, statLine,
 } from './fixture-documents.mjs';
 
 // Tests and local mode only: fake time, fixture pages, in-memory persistence by
-// default. A real crawl goes through createWorkerApplication.
+// default. A real crawl goes through createWorkerApplication. Local mode has no
+// data contract, so retainedFields defaults to every mapped field.
 export function createFixtureApplication({
   sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState, events = NO_CRAWL_EVENTS,
+  retainedFields = MAPPED_RETAINED_FIELDS,
 } = {}) {
   if (sharedState?.transport instanceof HttpTransport) {
     throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
@@ -68,7 +71,7 @@ export function createFixtureApplication({
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
   const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears });
   const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, policy: config.policy, allowedHosts: [host], events });
-  const normalizer = new Normalizer();
+  const normalizer = new Normalizer({ retainedFields });
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
   const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
@@ -80,7 +83,7 @@ export function createFixtureApplication({
     domain: assertBoundaryPort('domain', normalizer),
     persistence: assertBoundaryPort('persistence', persistence),
   };
-  const queries = assertBoundaryPort('api', createQueryService(persistence));
+  const queries = assertBoundaryPort('api', createQueryService(persistence, { retainedFields }));
   const orchestrator = new IngestionOrchestrator({
     fetcher: boundaryPorts.fetcher,
     discovery: boundaryPorts.discovery,
@@ -227,7 +230,8 @@ export async function createWorkerApplication({
     fetcher: assertBoundaryPort('fetcher', fetcher),
     discovery: assertBoundaryPort('discovery', discovery),
     parsers: assertBoundaryPort('parsers', parsers),
-    normalizer: assertBoundaryPort('domain', new Normalizer()),
+    // Only the data contract's retained fields are stored (#89).
+    normalizer: assertBoundaryPort('domain', new Normalizer({ retainedFields: config.dataContract.retainedFields })),
     persistence: assertBoundaryPort('persistence', persistence),
     rawStore: store,
     clock,

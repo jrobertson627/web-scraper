@@ -2,17 +2,23 @@ import { createServer } from 'node:http';
 import { publicationStatus } from '../config/authorization.mjs';
 import { contractFingerprint, dataContractStatus } from '../config/data-contract.mjs';
 import { assertBoundaryPort, createPageRequest } from '../contracts/boundaries.mjs';
+import { API_FIELDS, MAPPED_RETAINED_FIELDS, retainFields } from '../contracts/retained-fields.mjs';
 
 // Each route maps to one keyed or paged persistence read; no route loads the
 // whole read model. List methods take { limit, cursor } and return
-// { items, nextCursor }.
-export function createQueryService(persistence) {
+// { items, nextCursor }. Every item is served with only the fields the data
+// contract retains (#89), so rows stored before a contract narrowed are
+// filtered too. Without a contract every mapped field is served.
+export function createQueryService(persistence, { retainedFields = MAPPED_RETAINED_FIELDS } = {}) {
   const reads = assertBoundaryPort('persistenceReads', persistence);
+  const retained = Object.freeze([...retainedFields]);
+  const serve = (spec, item) => (item ? retainFields(spec, item, retained).value : item);
+  const servePage = (spec, page) => ({ ...page, items: page.items.map((item) => serve(spec, item)) });
   return Object.freeze({
-    listSchools: async (paging) => reads.listSchools(createPageRequest(paging)),
-    listSeasons: async (paging) => reads.listSeasons(createPageRequest(paging)),
-    listGames: async (paging) => reads.listGames(createPageRequest(paging)),
-    getGame: async (key) => reads.getGame(key),
+    listSchools: async (paging) => servePage(API_FIELDS.school, await reads.listSchools(createPageRequest(paging))),
+    listSeasons: async (paging) => servePage(API_FIELDS.season, await reads.listSeasons(createPageRequest(paging))),
+    listGames: async (paging) => servePage(API_FIELDS.game, await reads.listGames(createPageRequest(paging))),
+    getGame: async (key) => serve(API_FIELDS.game, await reads.getGame(key)),
     health: async () => reads.health(),
   });
 }
