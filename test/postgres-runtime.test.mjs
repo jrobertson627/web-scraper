@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { runCli, EXIT_CODES } from '../src/application/cli.mjs';
+import { startProductionWorker } from '../src/application/production-worker.mjs';
+import { createProductionParserRegistry, SchoolIndexParser } from '../src/parsers/index.mjs';
 import { persistenceSettings } from '../src/config/persistence.mjs';
 import { contractFingerprint } from '../src/config/data-contract.mjs';
 import { createQueryModels } from '../src/contracts/boundaries.mjs';
@@ -106,9 +108,12 @@ test('worker in postgres mode verifies the store, closes it, and still reports t
   const persistence = fakePersistence();
   let opened;
   const errors = [];
+  // Only the index parser, so this holds after the other production parsers land.
+  const parsers = createProductionParserRegistry([new SchoolIndexParser()]);
   const result = await runCli({
     mode: 'worker', env: workerEnv(PG_ENV), stderr: (message) => errors.push(message),
     openPostgres: async (settings) => { opened = settings; return persistence; },
+    startWorker: (context) => startProductionWorker({ ...context, parsers }),
   });
   assert.equal(result.exitCode, EXIT_CODES.workerNotReady);
   assert.equal(opened.claimTimeoutMs, 30_000);

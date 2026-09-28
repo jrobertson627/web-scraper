@@ -8,6 +8,9 @@ import pg from 'pg';
 import { PostgresPersistence } from '../src/persistence/postgres.mjs';
 import { createRawStore } from '../src/persistence/index.mjs';
 import { createFixtureApplication, createWorkerApplication } from '../src/application/composition-root.mjs';
+import { EXIT_CODES, runCli } from '../src/application/cli.mjs';
+import { createCrawlLog } from '../src/application/crawl-log.mjs';
+import { startProductionWorker } from '../src/application/production-worker.mjs';
 import { HttpTransport } from '../src/fetcher/http-transport.mjs';
 import { createParseResult } from '../src/contracts/boundaries.mjs';
 import { createQueryService } from '../src/api/index.mjs';
@@ -401,6 +404,49 @@ test('real PostgreSQL persistence and process restart', async () => {
     await worker.seedRootJob();
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM crawl_jobs')).rows[0].n, 1);
   })();
+});
+
+test('worker mode runs the production worker end to end on PostgreSQL with the crawl log', async () => {
+  // runCli worker mode with the production startWorker (#97): the real clock and
+  // sleep, openPostgresPersistence on this database, and an HttpTransport that
+  // answers locally. The index lists no eligible school, so one request is made.
+  await reset();
+  class LocalHttpTransport extends HttpTransport {
+    calls = [];
+    async request({ url }) { this.calls.push(url); return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') }; }
+  }
+  const indexParser = { pageType: () => 'school_index', version: () => '1', parse: () => createParseResult({ kind: 'valid',
+    document: schoolIndexDocument([{ name: 'Former School', path: '/cbb/schools/former/men/', historyUrl: 'https://www.sports-reference.com/cbb/schools/former/men/', to: 2020 }]) }) };
+  const unused = (pageType) => ({ pageType: () => pageType, version: () => '1', parse: () => createParseResult({ kind: 'structural_failure', error: 'not expected' }) });
+  const record = (name) => JSON.parse(readFileSync(new URL(`../config/personal-use.${name}.json`, import.meta.url), 'utf8'));
+  const authorization = record('authorization');
+  const transport = new LocalHttpTransport();
+  const lines = [];
+  const output = [];
+  let worker;
+  const result = await runCli({
+    mode: 'worker', stdout: (line) => output.push(line), stderr: () => {},
+    env: { ...process.env, PERSISTENCE: 'postgres', PROVIDER_ID: authorization.providerId, PROVIDER_HOST: authorization.scope.allowedHosts[0],
+      USER_AGENT: 'web-scraper-test (+ops@example.com)', RAW_STORE_ROOT: join(localRoot, 'raw-cli-worker'),
+      AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(record('data-contract')) },
+    crawlLog: createCrawlLog({ write: (line) => lines.push(JSON.parse(line)) }),
+    startWorker: async (context) => {
+      worker = await startProductionWorker({ ...context, transport,
+        parsers: createProductionParserRegistry([indexParser, ...PAGE_TYPES.filter((type) => type !== 'school_index').map(unused)]) });
+      return worker;
+    },
+  });
+  assert.equal(result.exitCode, EXIT_CODES.success);
+  assert.deepEqual(transport.calls, ['https://www.sports-reference.com/cbb/schools/']);
+  assert.equal(worker.app.persistence.requestDeadlineMs, 30_000 + 10_000, 'policy requestTimeoutMs plus the orphan grace');
+  assert.deepEqual(JSON.parse(output.at(-1)).counts, { parsed: 1 });
+  const jobs = await pool.query('SELECT page_type, state FROM crawl_jobs');
+  assert.deepEqual(jobs.rows, [{ page_type: 'school_index', state: 'parsed' }]);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL')).rows[0].n, 0);
+  assert.ok(lines.some((line) => line.event === 'request.started'));
+  assert.deepEqual(lines.at(-1).jobStates, { parsed: 1 });
+  // The worker closed its pool; a query on it now fails.
+  await assert.rejects(worker.app.persistence.pool.query('SELECT 1'));
 });
 
 // Records every statement a persistence call sends, so the exact SQL can be
