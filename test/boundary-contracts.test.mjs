@@ -8,6 +8,7 @@ import * as fetcherPublic from 'web-scraper-foundation/fetcher';
 import * as parsersPublic from 'web-scraper-foundation/parsers';
 import * as persistencePublic from 'web-scraper-foundation/persistence';
 import {
+  BOUNDARY_PORT_METHODS,
   assertBoundaryPort,
   createDiscoveryResult,
   createFetchResult,
@@ -28,6 +29,18 @@ test('package public exports expose entry points without fixture adapters', () =
   assert.deepEqual(Object.keys(domainPublic), ['Normalizer']);
   assert.deepEqual(Object.keys(persistencePublic), ['createPostgresPersistence', 'createRawStore']);
   assert.deepEqual(Object.keys(apiPublic).sort(), ['createApiServer', 'createQueryService']);
+});
+
+test('BOUNDARY_CONTRACTS.md lists exactly the port methods assertBoundaryPort checks', () => {
+  const doc = readFileSync('BOUNDARY_CONTRACTS.md', 'utf8');
+  const rows = new Map(doc.split(/\r?\n/).filter((line) => line.startsWith('| ') && line.includes('`web-scraper-foundation/'))
+    .map((line) => line.split('|').map((cell) => cell.trim()))
+    .map(([, boundary, , methods]) => [boundary, methods.split(';')[0].match(/`[^`]+`/g).map((name) => name.slice(1, -1))]));
+  const boundaries = { Fetcher: 'fetcher', Discovery: 'discovery', Parsers: 'parsers', 'Domain normalization': 'domain', Persistence: 'persistence', 'API/UI': 'api' };
+  assert.deepEqual([...rows.keys()].sort(), Object.keys(boundaries).sort());
+  for (const [row, port] of Object.entries(boundaries)) assert.deepEqual(rows.get(row), [...BOUNDARY_PORT_METHODS[port]], row);
+  const readPort = /`BOUNDARY_PORT_METHODS\.persistenceReads`: ([^)]+)\)/.exec(doc)?.[1].match(/`[^`]+`/g).map((name) => name.slice(1, -1));
+  assert.deepEqual(readPort, [...BOUNDARY_PORT_METHODS.persistenceReads]);
 });
 
 test('boundary data constructors validate and freeze consumer-facing values', () => {

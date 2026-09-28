@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import pg from 'pg';
 import {
   DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON,
   assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
@@ -17,7 +17,13 @@ import { writeNormalizedPage } from './postgres-domain.mjs';
 // instead of holding a lease or a pool client indefinitely.
 import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
 
-const { Pool } = pg;
+// The driver is loaded only when a real pool is created, so fixture and local
+// mode (and the adapter's fake-pool tests) run without pg installed.
+const require = createRequire(import.meta.url);
+function newPool(config) {
+  const { Pool } = require('pg');
+  return new Pool(config);
+}
 const CHECKSUM = /^[0-9a-f]{64}$/;
 const FINAL_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 const FAILURE_STATES = new Set(['retry_wait', 'operator_stop', 'parse_failed', 'permanently_failed']);
@@ -108,7 +114,7 @@ export function guardPool(pool, onError = logPoolError) {
 export class PostgresPersistence {
   // requestTimeoutMs must be at least the workers' request policy timeout; the
   // default is the largest timeout a policy may set.
-  constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
+  constructor({ pool = newPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
     authorizeOperator = (id) => Boolean(id), onPoolError,
     maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES, requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
     orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS } = {}) {
@@ -620,7 +626,7 @@ export async function assertSchemaCurrent(pool, expected = expectedMigrationVers
 // default. Options left undefined take the PostgresPersistence defaults.
 export async function openPostgresPersistence({
   pool: poolConfig, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries,
-  createPool = (config) => new Pool(config),
+  createPool = newPool,
 } = {}) {
   const pool = createPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries });

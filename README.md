@@ -9,13 +9,13 @@
 - **Production persistence:** ordered PostgreSQL migrations and a durable adapter behind the persistence port; fixture/local mode retains deterministic in-memory adapters and never opens a network connection.
 - **Raw storage seam:** immutable filesystem/object-store port; fixture mode uses an in-memory content-addressed store.
 
-The implementation has a source-neutral HTTPS transport, the production Sports Reference source adapter and real-page discovery, and a production worker assembly (`createWorkerApplication`). The provider-specific parsers are not written yet (phase 2), so the worker cannot crawl. The reusable orchestrator, fetcher, discovery, parser, normalizer, and persistence seams are exercised end-to-end by the fixture application; local TLS integration tests exercise the real transport without contacting an upstream provider.
+The implementation has a source-neutral HTTPS transport, the production Sports Reference source adapter, real-page discovery, versioned v1 parsers for all five Sports Reference page types, and a production worker assembly (`createWorkerApplication`). The reusable orchestrator, fetcher, discovery, parser, normalizer, and persistence seams are exercised end-to-end by the fixture application; local TLS integration tests exercise the real transport without contacting an upstream provider.
 
 ## Runtime modes
 
 ```sh
 npm run start:local   # deterministic fixture/local mode; exits after the fixture chain
-npm run start:worker  # validates authorization/configuration; exits until the production parsers exist
+npm run start:worker  # validates authorization/configuration, then crawls with PERSISTENCE=postgres
 npm run start:worker:personal  # loads the private, self-attested M1 records; set USER_AGENT and RAW_STORE_ROOT first
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
 npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
@@ -24,13 +24,15 @@ npm run test:postgres    # real, explicitly disposable PostgreSQL database
 npm run smoke:migrations # applies all migrations twice to a disposable database
 ```
 
-`local` is the only mode enabled by default. `worker` validates its safety gates but does not pretend to crawl without production parsers. API reads use local projections only and never start or claim crawl work.
+`local` is the only mode enabled by default. `worker` validates its safety gates before it builds anything, and refuses to crawl without PostgreSQL or with a missing production parser. API reads use local projections only and never start or claim crawl work.
 
-Milestone 1 includes a private, single-operator configuration in `config/personal-use.*.json`. Set a transparent contact-bearing `USER_AGENT` and an absolute `RAW_STORE_ROOT`, then run `npm run start:worker:personal` to validate it. This record is an operator attestation, not evidence of a provider grant; it never enables public publication or a live crawl. See [`AUTHORIZATION_CONTRACT.md`](AUTHORIZATION_CONTRACT.md) for its retained fields, attribution, and source-link convention.
+Milestone 1 includes a private, single-operator configuration in `config/personal-use.*.json`. Set a transparent contact-bearing `USER_AGENT` and an absolute `RAW_STORE_ROOT`, then run `npm run start:worker:personal`. This record is an operator attestation, not evidence of a provider grant; it never enables public publication. See [`AUTHORIZATION_CONTRACT.md`](AUTHORIZATION_CONTRACT.md) for its retained fields, attribution, and source-link convention.
 
 Start with an empty disposable PostgreSQL database and explicit `PGHOST`, `PGDATABASE`, and `PGUSER`. Run `smoke:migrations` first with `PG_SMOKE_CONFIRM=disposable` and `psql` on `PATH`; then run `test:postgres` with `PG_TEST_CONFIRM=disposable`. The PostgreSQL adapter can be injected into the fixture composition with a filesystem raw store for offline integration and restart tests. These tests make no external source requests.
 
-The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, and `4` means configuration is valid but the worker cannot crawl yet (no production parsers are registered).
+CI (`.github/workflows/ci.yml`) runs on every push to `master` and every pull request. It runs `npm run check` and `smoke:foundation` on Node 20.18.1 and 22, then runs local mode and the unit suite with the `pg` driver removed, and runs `smoke:migrations`, `migrate` and `test:postgres` against a throwaway `postgres:16` service container. The real Sports Reference captures are not in the repository, so their tests skip in CI.
+
+The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, and `4` means configuration is valid but the worker cannot crawl (a configured `pageType@version` has no production parser).
 
 ### Durable persistence
 

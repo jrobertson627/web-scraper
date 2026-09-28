@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
@@ -29,6 +29,8 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 
 const { Pool } = pg;
 const pool = new Pool({ max: 8 });
+// .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
+mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-test-'));
 after(async () => { await pool.end(); });
 

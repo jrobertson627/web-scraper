@@ -31,7 +31,7 @@ The tracker is a consumer of the database, not of this service. The scraper's sc
 ### Worker
 
 - Start command: `npm run start:worker:personal`. It loads the checked-in private-use authorization and data-contract records (`config/personal-use.*.json`, which contain no secrets) and starts the same worker path as `start:worker`.
-- Until the production parsers are registered, an accepted configuration exits with code `4` and no crawl starts. A Background Worker that exits is restarted by Render, so do not create the worker service until the production pipeline has landed (#76, #39–#42), or suspend it after a configuration check.
+- If a configured `pageType@version` has no production parser, an accepted configuration exits with code `4` and no crawl starts. A Background Worker that exits is restarted by Render, so suspend the service after a failed configuration check rather than letting it restart in a loop.
 - Stopping: Render sends `SIGTERM` on deploys, restarts and suspends, then stops the process after its grace period. Any claim the process still held is recovered after `claimTimeoutMs` and retried by the next run (see `JOB_LIFECYCLE.md`), so an interrupted crawl resumes rather than restarts. Suspending the service is the way to pause a backfill.
 - A service with a persistent disk runs as a single instance and has no zero-downtime deploys. That fits the crawler, which must run one request at a time per host anyway.
 - Migrations run as the pre-deploy command, `npm run migrate`. Every migration is repeat-safe, and both runtime modes refuse to start if any file in `migrations/` is unrecorded.

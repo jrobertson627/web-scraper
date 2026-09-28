@@ -3,7 +3,7 @@
 // against the same explicitly disposable database; never run on its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
@@ -19,6 +19,8 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 }
 
 const { Pool } = pg;
+// .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
+mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-ops-test-'));
 
 async function reset(pool) {
