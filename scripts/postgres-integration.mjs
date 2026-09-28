@@ -110,16 +110,16 @@ test('real PostgreSQL persistence and process restart', async () => {
     const raw = createRawStore('filesystem', join(localRoot, 'raw-revisions'));
     await persistence.addJob(job);
     const claimed = await persistence.claimNextJob(new Date(), 'revision-worker');
-    const firstBody = raw.put(Buffer.from('first'));
-    const fetchId = await persistence.recordFetch({ jobKey: job.key, status: 200, ...firstBody }, claimed.lease, raw);
+    const firstBody = await raw.put(Buffer.from('first'));
+    const fetchId = await persistence.recordFetch({ jobKey: job.key, status: 200, ...firstBody }, claimed.lease, firstBody);
     const provenance = sourceProvenance(job, fetchId);
     const page = { jobKey: job.key, kind: 'school_index', identity: job.key,
       data: { schools: [{ path: '/school/a', name: 'Fixture A', to: 2026 }] },
       observations: [{ kind: 'school', parentKey: job.key, rowIndex: 0, eligible: true }] };
     await persistence.commitPage(page, provenance, claimed.lease);
     await persistence.commitPage(page, provenance, claimed.lease);
-    const secondBody = raw.put(Buffer.from('second'));
-    const secondId = await persistence.recordFetch({ jobKey: job.key, status: 200, ...secondBody }, claimed.lease, raw);
+    const secondBody = await raw.put(Buffer.from('second'));
+    const secondId = await persistence.recordFetch({ jobKey: job.key, status: 200, ...secondBody }, claimed.lease, secondBody);
     const conflict = await persistence.commitPage({ ...page, data: { schools: [{ path: '/school/a', name: 'Different', to: 2026 }] } },
       sourceProvenance(job, secondId), claimed.lease);
     assert.equal(conflict.conflict, true);
@@ -135,8 +135,8 @@ test('real PostgreSQL persistence and process restart', async () => {
     const raw = createRawStore('filesystem', join(localRoot, 'raw-domain'));
     await persistence.addJob(job);
     const indexClaim = await persistence.claimNextJob(new Date(), 'domain-worker');
-    const indexRaw = raw.put(Buffer.from('index'));
-    const indexFetch = await persistence.recordFetch({ jobKey: job.key, status: 200, ...indexRaw }, indexClaim.lease, raw);
+    const indexRaw = await raw.put(Buffer.from('index'));
+    const indexFetch = await persistence.recordFetch({ jobKey: job.key, status: 200, ...indexRaw }, indexClaim.lease, indexRaw);
     await persistence.transitionJob(job.key, 'fetched', indexClaim.lease, { sourceFetchId: indexFetch });
     await persistence.commitPageAndTransition({ jobKey: job.key, kind: 'school_index', identity: job.key,
       data: { schools: [{ path: '/school/a', name: 'Fixture A', to: 2026, aliases: ['A'] }] },
@@ -148,8 +148,8 @@ test('real PostgreSQL persistence and process restart', async () => {
     await persistence.addJob(season);
     const seasonClaim = await persistence.claimNextJob(new Date(), 'domain-worker');
     assert.equal(seasonClaim.key, season.key);
-    const seasonRaw = raw.put(Buffer.from('season'));
-    const seasonFetch = await persistence.recordFetch({ jobKey: season.key, status: 200, ...seasonRaw }, seasonClaim.lease, raw);
+    const seasonRaw = await raw.put(Buffer.from('season'));
+    const seasonFetch = await persistence.recordFetch({ jobKey: season.key, status: 200, ...seasonRaw }, seasonClaim.lease, seasonRaw);
     await persistence.transitionJob(season.key, 'fetched', seasonClaim.lease, { sourceFetchId: seasonFetch });
     const linked = { name: 'Linked Player', playerPath: '/players/linked' };
     const seasonData = seasonDocument({ school: 'Fixture A', endingYear: 2026, gameLogUrl: null,
@@ -165,8 +165,8 @@ test('real PostgreSQL persistence and process restart', async () => {
     await persistence.addJob(log);
     const logClaim = await persistence.claimNextJob(new Date(), 'domain-worker');
     assert.equal(logClaim.key, log.key);
-    const logRaw = raw.put(Buffer.from('log'));
-    const logFetch = await persistence.recordFetch({ jobKey: log.key, status: 200, ...logRaw }, logClaim.lease, raw);
+    const logRaw = await raw.put(Buffer.from('log'));
+    const logFetch = await persistence.recordFetch({ jobKey: log.key, status: 200, ...logRaw }, logClaim.lease, logRaw);
     await persistence.transitionJob(log.key, 'fetched', logClaim.lease, { sourceFetchId: logFetch });
     await persistence.commitPageAndTransition({ jobKey: log.key, kind: 'game_log', identity: log.key,
       data: gameLogDocument(2026, [
@@ -179,8 +179,8 @@ test('real PostgreSQL persistence and process restart', async () => {
     await persistence.addJob(box);
     const boxClaim = await persistence.claimNextJob(new Date(), 'domain-worker');
     assert.equal(boxClaim.key, box.key);
-    const boxRaw = raw.put(Buffer.from('box'));
-    const boxFetch = await persistence.recordFetch({ jobKey: box.key, status: 200, ...boxRaw }, boxClaim.lease, raw);
+    const boxRaw = await raw.put(Buffer.from('box'));
+    const boxFetch = await persistence.recordFetch({ jobKey: box.key, status: 200, ...boxRaw }, boxClaim.lease, boxRaw);
     await persistence.transitionJob(box.key, 'fetched', boxClaim.lease, { sourceFetchId: boxFetch });
     const boxData = boxScoreDocument({ date: '2026-01-02', status: 'final',
       away: { name: 'Fixture B', schoolPath: '/school/b', score: 65, stats: statLine({ pts: 65 }) },
@@ -228,8 +228,8 @@ test('real PostgreSQL persistence and process restart', async () => {
     const raw = createRawStore('filesystem', join(localRoot, 'raw-rollback'));
     await persistence.addJob(job);
     const claimed = await persistence.claimNextJob(new Date(), 'rollback-worker');
-    const body = raw.put(Buffer.from('rollback'));
-    const fetchId = await persistence.recordFetch({ jobKey: job.key, status: 200, ...body }, claimed.lease, raw);
+    const body = await raw.put(Buffer.from('rollback'));
+    const fetchId = await persistence.recordFetch({ jobKey: job.key, status: 200, ...body }, claimed.lease, body);
     await persistence.transitionJob(job.key, 'fetched', claimed.lease, { sourceFetchId: fetchId });
     await assert.rejects(persistence.commitPageAndTransition({ jobKey: job.key, kind: 'school_index', identity: job.key,
       data: { schools: [{ path: '/school/a', name: 'Fixture A', to: 2026 }] },
@@ -255,10 +255,10 @@ test('real PostgreSQL persistence and process restart', async () => {
     const retry = await reviewed.claimNextJob(new Date(), 'retry-worker');
     assert.equal(retry.lease.generation, first.lease.generation + 1);
     const raw = createRawStore('filesystem', join(localRoot, 'raw-repair'));
-    const body = raw.put(Buffer.from('durable body'));
-    const orphan = raw.put(Buffer.from('orphan body'));
+    const body = await raw.put(Buffer.from('durable body'));
+    const orphan = await raw.put(Buffer.from('orphan body'));
     const fetchId = await reviewed.recordFetch({ jobKey: job.key, status: 200, ...body,
-      cacheControl: 'max-age=120', cacheHit: true, reusedBody: true }, retry.lease, raw);
+      cacheControl: 'max-age=120', cacheHit: true, reusedBody: true }, retry.lease, body);
     assert.equal((await reviewed.lastSuccessfulFetch(job.key)).id, fetchId);
     assert.equal((await reviewed.lastSuccessfulFetch(job.key)).cacheControl, 'max-age=120');
     assert.equal((await reviewed.lastSuccessfulFetch(job.key)).cacheHit, true);
@@ -491,9 +491,9 @@ test('lease checks, renewals, transitions and fetch records use an index on craw
   const recorder = recordingPool(pool);
   const persistence = new PostgresPersistence({ pool: recorder, claimTimeoutMs: 30_000 });
   const raw = createRawStore('filesystem', join(localRoot, 'raw-explain'));
-  const body = raw.put(Buffer.from('explain'));
+  const body = await raw.put(Buffer.from('explain'));
   for (const [label, call] of [
-    ['lease check and recordFetch', () => persistence.recordFetch({ jobKey: job.key, status: 200, ...body }, claimed.lease, raw)],
+    ['lease check and recordFetch', () => persistence.recordFetch({ jobKey: job.key, status: 200, ...body }, claimed.lease, body)],
     ['renewClaim', () => persistence.renewClaim(job.key, claimed.lease)],
     ['transitionJob', () => persistence.transitionJob(job.key, 'fetched', claimed.lease)],
   ]) {

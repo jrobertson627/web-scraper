@@ -91,15 +91,17 @@ export class Fetcher {
     if (prior && this.policy.cacheMaxAgeMs > 0) {
       const ageMs = this.clock().getTime() - new Date(prior.fetchedAt).getTime();
       if (ageMs >= 0 && ageMs < freshAgeLimit(this.policy.cacheMaxAgeMs, prior.cacheControl)) {
-        const verification = this.rawStore.verify(prior.checksum, prior.objectPath);
-        if (!verification.ok) return createFetchResult({ kind: 'operator_stop', reason: 'cached raw snapshot failed verification' });
+        const cached = await this.rawStore.read(prior.checksum, prior.objectPath);
+        if (!cached.ok) return createFetchResult({ kind: 'operator_stop', reason: 'cached raw snapshot failed verification' });
+        // A cache hit keeps the fetch time of the body it reuses, so freshness
+        // is measured from the last real request however many hits follow (#91).
         const sourceFetchId = await this.persistence.recordFetch({
           jobKey: job.key, status: 200, checksum: prior.checksum, objectPath: prior.objectPath,
           etag: prior.etag, lastModified: prior.lastModified, cacheControl: prior.cacheControl,
-          reusedBody: true, cacheHit: true,
-        }, lease, this.rawStore);
+          fetchedAt: prior.fetchedAt, reusedBody: true, cacheHit: true,
+        }, lease, cached);
         this.events.emit('cache.hit', { jobKey: job.key, pageType: job.pageType });
-        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum });
+        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: cached.body });
       }
     }
     const requestHost = new URL(job.sourceUrl.absoluteUrl).host;
@@ -158,8 +160,8 @@ export class Fetcher {
         if (!headers['if-none-match'] && !headers['if-modified-since']) {
           return createFetchResult({ kind: 'operator_stop', code: 'unexpected_304', reason: '304 returned without a conditional request' });
         }
-        const priorVerification = prior && !forbidsStoredReuse(prior.cacheControl) ? this.rawStore.verify(prior.checksum, prior.objectPath) : { ok: false };
-        if (!prior || !priorVerification.ok) return createFetchResult({ kind: 'operator_stop', reason: '304 has no durable verified prior raw snapshot' });
+        const priorBody = prior && !forbidsStoredReuse(prior.cacheControl) ? await this.rawStore.read(prior.checksum, prior.objectPath) : { ok: false };
+        if (!prior || !priorBody.ok) return createFetchResult({ kind: 'operator_stop', reason: '304 has no durable verified prior raw snapshot' });
         const sourceFetchId = await this.persistence.recordFetch({
           jobKey: job.key,
           status: 304,
@@ -170,9 +172,9 @@ export class Fetcher {
           cacheControl: header(response.headers, 'cache-control') ?? prior.cacheControl,
           fetchedAt: startedAt.toISOString(),
           reusedBody: true,
-        }, lease, this.rawStore);
+        }, lease, priorBody);
         this.events.emit('cache.not_modified', { jobKey: job.key, pageType: job.pageType });
-        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum });
+        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: priorBody.body });
       }
       if (response.status === 429) {
         const retryAfter = header(response.headers, 'retry-after');
@@ -189,9 +191,9 @@ export class Fetcher {
       if (response.status < 200 || response.status >= 300) return createFetchResult({ kind: 'permanently_failed', reason: `upstream ${response.status}` });
       const body = Buffer.from(response.body ?? '');
       if (body.length > this.policy.maxResponseBytes) return createFetchResult({ kind: 'operator_stop', code: 'response_too_large', reason: 'response body exceeds the configured byte limit' });
-      const raw = this.rawStore.put(body);
-      const verification = this.rawStore.verify(raw.checksum, raw.objectPath);
-      if (!verification.ok) return createFetchResult({ kind: 'operator_stop', reason: `raw finalization failed verification: ${verification.reason}` });
+      // put() returns the verification of the stored object, hashing the body once.
+      const raw = await this.rawStore.put(body);
+      if (!raw.ok) return createFetchResult({ kind: 'operator_stop', reason: `raw finalization failed verification: ${raw.reason}` });
       const sourceFetchId = await this.persistence.recordFetch({
         jobKey: job.key,
         status: response.status,
@@ -202,8 +204,8 @@ export class Fetcher {
         cacheControl: header(response.headers, 'cache-control'),
         fetchedAt: startedAt.toISOString(),
         reusedBody: false,
-      }, lease, this.rawStore);
-      return createFetchResult({ kind: 'fetched', sourceFetchId, checksum: raw.checksum });
+      }, lease, raw);
+      return createFetchResult({ kind: 'fetched', sourceFetchId, checksum: raw.checksum, body });
     } finally {
       if (ownsRequest) await this.persistence.releaseRequest(job.key, lease);
     }

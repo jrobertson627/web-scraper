@@ -121,7 +121,7 @@ test('raw repair inventories retained orphans and unsafe metadata references', a
     },
   };
 
-  const result = persistence.repairRawObjects({ rawStore: repairStore });
+  const result = await persistence.repairRawObjects({ rawStore: repairStore });
 
   assert.deepEqual(result.pending.map((item) => item.checksum).sort(), [missingChecksum, mismatchedChecksum].sort());
   assert.equal(result.orphans.length, 1);
@@ -131,8 +131,7 @@ test('raw repair inventories retained orphans and unsafe metadata references', a
   const unsafePersistence = new InMemoryPersistence(() => now);
   unsafePersistence.addJob(makeJob());
   const unsafeStore = {
-    get: () => ({ checksum: mismatchedChecksum, objectPath: `memory://${mismatchedChecksum}`, body: Buffer.from('tampered') }),
-    verify: () => ({ ok: false, reason: 'raw object checksum mismatch' }),
+    read: () => ({ ok: false, reason: 'raw object checksum mismatch', checksum: mismatchedChecksum, actualChecksum: 'c'.repeat(64) }),
   };
   const orchestrator = new IngestionOrchestrator({
     fetcher: { fetch: async () => ({ kind: 'fetched', sourceFetchId: 'fetch-1', checksum: mismatchedChecksum }) },

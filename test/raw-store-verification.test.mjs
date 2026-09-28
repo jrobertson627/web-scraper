@@ -23,15 +23,15 @@ test('raw stores are immutable and checksum/path verification is strict', () => 
   assert.equal(store.verify(first.checksum, 'memory://wrong').reason, 'raw object path mismatch');
 });
 
-test('filesystem raw objects use content-addressed immutable paths and reject invalid references', () => {
+test('filesystem raw objects use content-addressed immutable paths and reject invalid references', async () => {
   const root = mkdtempSync(join(tmpdir(), 'web-scraper-raw-'));
   try {
     const store = new FileRawStore(root);
-    const first = store.put(Buffer.from('file body'));
-    assert.equal(store.verify(first.checksum, first.objectPath).ok, true);
-    assert.equal(store.get('../../etc/passwd'), null);
-    assert.equal(store.verify('../../etc/passwd').ok, false);
-    assert.equal(store.entries().length, 1);
+    const first = await store.put(Buffer.from('file body'));
+    assert.equal((await store.verify(first.checksum, first.objectPath)).ok, true);
+    assert.equal(await store.get('../../etc/passwd'), null);
+    assert.equal((await store.verify('../../etc/passwd')).ok, false);
+    assert.equal((await store.entries()).length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -44,9 +44,14 @@ test('persistence refuses successful fetch metadata without a verified immutable
   persistence.addJob(job);
   const claimed = persistence.claimNextJob(now, 'worker');
   assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64) }, claimed.lease), /object path is missing/);
-  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64), objectPath: 'memory://unverified' }, claimed.lease), /requires a raw store/);
-  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64), objectPath: 'memory://missing' }, claimed.lease, new MemoryRawStore()), /missing raw object/);
+  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64), objectPath: 'memory://unverified' }, claimed.lease), /requires the raw store verification/);
   const store = new MemoryRawStore();
+  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: 'a'.repeat(64), objectPath: 'memory://missing' }, claimed.lease, store.read('a'.repeat(64))), /missing raw object/);
   const raw = store.put(Buffer.from('durable'));
-  assert.match(persistence.recordFetch({ jobKey: job.key, status: 200, checksum: raw.checksum, objectPath: raw.objectPath }, claimed.lease, store), /^fetch-/);
+  const other = store.put(Buffer.from('another body'));
+  // A passing verification of a different object is not proof for this one.
+  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: raw.checksum, objectPath: raw.objectPath }, claimed.lease, other), /verification is for a different raw object/);
+  assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: raw.checksum, objectPath: 'memory://elsewhere' }, claimed.lease, raw), /different raw object/);
+  assert.match(persistence.recordFetch({ jobKey: job.key, status: 200, checksum: raw.checksum, objectPath: raw.objectPath }, claimed.lease, raw), /^fetch-/);
+  assert.match(persistence.recordFetch({ jobKey: job.key, status: 304, checksum: raw.checksum, objectPath: raw.objectPath }, claimed.lease, store.read(raw.checksum, raw.objectPath)), /^fetch-/);
 });

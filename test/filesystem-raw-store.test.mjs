@@ -15,28 +15,30 @@ import { IngestionOrchestrator } from '../src/application/orchestrator.mjs';
 const policy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' };
 const scope = { eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
 
-function withRawDirectory(callback) {
+async function withRawDirectory(callback) {
   const root = mkdtempSync(join(tmpdir(), 'web-scraper-m3-'));
-  try { return callback(root); } finally { rmSync(root, { recursive: true, force: true }); }
+  try { return await callback(root); } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
 function objectFile(root, checksum) { return join(root, checksum.slice(0, 2), checksum); }
 function sha256(body) { return createHash('sha256').update(body).digest('hex'); }
 
-test('filesystem raw port preserves immutable bytes and verifies real files', () => withRawDirectory((root) => {
+test('filesystem raw port preserves immutable bytes and verifies real files', () => withRawDirectory(async (root) => {
   const store = createRawStore('filesystem', root);
-  const first = store.put(Buffer.from('immutable body'));
-  const second = store.put(Buffer.from('immutable body'));
+  const first = await store.put(Buffer.from('immutable body'));
+  const second = await store.put(Buffer.from('immutable body'));
   assert.deepEqual(first, second);
-  assert.equal(store.entries().length, 1);
-  const read = store.get(first.checksum);
+  assert.equal(first.ok, true);
+  assert.deepEqual(await store.entries(), [{ checksum: first.checksum, objectPath: first.objectPath, size: 14 }]);
+  const read = await store.get(first.checksum);
   read.body[0] = 0;
-  assert.equal(store.get(first.checksum).body.toString(), 'immutable body');
-  assert.equal(store.verify(first.checksum, first.objectPath).ok, true);
-  assert.equal(store.verify(first.checksum, 'file://wrong').reason, 'raw object path mismatch');
-  assert.equal(store.verify('../escape').reason, 'invalid raw checksum');
-  assert.equal(store.get('../escape'), null);
-  assert.equal(store.temporaryEntries().length, 0);
+  assert.equal((await store.get(first.checksum)).body.toString(), 'immutable body');
+  assert.equal((await store.read(first.checksum, first.objectPath)).body.toString(), 'immutable body');
+  assert.deepEqual(await store.verify(first.checksum, first.objectPath), { ok: true, checksum: first.checksum, objectPath: first.objectPath, size: 14 });
+  assert.equal((await store.verify(first.checksum, 'file://wrong')).reason, 'raw object path mismatch');
+  assert.equal((await store.verify('../escape')).reason, 'invalid raw checksum');
+  assert.equal(await store.get('../escape'), null);
+  assert.equal((await store.temporaryEntries()).length, 0);
   assert.equal(readFileSync(objectFile(root, first.checksum)).toString(), 'immutable body');
 }));
 
@@ -46,15 +48,15 @@ test('filesystem root must be explicit and absolute', () => {
   assert.throws(() => validateConfiguration({ mode: 'local', providerId: 'p', allowedHosts: ['allowed.example'], rawStore: 'filesystem', policy, publication: 'private', ...scope }), /rawStoreRoot/);
 });
 
-test('interruption before finalization leaves only an unparseable temporary object', () => withRawDirectory((root) => {
+test('interruption before finalization leaves only an unparseable temporary object', () => withRawDirectory(async (root) => {
   const moduleUrl = pathToFileURL(fileURLToPath(new URL('../src/persistence/index.mjs', import.meta.url))).href;
   const child = `
-    import fs from 'node:fs';
+    import fs from 'node:fs/promises';
     import { syncBuiltinESMExports } from 'node:module';
-    fs.linkSync = () => process.exit(73);
+    fs.link = async () => process.exit(73);
     syncBuiltinESMExports();
     const { FileRawStore } = await import(process.env.RAW_TEST_MODULE);
-    new FileRawStore(process.env.RAW_TEST_ROOT).put(Buffer.from('interrupted body'));
+    await new FileRawStore(process.env.RAW_TEST_ROOT).put(Buffer.from('interrupted body'));
   `;
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
     encoding: 'utf8',
@@ -63,15 +65,15 @@ test('interruption before finalization leaves only an unparseable temporary obje
   assert.equal(result.status, 73, result.stderr);
   const store = new FileRawStore(root);
   const checksum = sha256('interrupted body');
-  assert.equal(store.get(checksum), null);
-  assert.equal(store.verify(checksum).reason, 'missing raw object');
-  assert.deepEqual(store.entries(), []);
-  assert.equal(store.temporaryEntries().length, 1);
-  const report = new InMemoryPersistence().repairRawObjects({ rawStore: store });
+  assert.equal(await store.get(checksum), null);
+  assert.equal((await store.verify(checksum)).reason, 'missing raw object');
+  assert.deepEqual(await store.entries(), []);
+  assert.equal((await store.temporaryEntries()).length, 1);
+  const report = await new InMemoryPersistence().repairRawObjects({ rawStore: store });
   assert.equal(report.counts.temporary, 1);
   assert.equal(report.counts.orphans, 0);
-  assert.equal(store.put(Buffer.from('interrupted body')).checksum, checksum);
-  assert.equal(store.verify(checksum).ok, true);
+  assert.equal((await store.put(Buffer.from('interrupted body'))).checksum, checksum);
+  assert.equal((await store.verify(checksum)).ok, true);
 }));
 
 test('filesystem-backed conditional 304 reuses one body and records two verified fetches', async () => {
@@ -94,7 +96,7 @@ test('filesystem-backed conditional 304 reuses one body and records two verified
     assert.deepEqual(persistence.sourceFetches.map((fetch) => fetch.status), [200, 304]);
     assert.equal(persistence.sourceFetches[1].objectPath, persistence.sourceFetches[0].objectPath);
     assert.equal(transport.calls.length, 2);
-    assert.equal(rawStore.entries().length, 1);
+    assert.equal((await rawStore.entries()).length, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -102,9 +104,9 @@ test('repair classifies real missing, mismatched, and orphaned files without cha
   const root = mkdtempSync(join(tmpdir(), 'web-scraper-m3-'));
   try {
     const store = new FileRawStore(root);
-    const healthy = store.put(Buffer.from('healthy'));
-    const orphan = store.put(Buffer.from('orphan'));
-    const damaged = store.put(Buffer.from('damaged'));
+    const healthy = await store.put(Buffer.from('healthy'));
+    const orphan = await store.put(Buffer.from('orphan'));
+    const damaged = await store.put(Buffer.from('damaged'));
     const missingChecksum = sha256('missing');
     writeFileSync(objectFile(root, damaged.checksum), Buffer.from('tampered bytes'));
     const persistence = new InMemoryPersistence(() => new Date('2026-01-01T00:00:00.000Z'));
@@ -115,21 +117,22 @@ test('repair classifies real missing, mismatched, and orphaned files without cha
       { id: 'fetch-damaged', checksum: damaged.checksum, objectPath: damaged.objectPath },
     );
     const before = structuredClone(persistence.sourceFetches);
-    const report = persistence.repairRawObjects({ rawStore: store });
+    const report = await persistence.repairRawObjects({ rawStore: store });
     assert.deepEqual(report.counts, { healthy: 1, pending: 2, orphans: 1, temporary: 0 });
     assert.deepEqual(report.pending.map(({ defect }) => defect).sort(), ['checksum_mismatch', 'missing']);
     assert.deepEqual(report.pending.flatMap(({ sourceFetchIds }) => sourceFetchIds).sort(), ['fetch-damaged', 'fetch-missing']);
     assert.equal(report.orphans[0].checksum, orphan.checksum);
     assert.deepEqual(report.healthy[0].sourceFetchIds, ['fetch-healthy', 'fetch-healthy-304']);
-    assert.equal(store.verify(damaged.checksum).ok, false);
-    assert.equal(store.get(damaged.checksum), null);
+    assert.equal((await store.verify(damaged.checksum)).ok, false);
+    assert.equal(await store.get(damaged.checksum), null);
     assert.deepEqual(persistence.sourceFetches, before);
-    assert.equal(store.entries().length, 3);
+    assert.equal((await store.entries()).length, 3);
 
     const source = createSourceUrl('provider', 'https://allowed.example/page');
     persistence.addJob({ key: 'job', pageType: 'season', sourceUrl: source, canonicalPath: canonicalizeSourceUrl(source) });
     const job = persistence.claimNextJob(new Date('2026-01-01T00:00:00.000Z'), 'worker');
-    assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: damaged.checksum, objectPath: damaged.objectPath }, job.lease, store), /checksum mismatch/);
+    const damagedRead = await store.read(damaged.checksum, damaged.objectPath);
+    assert.throws(() => persistence.recordFetch({ jobKey: job.key, status: 200, checksum: damaged.checksum, objectPath: damaged.objectPath }, job.lease, damagedRead), /checksum mismatch/);
     const workerPersistence = new InMemoryPersistence(() => new Date('2026-01-01T00:00:00.000Z'));
     workerPersistence.addJob({ key: 'job', pageType: 'season', sourceUrl: source, canonicalPath: canonicalizeSourceUrl(source) });
     const orchestrator = new IngestionOrchestrator({

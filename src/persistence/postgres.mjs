@@ -13,6 +13,7 @@ import {
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
+import { assertFetchVerification } from './index.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
 // instead of holding a lease or a pool client indefinitely.
 import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
@@ -24,7 +25,6 @@ function newPool(config) {
   const { Pool } = require('pg');
   return new Pool(config);
 }
-const CHECKSUM = /^[0-9a-f]{64}$/;
 const FINAL_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 const FAILURE_STATES = new Set(['retry_wait', 'operator_stop', 'parse_failed', 'permanently_failed']);
 const CLAIM_EXPIRED = 'claim expired before completion';
@@ -371,13 +371,10 @@ export class PostgresPersistence {
     return result.rows[0];
   }
 
-  async recordFetch(metadata, lease, rawStore) {
-    const successful = (metadata.status >= 200 && metadata.status < 300) || metadata.status === 304;
-    if (successful && (!CHECKSUM.test(metadata.checksum ?? '') || !metadata.objectPath)) throw new Error('successful fetch requires a valid checksum and raw object path');
-    if (rawStore) {
-      const verified = rawStore.verify(metadata.checksum, metadata.objectPath);
-      if (!verified.ok) throw new Error(`raw fetch metadata rejected before durable record: ${verified.reason}`);
-    }
+  // verification is the raw store's result for this body (from put or read);
+  // see assertFetchVerification.
+  async recordFetch(metadata, lease, verification) {
+    assertFetchVerification(metadata, verification);
     return this.transaction(async (client) => {
       const job = await this.leasedJob(client, metadata.jobKey, lease);
       const record = await client.query(`INSERT INTO source_fetches
@@ -471,7 +468,7 @@ export class PostgresPersistence {
     const orphans = [];
     for (const [checksum, rows] of referenced) {
       const paths = [...new Set(rows.map((row) => row.raw_object_path))];
-      const verified = rawStore.verify(checksum, paths.length === 1 ? paths[0] : undefined);
+      const verified = await rawStore.verify(checksum, paths.length === 1 ? paths[0] : undefined);
       if (verified.ok && paths.length === 1) {
         healthy.push({ checksum, objectPath: verified.objectPath, sourceFetchIds: rows.map((row) => portId('fetch', row.id)) });
         continue;
@@ -487,7 +484,7 @@ export class PostgresPersistence {
         reason = EXCLUDED.reason,source_fetch_ids = EXCLUDED.source_fetch_ids,updated_at = clock_timestamp()`,
       [checksum, item.objectPath, observedAt, item.reason, JSON.stringify(item.sourceFetchIds)]);
     }
-    for (const entry of rawStore.entries()) {
+    for (const entry of await rawStore.entries()) {
       if (referenced.has(entry.checksum)) continue;
       const item = { checksum: entry.checksum, objectPath: entry.objectPath, state: 'retained',
         detectedAs: 'orphan', observedAt, reason: 'orphan raw object retained for operator review' };
