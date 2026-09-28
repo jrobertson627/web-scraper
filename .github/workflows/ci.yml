@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.18.1', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # The real Sports Reference captures are not in the repo, so their tests skip here.
+      - run: npm run check
+      - run: npm run smoke:foundation
+
+  without-pg:
+    name: Local mode without the pg driver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Only PERSISTENCE=postgres may need the driver (#92).
+      - run: rm -rf node_modules/pg
+      - run: npm run start:local
+      - run: npm test
+
+  postgres:
+    name: PostgreSQL migrations and integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: scraper
+          POSTGRES_PASSWORD: scraper
+          POSTGRES_DB: scraper_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scraper -d scraper_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # A throwaway service container that exists only for this job.
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: scraper
+      PGPASSWORD: scraper
+      PGDATABASE: scraper_ci
+      PG_SMOKE_CONFIRM: disposable
+      PG_TEST_CONFIRM: disposable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run smoke:migrations
+      - run: npm run migrate
+      - run: npm run test:postgres

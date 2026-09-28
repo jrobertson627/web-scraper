@@ -68,6 +68,32 @@ test('a transaction whose ROLLBACK fails destroys its client instead of returnin
   assert.deepEqual(healthy.statements, ['BEGIN', 'ROLLBACK', 'BEGIN', 'COMMIT']);
 });
 
+test('a checked-out client that loses its connection fails the transaction instead of crashing the process', async () => {
+  const pool = fakePool();
+  const client = new EventEmitter();
+  const lost = Object.assign(new Error('Connection terminated unexpectedly'), { code: '57P01' });
+  client.released = [];
+  client.query = async (sql) => {
+    if (sql !== 'INSERT') return { rows: [], rowCount: 0 };
+    // Like pg when the socket ends: fail the active query, then emit 'error'
+    // on the client from the socket callback, outside any awaited call.
+    return new Promise((_resolve, reject) => setImmediate(() => { reject(lost); client.emit('error', lost); }));
+  };
+  client.release = (error) => { client.released.push(error); };
+  pool.connect = async () => client;
+  const persistence = new PostgresPersistence({ pool, onPoolError: () => {} });
+  await assert.rejects(persistence.transaction((inner) => inner.query('INSERT')), /Connection terminated unexpectedly/);
+  assert.deepEqual(client.released, [lost], 'the broken client is destroyed, not returned to the pool');
+  assert.equal(client.listenerCount('error'), 0, 'the listener is removed on release');
+});
+
+test('the work outlook reports no wake-up when nothing is scheduled, and never a negative one', async () => {
+  const outlook = async (wakeMs) => new PostgresPersistence({ pool: { on() {}, query: async () => ({ rows: [{ remaining: 0, wake_ms: wakeMs }] }) } }).workOutlook();
+  assert.deepEqual(await outlook(null), { remaining: 0, wakeInMs: null });
+  assert.deepEqual(await outlook('-1500'), { remaining: 0, wakeInMs: 0 });
+  assert.deepEqual(await outlook('2500'), { remaining: 0, wakeInMs: 2500 });
+});
+
 test('postgres settings carry a statement timeout that can be tuned but not disabled', () => {
   assert.equal(persistenceSettings(PG_ENV).pool.statement_timeout, 30000);
   assert.equal(persistenceSettings({ ...PG_ENV, PG_STATEMENT_TIMEOUT_MS: '5000' }).pool.statement_timeout, 5000);

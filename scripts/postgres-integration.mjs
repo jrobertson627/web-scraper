@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
@@ -29,6 +29,8 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 
 const { Pool } = pg;
 const pool = new Pool({ max: 8 });
+// .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
+mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-test-'));
 after(async () => { await pool.end(); });
 
@@ -398,7 +400,9 @@ test('real PostgreSQL persistence and process restart', async () => {
     const result = await worker.runWorkerOnce('assembly-worker');
     assert.deepEqual(transport.calls, ['https://www.sports-reference.com/cbb/schools/']);
     assert.equal(result.processed, 1);
-    assert.deepEqual(result.jobs.map((job) => [job.key, job.state]), [['sports-reference:www.sports-reference.com/cbb/schools:school_index', 'parsed']]);
+    // runOnce reports job counts by state, not the jobs themselves.
+    assert.deepEqual(result.counts, { parsed: 1 });
+    assert.equal((await worker.persistence.getJob('sports-reference:www.sports-reference.com/cbb/schools:school_index')).state, 'parsed');
     const schedule = await pool.query('SELECT last_request_started_at FROM host_request_schedule WHERE host = $1', ['www.sports-reference.com']);
     assert.ok(Math.abs(new Date(schedule.rows[0].last_request_started_at).getTime() - Date.now()) < 60_000, 'request schedule holds real time');
     await worker.seedRootJob();
@@ -622,7 +626,8 @@ function failingCommitPool(target, mode) {
   return { query: (text, values) => target.query(text, values), end: async () => {},
     connect: async () => {
       const client = await target.connect();
-      return { release: (error) => client.release(error), query: async (text, values) => {
+      return { release: (error) => client.release(error), on: (...args) => client.on(...args), off: (...args) => client.off(...args),
+        query: async (text, values) => {
         if (!failed && /INSERT INTO players/.test(text)) {
           failed = true;
           if (mode === 'deadlock') throw Object.assign(new Error('deadlock detected'), { code: '40P01' });

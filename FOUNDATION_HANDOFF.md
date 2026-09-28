@@ -1,6 +1,6 @@
 # Foundation validation and handoff
 
-This is the provider-neutral foundation handoff for issue #6. It proves behavior with synthetic fixtures, not permission to scrape a real source. The seven-snapshot default `npm run start:local` command is a quick readiness smoke; `fixtures/foundation-corpus.mjs` is the broader raw-HTML fixture chain used by `test/issue-6.test.mjs`.
+This is the provider-neutral foundation handoff for issue #6. It proves behavior with synthetic fixtures, not permission to scrape a real source. The seven-snapshot default `npm run start:local` command is a quick readiness smoke; `fixtures/foundation-corpus.mjs` is the broader raw-HTML fixture chain used by `test/fixture-chain-smoke.test.mjs`.
 
 ## Runbook and current evidence
 
@@ -66,7 +66,7 @@ This is the fixture composition input shape, not a file automatically loaded by 
 }
 ```
 
-Production worker configuration additionally requires a matching authorization and versioned data contract. The current `start:worker` command validates those gates and exits because no production parsers are registered yet. Do not infer provider authorization from passing fixtures.
+Production worker configuration additionally requires a matching authorization and versioned data contract. `start:worker` validates those gates before it builds the worker. Do not infer provider authorization from passing fixtures.
 
 ## Dependency ownership
 

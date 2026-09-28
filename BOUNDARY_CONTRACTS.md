@@ -2,22 +2,26 @@
 
 The application has six internal boundaries. Consumers import their narrow entry point through the package exports in `package.json`; fixture adapters, SQL mappings, selectors, and framework objects remain internal.
 
+The port methods below are the ones `assertBoundaryPort` checks (`BOUNDARY_PORT_METHODS` in `src/contracts/boundaries.mjs`); a test keeps this table in step with that list.
+
 | Boundary | Public entry point | Port methods | Allowed implementation dependencies |
 | --- | --- | --- | --- |
 | Fetcher | `web-scraper-foundation/fetcher` | `fetch` | Node runtime, contracts |
 | Discovery | `web-scraper-foundation/discovery` | `discover` | contracts |
-| Parsers | `web-scraper-foundation/parsers` | `get` | contracts |
+| Parsers | `web-scraper-foundation/parsers` | `get`, `parse` | contracts, Cheerio (Sports Reference parsers) |
 | Domain normalization | `web-scraper-foundation/domain` | `normalize` | contracts |
-| Persistence | `web-scraper-foundation/persistence` | claim, transition, parse/page commit, recovery; keyed and paged reads (below) | Node runtime, contracts, pinned PostgreSQL driver |
-| API/UI | `web-scraper-foundation/api` | stable school, season, game, and health reads | Node runtime, contracts, configuration gate |
+| Persistence | `web-scraper-foundation/persistence` | `claimNextJob`, `listJobs`, `getJob`, `transitionJob`, `recordParse`, `commitPage`, `commitPageAndTransition`, `recoverExpiredClaims`; plus the read port below | Node runtime, contracts, pinned PostgreSQL driver (loaded only for a real pool) |
+| API/UI | `web-scraper-foundation/api` | `listSchools`, `listSeasons`, `listGames`, `getGame`, `health` | Node runtime, contracts, configuration gate |
 
-Shared immutable constructors live in `web-scraper-foundation/contracts`. They define page types, jobs, snapshots, fetch/discovery/parse/normalization results, provenance, reconciliation issues, and query models. The composition root is the only module that assembles implementations and fixture adapters. It has two assemblies: `createFixtureApplication` for tests and local mode (fake time, fixture pages, in-memory persistence by default; it refuses the real `HttpTransport`), and `createWorkerApplication` for a real crawl. The worker assembly validates the configuration in worker mode, so the authorization and data-contract gate runs first, and accepts only real parts: the system clock and a sleep that waits (checked at startup), `HttpTransport`, `PostgresPersistence`, the filesystem raw store, a production parser for every page type, and a source adapter for the configured provider (`SportsReferenceSourceAdapter` by default). Parsers are injected as a `ParserRegistry`; `createProductionParserRegistry` holds the production list, which stays empty until the phase 2 parsers (#39-#42) exist, so the worker refuses to start until then.
+Shared immutable constructors live in `web-scraper-foundation/contracts`. They define page types, jobs, snapshots, fetch/discovery/parse/normalization results, provenance, reconciliation issues, and query models. The composition root is the only module that assembles implementations and fixture adapters. It has two assemblies: `createFixtureApplication` for tests and local mode (fake time, fixture pages, in-memory persistence by default; it refuses the real `HttpTransport`), and `createWorkerApplication` for a real crawl. The worker assembly validates the configuration in worker mode, so the authorization and data-contract gate runs first, and accepts only real parts: the system clock and a sleep that waits (checked at startup), `HttpTransport`, `PostgresPersistence`, the filesystem raw store, a production parser for every page type, and a source adapter for the configured provider (`SportsReferenceSourceAdapter` by default). Parsers are injected as a `ParserRegistry`; `createProductionParserRegistry` registers the five Sports Reference parsers (#39-#42), and the worker refuses to start if a configured `pageType@version` has no production parser.
+
+The PostgreSQL adapter loads the `pg` driver only when it creates a real pool, so local mode and every test that injects a fake pool run without the driver installed.
 
 Discovery and parsers consume snapshots and never receive transport or persistence. Domain normalization consumes parsed documents and contract values, not persistence records. API/UI receives only the five-method query port (`listSchools`, `listSeasons`, `listGames`, `getGame`, `health`), so a handler cannot claim crawl work or call upstream transport.
 
 ## API and persistence read interface
 
-The query service is built on a persistence read port (`BOUNDARY_PORT_METHODS.persistenceReads`) that both the PostgreSQL and in-memory adapters implement. Each API route maps to exactly one read; no route loads the whole read model.
+The query service is built on a persistence read port (`BOUNDARY_PORT_METHODS.persistenceReads`: `listSchools`, `listSeasons`, `listGames`, `getGame`, `health`) that both the PostgreSQL and in-memory adapters implement. Each API route maps to exactly one read; no route loads the whole read model.
 
 | Route | Persistence read | Returns | PostgreSQL statement |
 | --- | --- | --- | --- |

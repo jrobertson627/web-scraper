@@ -3,7 +3,7 @@
 // against the same explicitly disposable database; never run on its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
@@ -19,6 +19,8 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 }
 
 const { Pool } = pg;
+// .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
+mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-ops-test-'));
 
 async function reset(pool) {
@@ -136,10 +138,15 @@ test('API reads are keyed or keyset-paged statements that PostgreSQL can serve f
   assert.equal(health.jobStates.parsed, foundationCorpus().length);
   assert.equal(health.sourceFetches, foundationCorpus().length);
 
+  // The fixture clock stamps fetches in January 2026, but the status window
+  // trails the database clock, so place the fetches relative to it: one
+  // outside the hour, the rest inside.
+  await pool.query(`UPDATE source_fetches SET fetched_at = clock_timestamp()
+    - CASE WHEN id = (SELECT min(id) FROM source_fetches) THEN interval '2 hours' ELSE interval '1 minute' END`);
   const crawl = await reads.crawlStatus({ windowMs: 3_600_000 });
   assert.equal(crawl.jobs.filter((row) => row.state === 'parsed').reduce((sum, row) => sum + row.count, 0), foundationCorpus().length);
   assert.equal(crawl.fetches.total, foundationCorpus().length);
-  assert.equal(crawl.fetches.inWindow, foundationCorpus().length);
+  assert.equal(crawl.fetches.inWindow, foundationCorpus().length - 1);
   assert.equal(summarizeCrawlStatus(crawl).totals.remaining, 0);
 
   statements.length = 0;

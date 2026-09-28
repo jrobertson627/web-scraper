@@ -51,6 +51,16 @@ test('migration hardening preserves explicit state and provenance invariants', (
   assert.match(sql, /source_fetch_ids JSONB NOT NULL/);
 });
 
+test('one claim CHECK replaces the overlapping 001 and 004 claim constraints', () => {
+  const consolidation = readFileSync(join(migrationRoot, '011_claim_check_consolidation.sql'), 'utf8').replaceAll('\r\n', '\n');
+  // Drops 001's unnamed claim CHECK found by its definition, then re-adds the 004 name with the combined rule.
+  assert.match(consolidation, /conname <> 'crawl_jobs_claim_state_check'\s+AND pg_get_constraintdef\(oid\) LIKE '%claim_owner IS NOT NULL%'/);
+  assert.match(consolidation, /IF legacy IS NOT NULL THEN\s+EXECUTE format\('ALTER TABLE crawl_jobs DROP CONSTRAINT %I', legacy\);/);
+  assert.match(consolidation, /ADD CONSTRAINT crawl_jobs_claim_state_check CHECK \(\s+CASE WHEN state IN \('fetching','fetched'\)\s+THEN claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND lease_generation IS NOT NULL\s+ELSE claim_owner IS NULL AND claim_expires_at IS NULL AND lease_generation IS NULL/);
+  // 004 skips its ADD when the name exists, so a repeat run of every file keeps the combined rule.
+  assert.match(sql, /IF NOT EXISTS \(SELECT 1 FROM pg_constraint WHERE conname = 'crawl_jobs_claim_state_check'\)/);
+});
+
 test('parsed-document storage uses named core stat columns with value states beside them', () => {
   // Normalized to LF so a Windows checkout with core.autocrlf still matches the multi-line column list.
   const storage = readFileSync(join(migrationRoot, '008_parsed_document_storage.sql'), 'utf8').replaceAll('\r\n', '\n');

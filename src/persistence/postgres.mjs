@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import pg from 'pg';
 import {
   DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON,
   assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
@@ -17,7 +17,13 @@ import { writeNormalizedPage } from './postgres-domain.mjs';
 // instead of holding a lease or a pool client indefinitely.
 import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
 
-const { Pool } = pg;
+// The driver is loaded only when a real pool is created, so fixture and local
+// mode (and the adapter's fake-pool tests) run without pg installed.
+const require = createRequire(import.meta.url);
+function newPool(config) {
+  const { Pool } = require('pg');
+  return new Pool(config);
+}
 const CHECKSUM = /^[0-9a-f]{64}$/;
 const FINAL_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 const FAILURE_STATES = new Set(['retry_wait', 'operator_stop', 'parse_failed', 'permanently_failed']);
@@ -108,7 +114,7 @@ export function guardPool(pool, onError = logPoolError) {
 export class PostgresPersistence {
   // requestTimeoutMs must be at least the workers' request policy timeout; the
   // default is the largest timeout a policy may set.
-  constructor({ pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
+  constructor({ pool = newPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
     authorizeOperator = (id) => Boolean(id), onPoolError,
     maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES, requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
     orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS } = {}) {
@@ -127,15 +133,24 @@ export class PostgresPersistence {
     // A client whose ROLLBACK failed may still be inside the aborted
     // transaction, so it is destroyed rather than returned to the pool.
     let broken;
+    // A checked-out client whose connection drops (a database restart, or a
+    // terminated backend) fails its query and also emits 'error'. pg-pool
+    // listens only while a client is idle, so without this listener that event
+    // would crash the process instead of failing the transaction as transient.
+    const onError = (error) => { broken ??= error; };
+    client.on?.('error', onError);
     try {
       await client.query('BEGIN');
       const result = await action(client);
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      try { await client.query('ROLLBACK'); } catch (rollbackError) { broken = rollbackError; /* preserve the original error */ }
+      try { await client.query('ROLLBACK'); } catch (rollbackError) { broken ??= rollbackError; /* preserve the original error */ }
       throw error;
-    } finally { client.release(broken); }
+    } finally {
+      client.off?.('error', onError);
+      client.release(broken);
+    }
   }
 
   async addJob(job) {
@@ -215,10 +230,12 @@ export class PostgresPersistence {
         SELECT c.id, c.state FROM crawl_jobs c JOIN live p ON c.parent_job_id = p.id
         WHERE p.state NOT IN ('operator_stop','parse_failed','permanently_failed'))
       SELECT (SELECT count(*)::int FROM live WHERE state IN ('pending','retry_wait','fetching','fetched')) AS remaining,
-        (SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (min(CASE WHEN state = 'retry_wait' THEN next_allowed_at ELSE claim_expires_at END)
-          - clock_timestamp())) * 1000))::bigint FROM crawl_jobs WHERE state IN ('retry_wait','fetching','fetched')) AS wake_ms`);
+        (SELECT CEIL(EXTRACT(EPOCH FROM (min(CASE WHEN state = 'retry_wait' THEN next_allowed_at ELSE claim_expires_at END)
+          - clock_timestamp())) * 1000)::bigint FROM crawl_jobs WHERE state IN ('retry_wait','fetching','fetched')) AS wake_ms`);
     const row = result.rows[0];
-    return { remaining: row.remaining, wakeInMs: row.wake_ms == null ? null : Number(row.wake_ms) };
+    // Clamped here, not with SQL GREATEST, which ignores NULL and would turn
+    // "nothing scheduled" into 0.
+    return { remaining: row.remaining, wakeInMs: row.wake_ms == null ? null : Math.max(0, Number(row.wake_ms)) };
   }
 
   async renewClaim(key, lease) {
@@ -620,7 +637,7 @@ export async function assertSchemaCurrent(pool, expected = expectedMigrationVers
 // default. Options left undefined take the PostgresPersistence defaults.
 export async function openPostgresPersistence({
   pool: poolConfig, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries,
-  createPool = (config) => new Pool(config),
+  createPool = newPool,
 } = {}) {
   const pool = createPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
   const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries });
