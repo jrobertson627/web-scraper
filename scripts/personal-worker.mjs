@@ -5,8 +5,11 @@ const readRecord = (name) => JSON.parse(readFileSync(new URL(`../config/personal
 const authorization = readRecord('authorization');
 const dataContract = readRecord('data-contract');
 
+// `node scripts/personal-worker.mjs [worker|reprocess] [args...]`: the same
+// records for the crawl and for offline reprocessing of its stored snapshots.
 const { exitCode } = await runCli({
-  mode: 'worker',
+  mode: process.argv[2] ?? 'worker',
+  args: process.argv.slice(3),
   env: {
     ...process.env,
     PROVIDER_ID: authorization.providerId,

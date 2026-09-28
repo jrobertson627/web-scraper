@@ -15,6 +15,8 @@ export const BOUNDARY_PORT_METHODS = Object.freeze({
   api: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'getGame', 'health']),
   // The keyed, paged reads the query service is built on; see BOUNDARY_CONTRACTS.md.
   persistenceReads: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'getGame', 'health']),
+  // What offline reprocessing (application/reprocess.mjs) needs; see PARSER_NORMALIZATION.md.
+  persistenceReprocess: Object.freeze(['listJobsForReprocess', 'getJob', 'lastSuccessfulFetch', 'commitReprocess']),
 });
 
 export function deepFreeze(value) {

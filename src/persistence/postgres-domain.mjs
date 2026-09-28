@@ -147,10 +147,19 @@ async function upsertPlayerRows(client, { table, owner, columns, entries }) {
     rows: lastByKey(entries.filter((entry) => !entry.playerId), (entry) => `${entry.ownerId}:${entry.rowIndex}`).map(row) });
 }
 
-async function writeSeason(client, job, page, provenance) {
+// A superseding revision (a parser change over the same raw body) replaces a
+// record's row sets instead of upserting over them, so rows the new parser no
+// longer emits are removed. Identity-keyed rows (schools, school seasons,
+// players, team_seasons, games) are upserted either way.
+async function writeSeason(client, job, page, provenance, { replace = false } = {}) {
   const data = page.data;
   const seasonId = await upsertSchoolSeason(client, job, data.endingYear, provenance);
   if (!seasonId) throw new Error('season has no stored school identity');
+  if (replace) {
+    for (const table of ['season_rosters', 'player_season_stats', 'team_season_stats']) {
+      await client.query(`DELETE FROM ${table} WHERE school_season_id = $1`, [seasonId]);
+    }
+  }
   const summary = data.summary;
   const tournament = summary.ncaaTournament;
   const summaryValues = {
@@ -226,9 +235,14 @@ async function resolveNeutralSite(client, providerId, boxScorePaths) {
   [providerId, boxScorePaths]);
 }
 
-async function writeGameLog(client, job, page, provenance) {
+async function writeGameLog(client, job, page, provenance, { replace = false } = {}) {
   const seasonId = await upsertSchoolSeason(client, job, page.data.endingYear, provenance);
   if (!seasonId) throw new Error('game log has no stored school identity');
+  if (replace) {
+    await client.query(`DELETE FROM game_log_row_stats WHERE game_log_row_id IN
+      (SELECT id FROM game_log_rows WHERE school_season_id = $1)`, [seasonId]);
+    await client.query('DELETE FROM game_log_rows WHERE school_season_id = $1', [seasonId]);
+  }
   const games = page.data.games.map((row, index) => ({ row, index, boxScorePath: linkedPath(job.provider_id, row.boxScoreUrl, job.source_url) }));
   const logColumns = ['provider_id', 'school_season_id', 'source_row_index', 'game_number', 'game_date', 'location', 'opponent_name',
     'opponent_school_path', 'game_type', 'result', 'game_status', 'overtimes', 'team_score', 'opponent_score',
@@ -256,7 +270,7 @@ async function writeGameLog(client, job, page, provenance) {
   await resolveNeutralSite(client, job.provider_id, [...new Set(games.map((game) => game.boxScorePath).filter(Boolean))]);
 }
 
-async function writeGame(client, job, page, provenance) {
+async function writeGame(client, job, page, provenance, { replace = false } = {}) {
   const data = page.data;
   const game = await client.query(`INSERT INTO games
     (provider_id,canonical_box_score_path,source_url,game_date,game_status,game_type,neutral_site,overtimes,line_scores,
@@ -273,6 +287,12 @@ async function writeGame(client, job, page, provenance) {
     data.description ?? null, data.venue ?? null, presentValue(data.attendance),
     JSON.stringify(data.extra ?? {}), JSON.stringify(provenance)]);
   const gameId = game.rows[0].id;
+  if (replace) {
+    const sides = '(SELECT id FROM game_teams WHERE game_id = $1)';
+    await client.query(`DELETE FROM player_game_stats WHERE game_team_id IN ${sides}`, [gameId]);
+    await client.query(`DELETE FROM team_game_stats WHERE game_team_id IN ${sides}`, [gameId]);
+    await client.query('DELETE FROM game_teams WHERE game_id = $1', [gameId]);
+  }
   const teams = lastByKey(data.teams, (team) => team.side);
   const sides = await upsertRows(client, {
     table: 'game_teams', columns: ['game_id', 'side', 'team_source_path', 'team_name', 'final_score', 'line_score', 'provenance'],
@@ -340,11 +360,17 @@ async function recordLogConflict(client, providerId, schoolSourcePath, observati
 export async function writeNormalizedPage(client, job, page, provenance, sourceFetchId) {
   if (page.jobKey !== `${job.provider_id}:${job.canonical_path}:${job.page_type}`) throw new Error('page job identity mismatch');
   if (!page.identity || !page.kind || !page.data) throw new Error('normalized page is incomplete');
-  const prior = await client.query(`SELECT id,data,provenance,data = $2::jsonb AS same
-    FROM normalized_page_revisions WHERE provider_id = $1 AND record_key = $3
-      AND disposition = 'accepted' ORDER BY id DESC LIMIT 1`,
+  const prior = await client.query(`SELECT r.id,r.data,r.provenance,r.parser_name,r.parser_version,f.checksum,
+      r.data = $2::jsonb AS same
+    FROM normalized_page_revisions r JOIN source_fetches f ON f.id = r.source_fetch_id
+    WHERE r.provider_id = $1 AND r.record_key = $3 AND r.disposition = 'accepted' ORDER BY r.id DESC LIMIT 1`,
   [job.provider_id, JSON.stringify(page.data), page.identity]);
-  const conflict = prior.rowCount > 0 && !prior.rows[0].same;
+  const accepted = prior.rows[0];
+  const differs = Boolean(accepted) && !accepted.same;
+  // A parser change over the same raw body supersedes the accepted revision;
+  // any other difference (the source changed) is quarantined for review.
+  const superseded = differs && await parserChangeOnly(client, accepted, provenance, sourceFetchId);
+  const conflict = differs && !superseded;
   const disposition = conflict ? 'quarantined' : 'accepted';
   const revision = await client.query(`INSERT INTO normalized_page_revisions
     (provider_id,record_key,page_type,source_fetch_id,parser_name,parser_version,data,provenance,disposition)
@@ -355,12 +381,14 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
   if (conflict && revision.rowCount) {
     // Deduplicated on the accepted revision and the conflicting content, so a
     // refetch of an unchanged conflicting page does not open a second issue.
-    const { id: previousRevisionId, ...previous } = prior.rows[0];
+    const previous = { data: accepted.data, provenance: accepted.provenance };
     await client.query(`INSERT INTO reconciliation_issues (issue_type,record_key,details,status,dedup_key)
       VALUES ('conflicting_page_reprocess',$1,$2::jsonb,'open',$3 || ':' || md5($4::jsonb::text)) ON CONFLICT DO NOTHING`,
     [page.identity, JSON.stringify({ previous, current: { data: page.data, provenance } }),
-      `revision-${previousRevisionId}`, JSON.stringify(page.data)]);
+      `revision-${accepted.id}`, JSON.stringify(page.data)]);
   }
+  // A superseding revision replaces the page's game-log observations.
+  if (superseded) await client.query('DELETE FROM game_observations WHERE parent_job_id = $1', [job.id]);
   for (const [index, observation] of (page.observations ?? []).entries()) {
     const key = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
     await client.query(`INSERT INTO page_observation_revisions
@@ -379,13 +407,14 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
       await recordLogConflict(client, job.provider_id, job.school_source_path, observation, sourceFetchId);
     }
   }
-  if (conflict) return { key: page.identity, conflict: true };
+  if (conflict) return { key: page.identity, conflict: true, superseded: false };
 
+  const options = { replace: superseded };
   if (page.kind === 'school_index') await writeSchoolIndex(client, job, page, provenance);
   if (page.kind === 'school_history') await writeSchoolHistory(client, job, page, provenance);
-  if (page.kind === 'season') await writeSeason(client, job, page, provenance);
-  if (page.kind === 'game_log') await writeGameLog(client, job, page, provenance);
-  if (page.kind === 'game') await writeGame(client, job, page, provenance);
+  if (page.kind === 'season') await writeSeason(client, job, page, provenance, options);
+  if (page.kind === 'game_log') await writeGameLog(client, job, page, provenance, options);
+  if (page.kind === 'game') await writeGame(client, job, page, provenance, options);
 
   for (const missing of page.unavailableCoverage ?? []) {
     const result = await client.query(`INSERT INTO unavailable_coverage
@@ -417,5 +446,14 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
       await recordLogConflict(client, job.provider_id, row.school_source_path, row.observation, row.source_fetch_id);
     }
   }
-  return { key: page.identity, conflict: false };
+  return { key: page.identity, conflict: false, superseded };
+}
+
+// True when the accepted revision was parsed from the same raw body (by
+// checksum) as this one, by a different parser.
+async function parserChangeOnly(client, accepted, provenance, sourceFetchId) {
+  if (accepted.parser_name === provenance.parserName && accepted.parser_version === provenance.parserVersion) return false;
+  if (!accepted.checksum) return false;
+  const current = await client.query('SELECT checksum FROM source_fetches WHERE id = $1', [sourceFetchId]);
+  return current.rows[0]?.checksum === accepted.checksum;
 }

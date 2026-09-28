@@ -25,7 +25,7 @@ test('page effects and final transition install atomically after validation', ()
   assert.equal(persistence.listJobs().length, 1);
 
   const result = persistence.commitPageAndTransition({ ...page, childJobs: [job('child')] }, { sourceFetchId: 'fetch-1' }, claimed.lease);
-  assert.deepEqual(result, { key: 'page', conflict: false });
+  assert.deepEqual(result, { key: 'page', conflict: false, superseded: false });
   assert.equal(persistence.getJob(claimed.key).state, 'parsed');
   assert.equal(persistence.pages.size, 1);
   assert.equal(persistence.observations.size, 1);

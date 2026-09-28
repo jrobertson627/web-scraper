@@ -4,16 +4,16 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, REPROCESS_STATES,
   assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
-import { canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
+import { PAGE_TYPES, canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
-import { assertFetchVerification } from './index.mjs';
+import { assertFetchVerification, assertReprocessSelection } from './index.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
 // instead of holding a lease or a pool client indefinitely.
 import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
@@ -425,6 +425,49 @@ export class PostgresPersistence {
       const result = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId));
       await this.transition(client, job, 'parsed');
       return result;
+    });
+  }
+
+  // Settled (parsed or parse_failed) jobs for offline reprocessing, keyset-paged
+  // on the job id. Same contract as InMemoryPersistence#listJobsForReprocess.
+  async listJobsForReprocess({ pageTypes = PAGE_TYPES, states = REPROCESS_STATES, limit, cursor } = {}) {
+    assertReprocessSelection(pageTypes, states);
+    const request = createPageRequest({ limit, cursor });
+    const after = decodePageCursor(request.cursor, ['integer']);
+    const result = await this.pool.query(`SELECT j.*, p.provider_id || ':' || p.canonical_path || ':' || p.page_type AS parent_key
+      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id
+      WHERE j.state = ANY($2::text[]) AND j.page_type = ANY($3::text[]) ${after ? 'AND j.id > $4' : ''}
+      ORDER BY j.id LIMIT $1`, [request.limit + 1, [...states], [...pageTypes], ...(after ?? [])]);
+    return createReadPage(result.rows, request.limit, (row) => [Number(row.id)], (row) => mapJob(row));
+  }
+
+  // Records a reprocessing of a settled job's stored snapshot, and commits its
+  // page when the parse was valid, in one transaction. A parse_failed job whose
+  // page is accepted becomes parsed. No lease is involved: settled jobs are
+  // never claimed, and the row lock keeps two reprocesses of one job apart.
+  // Same contract as InMemoryPersistence#commitReprocess.
+  async commitReprocess({ jobKey, parseRun, page, provenance }) {
+    return this.transaction(async (client) => {
+      const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(jobKey));
+      const job = found.rows[0];
+      if (!job || !REPROCESS_STATES.includes(job.state)) {
+        throw new Error(`reprocessing requires a parsed or parse_failed job. Current state: ${job?.state ?? 'missing'}`);
+      }
+      if (parseRun?.jobKey !== jobKey) throw new Error('reprocess source fetch does not belong to the job');
+      const run = await client.query(`INSERT INTO parse_runs
+        (job_id,source_fetch_id,parser_name,parser_version,status,warnings,failure_details,parsed_at)
+        SELECT $1,f.id,$3,$4,$5,$6::jsonb,$7::jsonb,$8 FROM source_fetches f
+        WHERE f.id = $2 AND f.job_id = $1 AND f.checksum IS NOT NULL RETURNING id`,
+      [job.id, sqlId('fetch', parseRun.sourceFetchId), parseRun.parserName, parseRun.parserVersion, parseRun.status,
+        JSON.stringify(parseRun.warnings ?? []), JSON.stringify(parseRun.failureDetails ?? null), parseRun.parsedAt ?? new Date()]);
+      if (!run.rowCount) throw new Error('reprocess source fetch does not belong to the job');
+      const parseRunId = portId('parse', run.rows[0].id);
+      if (!page) return { parseRunId, committed: false };
+      if (page.jobKey !== jobKey || provenance?.sourceFetchId !== parseRun.sourceFetchId) throw new Error('reprocessed page does not match its parse run');
+      const written = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId));
+      const transitioned = job.state === 'parse_failed' && !written.conflict;
+      if (transitioned) await this.transition(client, job, 'parsed', { reprocessed: true, parserVersion: parseRun.parserVersion });
+      return { parseRunId, committed: true, ...written, transitioned };
     });
   }
 

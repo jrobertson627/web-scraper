@@ -20,6 +20,8 @@
     "start:local": "node src/application/cli.mjs local",
     "start:worker": "node src/application/cli.mjs worker",
     "start:worker:personal": "node scripts/personal-worker.mjs",
+    "reprocess": "node src/application/cli.mjs reprocess",
+    "reprocess:personal": "node scripts/personal-worker.mjs reprocess",
     "start:api": "node src/application/cli.mjs api",
     "status": "node src/application/cli.mjs status",
     "smoke:foundation": "node scripts/foundation-smoke.mjs",

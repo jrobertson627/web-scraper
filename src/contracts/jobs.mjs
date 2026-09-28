@@ -13,9 +13,15 @@ const TRANSITIONS = new Map([
   ['retry_wait', new Set(['fetching', 'permanently_failed'])],
   ['operator_stop', new Set(['retry_wait', 'permanently_failed'])],
   ['parsed', new Set()],
-  ['parse_failed', new Set()],
+  // Only offline reprocessing takes parse_failed -> parsed, when a fixed parser
+  // reads the stored snapshot. It holds no lease; a worker never claims a
+  // parse_failed job, and transitionJob needs a lease, so no worker can.
+  ['parse_failed', new Set(['parsed'])],
   ['permanently_failed', new Set()],
 ]);
+
+// Settled states whose stored snapshot offline reprocessing may parse again.
+export const REPROCESS_STATES = Object.freeze(['parsed', 'parse_failed']);
 
 // Both persistence adapters apply this cap when recovering jobs whose worker
 // disappeared: a job whose claim expires this many times without completing

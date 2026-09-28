@@ -1,11 +1,13 @@
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
-import { createFixtureApplication } from './composition-root.mjs';
+import { createFixtureApplication, createReprocessApplication } from './composition-root.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { runWorkerLoop } from './worker-loop.mjs';
 import { WorkerStartRefused, startProductionWorker } from './production-worker.mjs';
 import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
+import { PAGE_TYPES } from '../contracts/source.mjs';
+import { REPROCESS_STATES } from '../contracts/jobs.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
 import { createCrawlLog } from './crawl-log.mjs';
@@ -46,6 +48,58 @@ function parseDataContract(value) {
   try { return JSON.parse(value); } catch {
     throw new Error('data contract configuration is invalid JSON. Expected a data contract object; secret-bearing input was redacted.');
   }
+}
+
+// PARSER_VERSIONS overrides the parser version of some page types, as JSON,
+// for example {"box_score":"2"}; the rest stay at '1'. Configuration validation
+// checks the result.
+function parseParserVersions(value) {
+  if (!value) return undefined;
+  let overrides;
+  try { overrides = JSON.parse(value); } catch {
+    throw new Error('PARSER_VERSIONS is invalid JSON. Expected an object of page types to versions. Example: PARSER_VERSIONS={"box_score":"2"}');
+  }
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+    throw new Error('PARSER_VERSIONS is invalid. Expected an object of page types to versions. Example: PARSER_VERSIONS={"box_score":"2"}');
+  }
+  return { ...Object.fromEntries(PAGE_TYPES.map((pageType) => [pageType, '1'])), ...overrides };
+}
+
+// The worker configuration from the environment; worker and reprocess modes share it.
+function workerConfiguration(env) {
+  return validateConfiguration({
+    mode: 'worker', providerId: env.PROVIDER_ID ?? 'provider', allowedHosts: [env.PROVIDER_HOST ?? 'provider.example'],
+    rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
+    policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
+    eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+    authorization: parseAuthorization(env.AUTHORIZATION_JSON),
+    dataContract: parseDataContract(env.DATA_CONTRACT_JSON),
+    parserVersions: parseParserVersions(env.PARSER_VERSIONS),
+  });
+}
+
+const REPROCESS_USAGE = 'Example: npm run reprocess -- --page-type box_score --state parse_failed (or --job <job key>)';
+
+// --page-type and --state take one value or a comma-separated list and may
+// repeat; --job names one job key and may repeat.
+export function parseReprocessArgs(args) {
+  const selection = {};
+  const add = (field, value) => { selection[field] = [...(selection[field] ?? []), ...value.split(',').filter(Boolean)]; };
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    const value = args[index + 1];
+    const field = { '--page-type': 'pageTypes', '--state': 'states', '--job': 'jobKeys' }[flag];
+    if (!field || value === undefined || value.startsWith('--')) throw new Error(`reprocess argument ${flag} is invalid. ${REPROCESS_USAGE}`);
+    if (field === 'jobKeys') selection.jobKeys = [...(selection.jobKeys ?? []), value];
+    else add(field, value);
+    index += 1;
+  }
+  if (selection.jobKeys && (selection.pageTypes || selection.states)) throw new Error(`reprocess takes --job or a --page-type/--state selection, not both. ${REPROCESS_USAGE}`);
+  const unknownType = selection.pageTypes?.find((pageType) => !PAGE_TYPES.includes(pageType));
+  if (unknownType !== undefined) throw new Error(`reprocess --page-type ${unknownType} is invalid. Expected some of ${PAGE_TYPES.join(', ')}. ${REPROCESS_USAGE}`);
+  const unknownState = selection.states?.find((state) => !REPROCESS_STATES.includes(state));
+  if (unknownState !== undefined) throw new Error(`reprocess --state ${unknownState} is invalid. Expected ${REPROCESS_STATES.join(' or ')}. ${REPROCESS_USAGE}`);
+  return selection;
 }
 
 function configuredPort(env) {
@@ -117,6 +171,8 @@ export async function runCli({
   // Assembles the worker and returns { orchestrator, workerId?, close? }; see
   // startProductionWorker. Tests inject fakes here.
   startWorker = startProductionWorker,
+  // Assembles offline reprocessing; see createReprocessApplication.
+  createReprocess = createReprocessApplication,
 } = {}) {
   if (mode === 'local') {
     const app = createFixtureApplication({ events: crawlLog });
@@ -199,19 +255,44 @@ export async function runCli({
     }
   }
 
+  if (mode === 'reprocess') {
+    // Offline reprocessing of stored raw snapshots (#43): no transport is built.
+    let config;
+    let settings;
+    let selection;
+    try {
+      settings = persistenceSettings(env);
+      config = workerConfiguration(env);
+      selection = parseReprocessArgs(args);
+      if (settings.kind !== 'postgres') throw new Error('reprocess needs the durable store, but PERSISTENCE is memory. Example: PERSISTENCE=postgres');
+    } catch (error) {
+      stderr(`reprocess configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    let persistence;
+    try {
+      persistence = await openPostgres(settings);
+    } catch (error) {
+      stderr(`reprocess persistence unavailable: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.runtimeFailure };
+    }
+    try {
+      const app = createReprocess({ config, persistence, events: crawlLog });
+      const summary = await app.reprocess(selection);
+      stdout(JSON.stringify({ mode, ...summary }, null, 2));
+      return { exitCode: EXIT_CODES.success, summary };
+    } catch (error) {
+      stderr(`reprocess failed: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES[error?.exit] ?? EXIT_CODES.runtimeFailure };
+    } finally { await persistence.close(); }
+  }
+
   if (mode === 'worker') {
     let config;
     let settings;
     try {
       settings = persistenceSettings(env);
-      config = validateConfiguration({
-        mode: 'worker', providerId: env.PROVIDER_ID ?? 'provider', allowedHosts: [env.PROVIDER_HOST ?? 'provider.example'],
-        rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
-        policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
-        eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
-        authorization: parseAuthorization(env.AUTHORIZATION_JSON),
-        dataContract: parseDataContract(env.DATA_CONTRACT_JSON),
-      });
+      config = workerConfiguration(env);
     } catch (error) {
       stderr(`worker configuration rejected: ${safeMessage(error)}`);
       return { exitCode: EXIT_CODES.configurationRejected };
@@ -237,7 +318,7 @@ export async function runCli({
     } finally { await worker.close?.(); }
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, api, or status. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, reprocess, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 

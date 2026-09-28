@@ -15,8 +15,9 @@ import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, positiveInteger,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, REPROCESS_STATES, positiveInteger,
 } from '../contracts/jobs.mjs';
+import { PAGE_TYPES } from '../contracts/source.mjs';
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 
 const CLAIM_EXPIRED = 'claim expired before completion';
@@ -50,6 +51,15 @@ function assertChecksum(checksum) {
 function assertRawReference({ checksum, objectPath }) {
   assertChecksum(checksum);
   if (typeof objectPath !== 'string' || !objectPath) throw new Error('raw object path is missing. Expected the immutable store reference.');
+}
+
+export function assertReprocessSelection(pageTypes, states) {
+  if (!Array.isArray(pageTypes) || !pageTypes.length || pageTypes.some((pageType) => !PAGE_TYPES.includes(pageType))) {
+    throw new Error(`reprocess page types are invalid. Expected some of ${PAGE_TYPES.join(', ')}. Example: box_score`);
+  }
+  if (!Array.isArray(states) || !states.length || states.some((state) => !REPROCESS_STATES.includes(state))) {
+    throw new Error(`reprocess states are invalid. Expected some of ${REPROCESS_STATES.join(', ')}. Example: parse_failed`);
+  }
 }
 
 // Both adapters check a fetch's raw reference against the verification the
@@ -550,6 +560,10 @@ export class InMemoryPersistence {
 
   recordParse(run, lease) {
     this.#requireLease(run.jobKey, lease);
+    return this.#appendParseRun(run);
+  }
+
+  #appendParseRun(run) {
     const id = `parse-${this.parseRuns.length + 1}`;
     const record = Object.freeze({
       ...run,
@@ -561,6 +575,41 @@ export class InMemoryPersistence {
     });
     this.parseRuns.push(record);
     return id;
+  }
+
+  // Settled (parsed or parse_failed) jobs for offline reprocessing, keyset-paged
+  // by job key. Same contract as PostgresPersistence#listJobsForReprocess.
+  listJobsForReprocess({ pageTypes = PAGE_TYPES, states = REPROCESS_STATES, limit, cursor } = {}) {
+    assertReprocessSelection(pageTypes, states);
+    const entries = [...this.jobs.values()].filter((job) => states.includes(job.state) && pageTypes.includes(job.pageType))
+      .map((job) => ({ key: [job.key], item: () => cloneJob(job) }));
+    return memoryPage(entries, { limit, cursor }, ['string']);
+  }
+
+  // Records a reprocessing of a settled job's stored snapshot, and commits its
+  // page when the parse was valid, in one step. A parse_failed job whose page
+  // is accepted becomes parsed. No lease is involved: settled jobs are never
+  // claimed. Same contract as PostgresPersistence#commitReprocess.
+  commitReprocess({ jobKey, parseRun, page, provenance }) {
+    const job = this.jobs.get(jobKey);
+    if (!job || !REPROCESS_STATES.includes(job.state) || job.claim) {
+      throw new Error(`reprocessing requires a parsed or parse_failed job. Current state: ${job?.state ?? 'missing'}`);
+    }
+    if (parseRun?.jobKey !== jobKey || !this.sourceFetches.some((fetch) => fetch.id === parseRun.sourceFetchId && fetch.jobKey === jobKey && fetch.checksum)) {
+      throw new Error('reprocess source fetch does not belong to the job');
+    }
+    if (!page) return Object.freeze({ parseRunId: this.#appendParseRun(parseRun), committed: false });
+    if (page.jobKey !== jobKey || provenance?.sourceFetchId !== parseRun.sourceFetchId) throw new Error('reprocessed page does not match its parse run');
+    const staged = this.#stagePage(page, provenance);
+    const transitioned = job.state === 'parse_failed' && !staged.conflict;
+    if (transitioned) {
+      const next = cloneJob(staged.jobs.get(jobKey));
+      this.#applyTransition(next, 'parsed', { reprocessed: true, parserVersion: parseRun.parserVersion });
+      staged.jobs.set(jobKey, next);
+    }
+    const parseRunId = this.#appendParseRun(parseRun);
+    this.#installPage(staged);
+    return Object.freeze({ parseRunId, committed: true, key: staged.key, conflict: staged.conflict, superseded: staged.superseded, transitioned });
   }
 
   commitPage(page, provenance, lease) {
@@ -579,16 +628,26 @@ export class InMemoryPersistence {
     this.#applyTransition(job, 'parsed', {});
     staged.jobs.set(page.jobKey, job);
     this.#installPage(staged);
-    return Object.freeze({ key: staged.key, conflict: staged.conflict });
+    return Object.freeze({ key: staged.key, conflict: staged.conflict, superseded: staged.superseded });
   }
 
   #stagePage(page, provenance) {
     const key = page.identity ?? page.jobKey;
     const record = Object.freeze({ ...page, provenance });
     const previous = this.pages.get(key);
-    const conflict = Boolean(previous && !jsonEqual(previous.data, record.data));
+    const differs = Boolean(previous && !jsonEqual(previous.data, record.data));
+    // Same rule as PostgreSQL's writeNormalizedPage: a parser change over the
+    // same raw body replaces the accepted record; any other difference is a
+    // conflict held for review (PARSER_NORMALIZATION.md).
+    const superseded = differs && this.#parserChangeOnly(previous.provenance, provenance);
+    const conflict = differs && !superseded;
     const pages = new Map(this.pages);
     const observations = new Map(this.observations);
+    // A superseding revision replaces the page's observations rather than
+    // adding to them, so rows the new parser no longer emits disappear.
+    if (superseded) {
+      for (const [observationKey, observation] of observations) if (observation.parentKey === page.jobKey) observations.delete(observationKey);
+    }
     const observationHistory = [...this.observationHistory];
     const unavailableCoverage = new Map(this.unavailableCoverage);
     const reconciliationIssues = [...this.reconciliationIssues];
@@ -628,7 +687,16 @@ export class InMemoryPersistence {
         jobs.set(validated.key, newJobRecord(validated, now));
       }
     }
-    return { key, conflict, pages, observations, observationHistory, unavailableCoverage, reconciliationIssues, jobs };
+    return { key, conflict, superseded, pages, observations, observationHistory, unavailableCoverage, reconciliationIssues, jobs };
+  }
+
+  // True when two provenances name the same raw body (by checksum) and
+  // different parsers: the difference comes from the parser, not the source.
+  #parserChangeOnly(previous, current) {
+    const checksum = (sourceFetchId) => this.sourceFetches.find((fetch) => fetch.id === sourceFetchId)?.checksum;
+    const before = checksum(previous?.sourceFetchId);
+    return Boolean(before) && before === checksum(current?.sourceFetchId)
+      && (previous.parserName !== current.parserName || previous.parserVersion !== current.parserVersion);
   }
 
   #installPage(staged) {
