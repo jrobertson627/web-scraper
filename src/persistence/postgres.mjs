@@ -615,9 +615,15 @@ export async function assertSchemaCurrent(pool, expected = expectedMigrationVers
   if (missing.length) throw new Error(`database schema is behind: apply migrations/ before starting (missing ${missing.join(', ')})`);
 }
 
-export async function openPostgresPersistence({ pool: poolConfig, claimTimeoutMs, onPoolError } = {}) {
-  const pool = new Pool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
-  const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError });
+// The worker passes requestTimeoutMs from its request policy, so an orphaned
+// request is released soon after its real deadline rather than the 120 s
+// default. Options left undefined take the PostgresPersistence defaults.
+export async function openPostgresPersistence({
+  pool: poolConfig, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries,
+  createPool = (config) => new Pool(config),
+} = {}) {
+  const pool = createPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries });
   try {
     await assertSchemaCurrent(persistence.pool);
   } catch (error) {
