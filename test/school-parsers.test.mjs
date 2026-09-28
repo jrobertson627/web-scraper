@@ -126,7 +126,7 @@ test('real school captures parse into exact frozen documents', {
   }
 });
 
-test('the production registry exposes only the landed school parsers', () => {
+test('the production registry reports season and box_score as the parsers still missing', () => {
   const versions = Object.fromEntries(['school_index', 'school_history', 'season', 'game_log', 'box_score'].map((type) => [type, '1']));
-  assert.deepEqual(missingProductionParsers(createProductionParserRegistry(), versions), ['season@1', 'game_log@1', 'box_score@1']);
+  assert.deepEqual(missingProductionParsers(createProductionParserRegistry(), versions), ['season@1', 'box_score@1']);
 });
