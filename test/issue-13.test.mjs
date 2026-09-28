@@ -158,8 +158,8 @@ test('worker CLI uses distinct sanitized configuration and readiness exit codes'
     cwd: process.cwd(), encoding: 'utf8',
     env: { ...process.env, USER_AGENT: 'test (+ops@example.com)', AUTHORIZATION_JSON: authorization, DATA_CONTRACT_JSON: dataContract, RAW_STORE_ROOT: process.cwd() },
   });
-  assert.equal(missingAdapter.status, EXIT_CODES.workerNotReady);
-  assert.match(missingAdapter.stderr, /no production parser is registered/);
+  assert.equal(missingAdapter.status, EXIT_CODES.configurationRejected);
+  assert.match(missingAdapter.stderr, /a real crawl needs durable persistence/);
   assert.doesNotMatch(missingAdapter.stderr, /\n\s+at /);
 });
 

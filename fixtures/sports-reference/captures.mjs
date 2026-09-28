@@ -111,26 +111,7 @@ function schoolHistory(html, sitePath) {
 
 function score(text) { return /^\d+$/.test(text) ? present(Number(text)) : unavailable('not_played'); }
 
-function boxScore(html) {
-  const team = (side, index) => {
-    const start = html.indexOf(`id="sb_team_${index}"`);
-    const block = html.slice(start, html.indexOf('class="scores"', start) + 200);
-    const link = /<strong>\s*<a(?:\s+href="([^"]*)")?[^>]*>([\s\S]*?)<\/a>/.exec(block);
-    return {
-      side, name: decode(link[2]), schoolPath: schoolPathOf(link[1]),
-      finalScore: score(/<div class="score">(\d+)<\/div>/.exec(block)?.[1] ?? ''),
-      lineScore: [], stats: null, advanced: {}, players: [],
-    };
-  };
-  const teams = [team('away', 0), team('home', 1)];
-  return {
-    date: null,
-    status: teams.every((entry) => entry.finalScore.state === 'present') ? 'final' : 'incomplete',
-    gameType: null, description: null, venue: null, attendance: NOT_PARSED, overtimes: null, teams,
-  };
-}
-
-const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, box_score: boxScore });
+const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory });
 const productionParsers = createProductionParserRegistry();
 
 export function captureLinkDocument(pageType, sitePath) {

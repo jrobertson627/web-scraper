@@ -126,7 +126,7 @@ test('real school captures parse into exact frozen documents', {
   }
 });
 
-test('the production registry reports box_score as the only parser still missing', () => {
+test('the production registry has a parser for every page type', () => {
   const versions = Object.fromEntries(['school_index', 'school_history', 'season', 'game_log', 'box_score'].map((type) => [type, '1']));
-  assert.deepEqual(missingProductionParsers(createProductionParserRegistry(), versions), ['box_score@1']);
+  assert.deepEqual(missingProductionParsers(createProductionParserRegistry(), versions), []);
 });
