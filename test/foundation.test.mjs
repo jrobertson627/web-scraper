@@ -225,7 +225,7 @@ test('malformed parser input becomes a structural failure', () => {
   assert.match(result.error, /could not be parsed/);
 });
 
-test('normalization retains parsed box-score fields alongside normalized projections', () => {
+test('normalization keeps retained box-score fields alongside normalized projections and drops unlisted ones', () => {
   const canonicalPath = canonicalizeSourceUrl(createSourceUrl('p', 'https://allowed.example/box/one'));
   const result = new Normalizer().normalize('box_score', {
     date: '2026-01-02',
@@ -237,7 +237,8 @@ test('normalization retains parsed box-score fields alongside normalized project
   }, { jobKey: 'box', canonicalPath, observations: [] });
 
   assert.equal(result.data.venue, 'Fixture Arena');
-  assert.deepEqual(result.data.playerStats, [{ name: 'Player', points: 10 }]);
+  assert.equal(result.data.home, 'Fixture');
+  assert.equal('playerStats' in result.data, false, 'playerStats is not a data-contract field');
   assert.deepEqual(result.data.teams, [{ side: 'home', name: 'Fixture', stats: { rebounds: 30 } }]);
 });
 
