@@ -187,6 +187,7 @@ export async function assertRealTime({ clock, sleep } = {}) {
 // store, a production parser for every page type, and a source adapter matching
 // the authorized provider. The configuration is validated here in worker mode,
 // so the authorization and data-contract gate must pass before anything is built.
+// events is the crawl-log sink (crawl-log.mjs) for the fetcher and orchestrator.
 export async function createWorkerApplication({
   config: configInput,
   sourceAdapter = new SportsReferenceSourceAdapter(),
@@ -196,6 +197,7 @@ export async function createWorkerApplication({
   parsers = createProductionParserRegistry(),
   clock = systemClock,
   sleep = realSleep,
+  events = NO_CRAWL_EVENTS,
 } = {}) {
   const refuse = (reason) => new Error(`worker assembly refused: ${reason}`);
   if (!(transport instanceof HttpTransport)) throw refuse('transport must be HttpTransport; fixture and stub transports belong to createFixtureApplication');
@@ -219,7 +221,7 @@ export async function createWorkerApplication({
   if (missing.length) throw refuse(`no production parser is registered for ${missing.join(', ')}`);
 
   const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter });
-  const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts });
+  const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts, events });
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
   const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
@@ -231,6 +233,7 @@ export async function createWorkerApplication({
     persistence: assertBoundaryPort('persistence', persistence),
     rawStore: store,
     clock,
+    events,
   });
   let seeded;
   // Queues the school index once; addJob keeps an existing root job as it is.
@@ -249,6 +252,7 @@ export async function createWorkerApplication({
     rawStore: store,
     persistence,
     parsers,
+    events,
     orchestrator,
     rootJob,
     seedRootJob,
