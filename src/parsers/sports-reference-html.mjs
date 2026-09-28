@@ -25,6 +25,23 @@ export function sportsReferenceTable($, id) {
   return matches[0];
 }
 
+// Whether the page carries table #id at all, directly or inside a comment. For
+// tables a page may legitimately omit; sportsReferenceTable still checks there
+// is exactly one.
+export function hasSportsReferenceTable($, id) {
+  if ($('table').filter((_, table) => $(table).attr('id') === id).length) return true;
+  let found = false;
+  $.root().contents().add($.root().find('*').contents()).each((_, node) => {
+    if (node.type === 'comment' && String(node.data).includes(`id="${id}"`)) found = true;
+  });
+  return found;
+}
+
+// The data-stat names in a table's header, for optional columns.
+export function tableHeaderStats($, table) {
+  return new Set(table.find('thead [data-stat]').map((_, cell) => $(cell).attr('data-stat')).get());
+}
+
 export function assertTableLayout($, table, id, requiredStats) {
   if (!table?.length) throw new Error(`table #${id} is missing`);
   if (!table.find('tbody').length) throw new Error(`table #${id} has no tbody`);
