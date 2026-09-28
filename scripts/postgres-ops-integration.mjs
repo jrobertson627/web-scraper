@@ -79,7 +79,10 @@ test('refetching an unchanged conflicting page does not open a second issue', as
   const page = (name) => ({ jobKey: index.key, kind: 'school_index', identity: index.key,
     data: { schools: [{ path: '/school/a', name, to: 2026 }] },
     observations: [{ kind: 'school', parentKey: index.key, rowIndex: 0, eligible: true }] });
-  const fetch = async (body) => persistence.recordFetch({ jobKey: index.key, status: 200, ...raw.put(Buffer.from(body)) }, claimed.lease, raw);
+  const fetch = async (body) => {
+    const stored = await raw.put(Buffer.from(body));
+    return persistence.recordFetch({ jobKey: index.key, status: 200, ...stored }, claimed.lease, stored);
+  };
   await persistence.commitPage(page('Fixture A'), provenance(index, await fetch('accepted')), claimed.lease);
   assert.equal((await persistence.commitPage(page('Renamed'), provenance(index, await fetch('conflict-1')), claimed.lease)).conflict, true);
   assert.equal((await persistence.commitPage(page('Renamed'), provenance(index, await fetch('conflict-2')), claimed.lease)).conflict, true);

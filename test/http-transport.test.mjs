@@ -229,7 +229,7 @@ test('a real 304 cannot reuse an unverifiable immutable body', async () => {
     const job = run.claim();
     assert.equal((await run.fetcher.fetch(job, job.lease)).kind, 'fetched');
     run.advance(2_000);
-    run.rawStore.verify = () => ({ ok: false, reason: 'simulated checksum mismatch' });
+    run.rawStore.read = () => ({ ok: false, reason: 'simulated checksum mismatch' });
     const result = await run.fetcher.fetch(job, job.lease);
     assert.equal(result.kind, 'operator_stop');
     assert.equal(run.persistence.sourceFetches.length, 1);

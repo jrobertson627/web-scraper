@@ -95,13 +95,19 @@ export class IngestionOrchestrator {
         return { kind: 'permanently_failed', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       phase = 'snapshot';
-      const stored = this.rawStore.get(result.checksum);
-      const verification = this.rawStore.verify(result.checksum, stored?.objectPath);
-      if (!stored || !verification.ok) {
-        await this.persistence.transitionJob(job.key, 'operator_stop', job.lease, {
-          lastError: `raw snapshot ${result.checksum} is unavailable or failed durable verification after fetch: ${verification.reason ?? 'unavailable'}`,
-        });
-        return { kind: 'operator_stop', jobKey: job.key, pageType: job.pageType, reason: 'raw snapshot failed durable verification' };
+      // The Fetcher returns the body it verified against the durable object
+      // (#91), so it is not read and hashed again. Only a result without one
+      // is read back from the raw store.
+      let body = result.body;
+      if (!body) {
+        const stored = await this.rawStore.read(result.checksum);
+        if (!stored.ok) {
+          await this.persistence.transitionJob(job.key, 'operator_stop', job.lease, {
+            lastError: `raw snapshot ${result.checksum} is unavailable or failed durable verification after fetch: ${stored.reason ?? 'unavailable'}`,
+          });
+          return { kind: 'operator_stop', jobKey: job.key, pageType: job.pageType, reason: 'raw snapshot failed durable verification' };
+        }
+        body = stored.body;
       }
       await this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
       const snapshot = createSnapshot({
@@ -109,7 +115,7 @@ export class IngestionOrchestrator {
         parentKey: job.parentKey,
         schoolSourcePath: job.schoolSourcePath,
         sourceUrl: job.sourceUrl,
-        body: stored.body,
+        body,
         sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(job.sourceUrl.providerId, target, baseUrl),
       });
       phase = 'parse';
