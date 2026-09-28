@@ -2,10 +2,12 @@ import { createParseResult } from '../contracts/boundaries.mjs';
 import { parsedDocumentError } from '../contracts/parsed-documents.mjs';
 import { assertPageType } from '../contracts/source.mjs';
 import { BoxScoreParser } from './box-score.mjs';
+import { GameLogParser } from './game-log.mjs';
 import { SchoolHistoryParser } from './school-history.mjs';
 import { SchoolIndexParser } from './school-index.mjs';
+import { SeasonParser } from './season.mjs';
 
-export { BoxScoreParser, SchoolHistoryParser, SchoolIndexParser };
+export { BoxScoreParser, GameLogParser, SchoolHistoryParser, SchoolIndexParser, SeasonParser };
 
 export class ParserRegistry {
   #parsers = new Map();
@@ -66,6 +68,8 @@ export class FixtureParser {
 export const PRODUCTION_PARSERS = Object.freeze([
   new SchoolIndexParser(),
   new SchoolHistoryParser(),
+  new SeasonParser(),
+  new GameLogParser(),
   new BoxScoreParser(),
 ]);
 

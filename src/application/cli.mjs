@@ -3,10 +3,10 @@ import { pathToFileURL } from 'node:url';
 import { createFixtureApplication } from './composition-root.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { runWorkerLoop } from './worker-loop.mjs';
+import { WorkerStartRefused, startProductionWorker } from './production-worker.mjs';
 import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
-import { createProductionParserRegistry, missingProductionParsers } from '../parsers/index.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
 import { createCrawlLog } from './crawl-log.mjs';
 import { STATUS_WINDOW_MS, formatCrawlStatus, summarizeCrawlStatus } from './crawl-status.mjs';
@@ -114,7 +114,9 @@ export async function runCli({
   openPostgres = openPostgresPersistence,
   args = process.argv.slice(3),
   crawlLog = createCrawlLog({ write: stderr }),
-  startWorker,
+  // Assembles the worker and returns { orchestrator, workerId?, close? }; see
+  // startProductionWorker. Tests inject fakes here.
+  startWorker = startProductionWorker,
 } = {}) {
   if (mode === 'local') {
     const app = createFixtureApplication({ events: crawlLog });
@@ -214,33 +216,25 @@ export async function runCli({
       stderr(`worker configuration rejected: ${safeMessage(error)}`);
       return { exitCode: EXIT_CODES.configurationRejected };
     }
-    if (settings.kind === 'postgres') {
-      // Verify the durable store up front so a deploy surfaces an unreachable
-      // or unmigrated database now rather than once the worker can crawl.
-      try {
-        const persistence = await openPostgres({ ...settings, claimTimeoutMs: config.claimTimeoutMs });
-        await persistence.close();
-      } catch (error) {
-        stderr(`worker persistence unavailable: ${safeMessage(error)}`);
-        return { exitCode: EXIT_CODES.runtimeFailure };
+    let worker;
+    try {
+      worker = await startWorker({ config, settings, env, events: crawlLog, openPostgres });
+    } catch (error) {
+      if (error instanceof WorkerStartRefused) {
+        stderr(safeMessage(error));
+        return { exitCode: EXIT_CODES[error.exit] ?? EXIT_CODES.runtimeFailure };
       }
+      stderr(`worker startup failed: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.runtimeFailure };
     }
-    if (startWorker) {
-      // startWorker assembles the production worker and returns
-      // { orchestrator, workerId?, close? }. The loop runs until the work is
-      // done or SIGTERM/SIGINT stops it, then releases what it opened.
-      const worker = await startWorker({ config, settings, env });
-      try {
-        const result = await runWorkerLoop({ orchestrator: worker.orchestrator, workerId: worker.workerId ?? env.WORKER_ID ?? 'worker', log: stderr });
-        stdout(JSON.stringify({ mode, ...result }));
-        return { exitCode: EXIT_CODES.success, result };
-      } finally { await worker.close?.(); }
-    }
-    // The production assembly is createWorkerApplication; it needs the phase 2 parsers (#39-#42).
-    const missingParsers = missingProductionParsers(createProductionParserRegistry(), config.parserVersions);
-    const blocker = missingParsers.length ? `no production parser is registered for ${missingParsers.join(', ')}` : 'worker mode does not start createWorkerApplication yet';
-    stderr(`worker configuration accepted for ${config.providerId} (${settings.kind} persistence), but ${blocker}; no crawl started`);
-    return { exitCode: EXIT_CODES.workerNotReady };
+    // The loop runs until the work is done or SIGTERM/SIGINT stops it, then
+    // releases what startWorker opened.
+    try {
+      const result = await runWorkerLoop({ orchestrator: worker.orchestrator, workerId: worker.workerId ?? env.WORKER_ID ?? 'worker', log: stderr });
+      crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
+      stdout(JSON.stringify({ mode, ...result }));
+      return { exitCode: EXIT_CODES.success, result };
+    } finally { await worker.close?.(); }
   }
 
   stderr(`invalid runtime mode: ${mode}. Expected local, worker, api, or status. Example: npm run start:local`);

@@ -108,58 +108,10 @@ function schoolHistory(html, sitePath) {
   };
 }
 
-function season(html, sitePath) {
-  const links = [...html.matchAll(/<a href="([^"]*-gamelogs\.html)"[^>]*>Game Log<\/a>/g)].map((match) => match[1]);
-  const title = decode(/<h1[^>]*>([\s\S]*?)<\/h1>/.exec(html)?.[1] ?? '').replace(/\s+/g, ' ');
-  return {
-    school: title || sitePath,
-    endingYear: Number(/(\d{4})\.html$/.exec(sitePath)[1]),
-    gameLogUrl: links.length ? new URL(links[0], ORIGIN).href : null,
-    summary: {
-      wins: NOT_PARSED, losses: NOT_PARSED, confWins: NOT_PARSED, confLosses: NOT_PARSED,
-      srs: NOT_PARSED, sos: NOT_PARSED, offRtg: NOT_PARSED, defRtg: NOT_PARSED,
-      conference: null, coach: null, ncaaTournament: null,
-    },
-    roster: [],
-    teamTotals: null,
-    players: [],
-  };
-}
-
-const LOCATIONS = Object.freeze({ '': 'home', '@': 'away', N: 'neutral' });
 
 function score(text) { return /^\d+$/.test(text) ? present(Number(text)) : unavailable('not_played'); }
 
-function gameLog(html, sitePath) {
-  return {
-    endingYear: Number(/(\d{4})-gamelogs\.html$/.exec(sitePath)[1]),
-    games: dataRows(tableBody(html, 'team_game_log')).flatMap((row) => {
-      const date = cell(row, 'date');
-      if (!date?.text) return [];
-      const opponent = cell(row, 'opp_name_abbr');
-      const result = cell(row, 'team_game_result')?.text;
-      const final = result === 'W' || result === 'L';
-      const overtimes = cell(row, 'overtimes')?.text ?? '';
-      return [{
-        gameNumber: integerOrNull(cell(row, 'team_game_num_season')?.text),
-        date: date.text,
-        location: LOCATIONS[cell(row, 'game_location')?.text ?? ''] ?? null,
-        opponent: { name: opponent?.text || null, schoolPath: schoolPathOf(opponent?.href) },
-        gameType: cell(row, 'game_type')?.text || null,
-        result: final ? result : null,
-        status: final ? 'final' : 'incomplete',
-        overtimes: final ? (overtimes ? Number(/^(\d*)OT$/.exec(overtimes)?.[1] || 1) : 0) : null,
-        teamScore: score(cell(row, 'team_game_score')?.text ?? ''),
-        opponentScore: score(cell(row, 'opp_team_game_score')?.text ?? ''),
-        teamStats: null,
-        opponentStats: null,
-        boxScoreUrl: date.href ? new URL(date.href, ORIGIN).href : null,
-      }];
-    }),
-  };
-}
-
-const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory, season, game_log: gameLog });
+const READERS = Object.freeze({ school_index: schoolIndex, school_history: schoolHistory });
 const productionParsers = createProductionParserRegistry();
 
 export function captureLinkDocument(pageType, sitePath) {

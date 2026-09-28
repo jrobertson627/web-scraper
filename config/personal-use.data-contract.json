@@ -1,6 +1,6 @@
 {
   "providerId": "sports-reference",
-  "version": "personal-v2",
+  "version": "personal-v3",
   "purpose": "Single-operator, personal, non-commercial analysis",
   "retainedFields": [
     "schools.source_path",
@@ -13,18 +13,22 @@
     "schools.eligibility",
     "school_seasons.ending_year",
     "school_seasons.coverage_status",
+    "school_seasons.source_link",
     "seasons.team_record",
     "seasons.conference",
     "seasons.coach",
     "seasons.srs",
     "seasons.sos",
     "seasons.ratings",
+    "seasons.ap_final_rank",
     "seasons.roster_names_and_source_links",
     "seasons.roster_bio_fields",
     "seasons.team_aggregate_statistics",
     "seasons.opponent_aggregate_statistics",
     "seasons.player_totals_and_advanced_statistics",
     "seasons.ncaa_tournament_seed_region_and_results",
+    "game_logs.source_link",
+    "game_logs.game_number",
     "game_logs.date",
     "game_logs.opponent_name_and_source_link",
     "game_logs.home_away_neutral",
@@ -37,6 +41,10 @@
     "box_scores.venue",
     "box_scores.attendance",
     "box_scores.status",
+    "box_scores.game_type",
+    "box_scores.description",
+    "box_scores.overtime",
+    "box_scores.home_away_neutral",
     "box_scores.teams_and_final_scores",
     "box_scores.line_scores",
     "box_scores.team_basic_and_advanced_statistics",
@@ -50,5 +58,5 @@
   "sourceLinksRequired": true,
   "redistribution": "private",
   "retention": "Local personal retention until the operator deletes the project data",
-  "effectiveAt": "2026-09-26T00:00:00.000Z"
+  "effectiveAt": "2026-09-27T00:00:00.000Z"
 }

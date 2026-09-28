@@ -8,8 +8,12 @@ import pg from 'pg';
 import { PostgresPersistence } from '../src/persistence/postgres.mjs';
 import { createRawStore } from '../src/persistence/index.mjs';
 import { createFixtureApplication, createWorkerApplication } from '../src/application/composition-root.mjs';
+import { EXIT_CODES, runCli } from '../src/application/cli.mjs';
+import { createCrawlLog } from '../src/application/crawl-log.mjs';
+import { startProductionWorker } from '../src/application/production-worker.mjs';
 import { HttpTransport } from '../src/fetcher/http-transport.mjs';
 import { createParseResult } from '../src/contracts/boundaries.mjs';
+import { createQueryService } from '../src/api/index.mjs';
 import { PAGE_TYPES } from '../src/contracts/source.mjs';
 import { createProductionParserRegistry } from '../src/parsers/index.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
@@ -402,6 +406,49 @@ test('real PostgreSQL persistence and process restart', async () => {
   })();
 });
 
+test('worker mode runs the production worker end to end on PostgreSQL with the crawl log', async () => {
+  // runCli worker mode with the production startWorker (#97): the real clock and
+  // sleep, openPostgresPersistence on this database, and an HttpTransport that
+  // answers locally. The index lists no eligible school, so one request is made.
+  await reset();
+  class LocalHttpTransport extends HttpTransport {
+    calls = [];
+    async request({ url }) { this.calls.push(url); return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') }; }
+  }
+  const indexParser = { pageType: () => 'school_index', version: () => '1', parse: () => createParseResult({ kind: 'valid',
+    document: schoolIndexDocument([{ name: 'Former School', path: '/cbb/schools/former/men/', historyUrl: 'https://www.sports-reference.com/cbb/schools/former/men/', to: 2020 }]) }) };
+  const unused = (pageType) => ({ pageType: () => pageType, version: () => '1', parse: () => createParseResult({ kind: 'structural_failure', error: 'not expected' }) });
+  const record = (name) => JSON.parse(readFileSync(new URL(`../config/personal-use.${name}.json`, import.meta.url), 'utf8'));
+  const authorization = record('authorization');
+  const transport = new LocalHttpTransport();
+  const lines = [];
+  const output = [];
+  let worker;
+  const result = await runCli({
+    mode: 'worker', stdout: (line) => output.push(line), stderr: () => {},
+    env: { ...process.env, PERSISTENCE: 'postgres', PROVIDER_ID: authorization.providerId, PROVIDER_HOST: authorization.scope.allowedHosts[0],
+      USER_AGENT: 'web-scraper-test (+ops@example.com)', RAW_STORE_ROOT: join(localRoot, 'raw-cli-worker'),
+      AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(record('data-contract')) },
+    crawlLog: createCrawlLog({ write: (line) => lines.push(JSON.parse(line)) }),
+    startWorker: async (context) => {
+      worker = await startProductionWorker({ ...context, transport,
+        parsers: createProductionParserRegistry([indexParser, ...PAGE_TYPES.filter((type) => type !== 'school_index').map(unused)]) });
+      return worker;
+    },
+  });
+  assert.equal(result.exitCode, EXIT_CODES.success);
+  assert.deepEqual(transport.calls, ['https://www.sports-reference.com/cbb/schools/']);
+  assert.equal(worker.app.persistence.requestDeadlineMs, 30_000 + 10_000, 'policy requestTimeoutMs plus the orphan grace');
+  assert.deepEqual(JSON.parse(output.at(-1)).counts, { parsed: 1 });
+  const jobs = await pool.query('SELECT page_type, state FROM crawl_jobs');
+  assert.deepEqual(jobs.rows, [{ page_type: 'school_index', state: 'parsed' }]);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL')).rows[0].n, 0);
+  assert.ok(lines.some((line) => line.event === 'request.started'));
+  assert.deepEqual(lines.at(-1).jobStates, { parsed: 1 });
+  // The worker closed its pool; a query on it now fails.
+  await assert.rejects(worker.app.persistence.pool.query('SELECT 1'));
+});
+
 // Records every statement a persistence call sends, so the exact SQL can be
 // EXPLAINed afterwards.
 function recordingPool(target) {
@@ -482,6 +529,36 @@ test('a process clock skewed from the database clock neither rejects a valid lea
       assert.equal(await persistence.recoverExpiredClaims(new Date()), 1);
     });
   }
+});
+
+test('a field the data contract does not list is neither stored in PostgreSQL nor served', async () => {
+  // #89: every box score gains an unlisted `extra.broadcast` and every season
+  // an unlisted `summary.extra.preseason_poll` beside the listed conf_finish.
+  await reset();
+  const retainedFields = JSON.parse(readFileSync(new URL('../config/personal-use.data-contract.json', import.meta.url), 'utf8')).retainedFields;
+  const corpus = foundationCorpus().map((entry) => {
+    const match = /(<script id="fixture-document" type="application\/json">)([\s\S]*?)(<\/script>)/.exec(entry.body);
+    const document = JSON.parse(match[2]);
+    if (entry.url.includes('/box/')) document.extra = { broadcast: present('Network') };
+    else if (document.summary) document.summary.extra = { conf_finish: present(1), preseason_poll: present(3) };
+    else return entry;
+    return { ...entry, body: entry.body.replace(match[0], `${match[1]}${JSON.stringify(document)}${match[3]}`) };
+  });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 10000 });
+  const app = createFixtureApplication({ fixtureEntries: corpus, retainedFields,
+    sharedState: { persistence, rawStore: createRawStore('filesystem', join(localRoot, 'raw-retained')) } });
+  const result = await app.runWorkerOnce();
+  assert.equal(result.jobs.every((entry) => entry.state === 'parsed'), true);
+  const revisions = await pool.query(`SELECT data FROM normalized_page_revisions WHERE data::text LIKE '%broadcast%' OR data::text LIKE '%preseason_poll%'`);
+  assert.equal(revisions.rowCount, 0, 'revision data holds no unlisted field');
+  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM games WHERE extra::text LIKE '%broadcast%'`)).rows[0].n, 0);
+  const seasons = await pool.query('SELECT extra FROM team_seasons');
+  assert.ok(seasons.rowCount > 0);
+  for (const row of seasons.rows) assert.deepEqual(Object.keys(row.extra), ['conf_finish']);
+  const queries = createQueryService(persistence, { retainedFields });
+  const games = (await queries.listGames({ limit: 100 })).items;
+  assert.equal(games.length, 6);
+  assert.ok(games.every((game) => !('extra' in game)));
 });
 
 test('claim recovery caps a job whose worker keeps disappearing', async () => {
