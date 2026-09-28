@@ -69,6 +69,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `PG_STATEMENT_TIMEOUT_MS` | optional; server-side statement timeout (default 30000) | no |
 | `RAW_STORE_ROOT` | `/var/data/raw` | no |
 | `USER_AGENT` | transparent application name and operator contact, for example `web-scraper (+you@example.com)` | yes (it carries the operator's contact address) |
+| `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
 | `NODE_VERSION` | `22` | no |
 
 `PROVIDER_ID`, `PROVIDER_HOST`, `AUTHORIZATION_JSON` and `DATA_CONTRACT_JSON` are set by `start:worker:personal` from the checked-in records. If a future deployment uses `start:worker` directly, supply them as dashboard values; they are configuration, not secrets, but they are never echoed into logs either.

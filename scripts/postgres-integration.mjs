@@ -15,7 +15,7 @@ import { HttpTransport } from '../src/fetcher/http-transport.mjs';
 import { createParseResult } from '../src/contracts/boundaries.mjs';
 import { createQueryService } from '../src/api/index.mjs';
 import { PAGE_TYPES } from '../src/contracts/source.mjs';
-import { createProductionParserRegistry } from '../src/parsers/index.mjs';
+import { FixtureParser, ParserRegistry, createProductionParserRegistry } from '../src/parsers/index.mjs';
 import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contracts/source.mjs';
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
 import { boxScoreDocument, gameLogDocument, schoolIndexDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
@@ -716,4 +716,72 @@ test('retry transitions spend only the budget they name', async () => {
   await persistence.recordOperatorDisposition(job.key, { kind: 'release_retry', operatorId: 'ops', reason: 'resume' });
   stored = await persistence.getJob(job.key);
   assert.deepEqual([stored.state, stored.rateLimitAttempts, stored.failureAttempts], ['retry_wait', 0, 1]);
+});
+
+// Box scores at v2 drop each team's last player row and read the shifted layout
+// that v1 refuses; seasons at v2 rename the school.
+class BoxScoreV2 extends FixtureParser {
+  constructor() { super('box_score', '2'); }
+  parse(snapshot) {
+    const raw = /<script\s+id="fixture-document"[^>]*>([\s\S]*?)<\/script>/i.exec(snapshot.body.toString('utf8'))?.[1];
+    if (raw && JSON.parse(raw).layoutShift) {
+      return createParseResult({ kind: 'valid', document: boxScoreDocument({ date: '2026-03-01', status: 'scheduled',
+        away: { name: 'Shift Away', schoolPath: null }, home: { name: 'Shift Home', schoolPath: null } }) });
+    }
+    const result = super.parse(snapshot);
+    if (result.kind !== 'valid') return result;
+    return createParseResult({ ...result, document: { ...result.document,
+      teams: result.document.teams.map((team) => ({ ...team, players: team.players.slice(0, -1) })) } });
+  }
+}
+
+test('offline reprocessing supersedes accepted records, replaces their rows, and promotes a fixed parse failure', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 10000 });
+  const raw = createRawStore('filesystem', join(localRoot, 'raw-reprocess'));
+  const app = createFixtureApplication({ fixtureEntries: foundationCorpus({ faults: true }), sharedState: { persistence, rawStore: raw } });
+  await app.runWorkerOnce();
+  const requests = app.transport.calls.length;
+  const shift = 'fixture-provider:fixture.example/box/shift.html:box_score';
+  assert.equal((await persistence.getJob(shift)).state, 'parse_failed');
+  const count = async (sql) => (await pool.query(sql)).rows[0].n;
+  assert.equal(await count('SELECT count(*)::int AS n FROM player_game_stats'), 4);
+
+  const parsers = new ParserRegistry();
+  for (const pageType of PAGE_TYPES) parsers.register(new FixtureParser(pageType));
+  parsers.register(new BoxScoreV2()).register(new (class extends FixtureParser {
+    constructor() { super('season', '2'); }
+    parse(snapshot) {
+      const result = super.parse(snapshot);
+      return result.kind === 'valid' ? createParseResult({ ...result, document: { ...result.document, school: `${result.document.school} (v2)` } }) : result;
+    }
+  })());
+  const parserVersions = { ...Object.fromEntries(PAGE_TYPES.map((pageType) => [pageType, '1'])), box_score: '2', season: '2' };
+  const summary = await app.reprocess({ parsers, parserVersions });
+
+  assert.equal(app.transport.calls.length, requests, 'reprocessing makes no request');
+  assert.equal(summary.conflicts, 0);
+  assert.equal(summary.parseFailures, 0);
+  assert.equal(summary.promotedToParsed, 1);
+  const boxScores = (await pool.query("SELECT count(*)::int AS n FROM crawl_jobs WHERE page_type = 'box_score'")).rows[0].n;
+  const seasons = (await pool.query("SELECT count(*)::int AS n FROM crawl_jobs WHERE page_type = 'season'")).rows[0].n;
+  assert.equal(await count("SELECT count(*)::int AS n FROM parse_runs WHERE parser_version = '2'"), boxScores + seasons);
+  assert.equal((await persistence.getJob(shift)).state, 'parsed');
+  assert.equal(await count("SELECT count(*)::int AS n FROM games WHERE canonical_box_score_path = 'fixture.example/box/shift.html'"), 1);
+  // v2 dropped each team's last player: the superseded games' rows are replaced, not added to.
+  assert.equal(await count('SELECT count(*)::int AS n FROM player_game_stats'), 1);
+  assert.equal(await count("SELECT count(*)::int AS n FROM normalized_page_revisions WHERE disposition = 'quarantined'"), 0);
+  assert.equal(await count("SELECT count(*)::int AS n FROM reconciliation_issues WHERE status = 'open'"), 0);
+  const latest = await pool.query(`SELECT DISTINCT ON (record_key) record_key, parser_version, data FROM normalized_page_revisions
+    WHERE page_type IN ('game','season') AND disposition = 'accepted' ORDER BY record_key, id DESC`);
+  assert.ok(latest.rows.every((row) => row.parser_version === '2'), 'the latest accepted revision of every game and season is v2');
+  assert.ok(latest.rows.filter((row) => row.data.school).every((row) => row.data.school.endsWith(' (v2)')));
+  assert.equal((await app.queries.getGame('fixture-provider:fixture.example/box/one.html')).teams.find((team) => team.side === 'home').players.length, 1);
+
+  // Running it again adds no revision and changes no row.
+  const revisions = await count('SELECT count(*)::int AS n FROM normalized_page_revisions');
+  const again = await app.reprocess({ parsers, parserVersions });
+  assert.equal(again.superseded, 0);
+  assert.equal(await count('SELECT count(*)::int AS n FROM normalized_page_revisions'), revisions);
+  assert.equal(await count('SELECT count(*)::int AS n FROM player_game_stats'), 1);
 });

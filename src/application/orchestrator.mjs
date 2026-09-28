@@ -1,7 +1,5 @@
-import { createProvenance } from '../contracts/provenance.mjs';
-import { createSourceUrl } from '../contracts/source.mjs';
-import { createSnapshot } from '../contracts/boundaries.mjs';
 import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
+import { normalizeParsedPage, parseSnapshot, parserVersionFor, snapshotFor } from './page-pipeline.mjs';
 import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
 import { isTransientStoreError } from '../contracts/jobs.mjs';
 
@@ -19,8 +17,11 @@ const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed',
 
 export class IngestionOrchestrator {
   // events is the crawl-log sink (./crawl-log.mjs); hooks below are single emit calls.
-  constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock, events = NO_CRAWL_EVENTS }) {
+  // parserVersions ({ pageType: version }, from the configuration) chooses the
+  // parser for each page type; without it a job's queued version is used.
+  constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock, events = NO_CRAWL_EVENTS, parserVersions }) {
     this.events = events;
+    this.parserVersions = parserVersions;
     this.fetcher = fetcher;
     this.discovery = discovery;
     this.parsers = parsers;
@@ -110,51 +111,22 @@ export class IngestionOrchestrator {
         body = stored.body;
       }
       await this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
-      const snapshot = createSnapshot({
-        jobKey: job.key,
-        parentKey: job.parentKey,
-        schoolSourcePath: job.schoolSourcePath,
-        sourceUrl: job.sourceUrl,
-        body,
-        sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(job.sourceUrl.providerId, target, baseUrl),
-      });
+      const snapshot = snapshotFor(job, body);
       phase = 'parse';
-      const parserVersion = job.parserVersion ?? '1';
-      const parser = this.parsers.get(job.pageType, parserVersion);
-      const parsed = this.parsers.parse(job.pageType, parserVersion, snapshot);
-      await this.persistence.recordParse({
-        jobKey: job.key,
-        sourceFetchId: result.sourceFetchId,
-        parserName: job.pageType,
-        parserVersion: parser.version(),
-        status: parsed.kind,
-        warnings: parsed.warnings ?? [],
-        failureDetails: parsed.kind === 'structural_failure' ? { error: parsed.error } : null,
-        parsedAt: this.clock().toISOString(),
-      }, job.lease);
+      const { parsed, run } = parseSnapshot({
+        parsers: this.parsers, job, snapshot, parserVersion: parserVersionFor(job, this.parserVersions),
+        sourceFetchId: result.sourceFetchId, clock: this.clock,
+      });
+      await this.persistence.recordParse(run, job.lease);
       if (parsed.kind === 'structural_failure') {
         await this.persistence.transitionJob(job.key, 'parse_failed', job.lease, { failureReason: parsed.error });
         return { kind: 'parse_failed', jobKey: job.key, pageType: job.pageType, reason: parsed.error, warnings: parsed.warnings };
       }
       phase = 'normalize';
-      const discovered = this.discovery.discover(job.pageType, snapshot, parsed.document);
+      const { discovered, page, provenance } = normalizeParsedPage({
+        job, snapshot, parsed, run, discovery: this.discovery, normalizer: this.normalizer, clock: this.clock,
+      });
       this.events.emit('page.discovered', { jobKey: job.key, pageType: job.pageType, childKeys: discovered.childJobs.map((child) => child.key) });
-      const page = this.normalizer.normalize(job.pageType, parsed.document, {
-        jobKey: job.key,
-        canonicalPath: job.canonicalPath,
-        observations: discovered.observations,
-        childJobs: discovered.childJobs,
-        unavailableCoverage: discovered.unavailableCoverage,
-      });
-      const provenance = createProvenance({
-        providerId: job.sourceUrl.providerId,
-        canonicalPath: job.canonicalPath,
-        sourceUrl: job.sourceUrl,
-        sourceFetchId: result.sourceFetchId,
-        parserName: job.pageType,
-        parserVersion: parser.version(),
-        parsedAt: this.clock().toISOString(),
-      });
       phase = 'commit';
       const committed = await this.persistence.commitPageAndTransition(page, provenance, job.lease);
       return { kind: 'parsed', jobKey: job.key, pageType: job.pageType, warnings: [...(parsed.warnings ?? []), ...discovered.warnings], reconciliationIssues: committed.conflict ? 1 : 0 };

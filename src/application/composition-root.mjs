@@ -18,6 +18,7 @@ import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { SportsReferenceSourceAdapter } from './sports-reference-source-adapter.mjs';
 import { buildFixtureReconciliationReport } from './reconciliation.mjs';
+import { reprocessStoredPages } from './reprocess.mjs';
 import { NO_CRAWL_EVENTS, jobStateCounts } from './crawl-log.mjs';
 import { MAPPED_RETAINED_FIELDS } from '../contracts/retained-fields.mjs';
 import {
@@ -93,6 +94,7 @@ export function createFixtureApplication({
     rawStore,
     clock,
     events,
+    parserVersions: config.parserVersions,
   });
 
   async function runWorkerOnce(workerId = 'fixture-worker') {
@@ -152,6 +154,11 @@ export function createFixtureApplication({
     orchestrator,
     runWorkerOnce,
     previewDryRun,
+    // Offline reprocessing of the stored snapshots (#43). Tests pass an upgraded
+    // parser registry and versions; no transport is involved.
+    reprocess: ({ parsers: registry = parsers, parserVersions = config.parserVersions, ...selection } = {}) => reprocessStoredPages({
+      persistence, rawStore, parsers: registry, discovery, normalizer, clock, parserVersions, events, ...selection,
+    }),
     reconcile: () => {
       const report = buildFixtureReconciliationReport(persistence);
       events.emit('reconciliation.completed', { passed: report.passed,
@@ -238,6 +245,7 @@ export async function createWorkerApplication({
     rawStore: store,
     clock,
     events,
+    parserVersions: config.parserVersions,
   });
   let seeded;
   // Queues the school index once; addJob keeps an existing root job as it is.
@@ -264,5 +272,45 @@ export async function createWorkerApplication({
       await seedRootJob();
       return orchestrator.runOnce(workerId);
     },
+  };
+}
+
+// Production assembly for offline reprocessing (#43, `cli.mjs reprocess`). It
+// passes the same configuration gate as the worker, because it writes
+// provider-derived records, and accepts the same durable parts, but it builds
+// no Fetcher and takes no transport: it only reads stored raw snapshots.
+export function createReprocessApplication({
+  config: configInput,
+  sourceAdapter = new SportsReferenceSourceAdapter(),
+  persistence,
+  rawStore,
+  parsers = createProductionParserRegistry(),
+  clock = systemClock,
+  events = NO_CRAWL_EVENTS,
+} = {}) {
+  const refuse = (reason) => new Error(`reprocess assembly refused: ${reason}`);
+  const config = validateConfiguration(configInput, { clock });
+  if (config.mode !== 'worker') throw refuse(`configuration mode is ${config.mode}, expected worker`);
+  const adapter = assertSourceAdapter(sourceAdapter);
+  const providerId = adapter.providerId();
+  if (providerId !== config.providerId) throw refuse(`source adapter provider ${providerId} does not match configured provider ${config.providerId}`);
+  if (!(persistence instanceof PostgresPersistence)) throw refuse('persistence must be PostgresPersistence');
+  const store = rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
+  if (!(store instanceof FileRawStore)) throw refuse('raw store must be the filesystem raw store');
+  if (!(parsers instanceof ParserRegistry)) throw refuse('parsers must be a ParserRegistry');
+  const missing = missingProductionParsers(parsers, config.parserVersions);
+  // exit names the CLI exit code (EXIT_CODES.workerNotReady), as for the worker.
+  if (missing.length) throw Object.assign(refuse(`no production parser is registered for ${missing.join(', ')}`), { exit: 'workerNotReady' });
+  const discovery = assertBoundaryPort('discovery', new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter }));
+  const normalizer = assertBoundaryPort('domain', new Normalizer({ retainedFields: config.dataContract.retainedFields }));
+  return {
+    config,
+    persistence,
+    rawStore: store,
+    parsers,
+    reprocess: ({ pageTypes, states, jobKeys } = {}) => reprocessStoredPages({
+      persistence, rawStore: store, parsers, discovery, normalizer, clock, parserVersions: config.parserVersions, events,
+      ...(pageTypes ? { pageTypes } : {}), ...(states ? { states } : {}), ...(jobKeys ? { jobKeys } : {}),
+    }),
   };
 }
