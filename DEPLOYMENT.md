@@ -1,5 +1,7 @@
 # Deployment topology, environment, and secrets
 
+Day-to-day operation (starting, pausing, reviewing, parser upgrades) is in [`OPERATIONS_RUNBOOK.md`](OPERATIONS_RUNBOOK.md).
+
 This is the production topology on Render and the rules for configuration and secrets. It follows the decisions recorded on issue #52: the scraper only fills the database, and march-madness-tracker reads PostgreSQL directly.
 
 Nothing in this repository creates or changes Render resources by itself. `render.yaml` is a Blueprint that someone applies from the Render dashboard; until then it is documentation.

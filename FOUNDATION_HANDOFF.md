@@ -128,5 +128,7 @@ migration smoke passed: 7 versions, repeat-safe
 - [x] Public boundary imports and API read isolation are tested.
 - [x] Six package boundaries have distinct inputs, outputs, fixture ownership, and exclusions.
 - [x] Run migration smoke on a disposable PostgreSQL instance.
-- [ ] Install a licensed/authorized provider adapter and agreed field contract before any real crawl.
+- [x] Install a licensed/authorized provider adapter and agreed field contract before any real crawl: the private-use attestation and data contract (#25, `config/personal-use.*.json`), the Sports Reference adapter (#36), and retained-field enforcement (#89).
+
+The foundation handoff is complete. Operating the real system (start, pause, resume, review, parser upgrades, reconciliation, and migration testing) is covered by [`OPERATIONS_RUNBOOK.md`](OPERATIONS_RUNBOOK.md), which supersedes the operational notes above.
 - [x] Implement durable PostgreSQL repositories and validate process-level worker restart against them.

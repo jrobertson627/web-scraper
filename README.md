@@ -22,6 +22,8 @@ npm run review -- list  # pages stopped for review and open issues; show/hold/re
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
 npm run start:operator:personal  # PIN-protected page to start, check and stop a crawl (OPERATOR_PIN; DEPLOYMENT.md)
 npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
+npm run repair:raw    # raw-store inventory: missing or damaged objects and orphans (exit 5 when something needs repair)
+npm run robots:check -- robots.txt  # a saved robots.txt against the paths the crawler refuses
 npm run reconcile     # reconciliation report over PostgreSQL; exit 5 when it names failures (FOUNDATION_HANDOFF.md)
 npm test
 npm run test:postgres    # real, explicitly disposable PostgreSQL database
@@ -80,6 +82,7 @@ Duplicate discovery is counted within one process; persistence still deduplicate
 - `PARSER_NORMALIZATION.md`: versioned parsing, value states, provenance, conflict quarantine, and offline reprocessing after a parser upgrade.
 - `REQUEST_POLICY.md`: validated runtime scope and sample crawls (`CRAWL_SAMPLE`), pacing, cache, timeout, and retry rules.
 - `COMPOSITION_READ_BOUNDARY.md`: atomic fixture page commits, worker progress, dry-run preview, and read isolation.
+- `OPERATIONS_RUNBOOK.md`: how to start, watch, pause, resume, review, upgrade a parser, reconcile and test migrations in production.
 - `FOUNDATION_HANDOFF.md`: fixture matrix, reconciliation, transition/value glossary, package ownership, and live PostgreSQL evidence.
 - `migrations/`: ordered PostgreSQL schema migrations.
 - `test/`: behavior and smoke tests.
