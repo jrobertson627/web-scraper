@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { isIP } from 'node:net';
 
 // The PIN-protected operator trigger (#55): start, check and stop a crawl run
 // from a phone. It is its own server and route group, separate from the
@@ -12,6 +13,13 @@ import { createServer } from 'node:http';
 //   POST /operator/stop     ask the active run to stop after its current job
 // Every POST needs the PIN, as a form field or JSON `pin`, or an
 // `x-operator-pin` header. Anything else is 404 or 405.
+//
+// Wrong PINs are counted per client address (#125): a client that guesses wrong
+// too often is locked out alone, and another client's PIN still works. A much
+// higher global limit still bounds guessing from many addresses. The address is
+// the X-Forwarded-For entry the platform's proxy appended (trustedProxyHops
+// entries from the end), never an earlier, client-supplied one; without that
+// header, or with trustedProxyHops 0, it is the socket's peer address.
 //
 // A run is refused while this process runs one, and while any job holds a live
 // claim: that is another worker's run, judged by the job leases themselves
@@ -36,6 +44,29 @@ export function assertOperatorPin(pin) {
     throw new Error(`OPERATOR_PIN is missing or too short. Expected at least ${MIN_PIN_LENGTH} characters without surrounding spaces, set as a secret. Example: OPERATOR_PIN=<a long random value>`);
   }
   return pin;
+}
+
+// A key for the address a request came from. IPv4-mapped IPv6 becomes IPv4 and
+// an IPv6 address is reduced to its /64, since one subscriber holds the whole
+// prefix and could otherwise rotate through it. Not an address: null.
+export function clientKey(address) {
+  const bare = String(address ?? '').trim().replace(/%.*$/, '').toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(bare);
+  const value = mapped ? mapped[1] : bare;
+  const family = isIP(value);
+  if (family === 4) return value;
+  if (family !== 6) return null;
+  const [head, tail] = value.split('::');
+  const front = head ? head.split(':') : [];
+  const back = tail ? tail.split(':') : [];
+  const groups = value.includes('::') ? [...front, ...Array(8 - front.length - back.length).fill('0'), ...back] : front;
+  return `${groups.slice(0, 4).map((group) => Number.parseInt(group, 16).toString(16)).join(':')}::/64`;
+}
+
+export function clientOf(request, trustedProxyHops = 1) {
+  const entries = String(request.headers?.['x-forwarded-for'] ?? '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  const forwarded = trustedProxyHops > 0 && entries.length >= trustedProxyHops ? clientKey(entries[entries.length - trustedProxyHops]) : null;
+  return forwarded ?? clientKey(request.socket?.remoteAddress) ?? 'unknown';
 }
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
@@ -84,25 +115,49 @@ async function readBody(request) {
 // startRun(signal) starts a run and returns a promise of its result; status()
 // returns a progress summary; liveClaims() counts jobs holding a live claim;
 // unreviewedChallenges() lists challenge stops no operator has reviewed.
-// failures within lockoutMs of each other, maxFailures of them, lock every PIN
-// check for lockoutMs, so a short PIN cannot be guessed; a lockout also delays
-// the operator, which is the trade-off.
+// maxFailures wrong PINs from one client within lockoutMs lock that client's PIN
+// checks for lockoutMs. globalMaxFailures wrong PINs from anyone within
+// lockoutMs lock every client's, which is what bounds guessing from many
+// addresses; it also delays the operator, so it sits well above maxFailures.
+// At most maxTrackedClients addresses are remembered.
 export function createOperatorServer({
   pin, startRun, status, liveClaims, unreviewedChallenges = async () => [], clock = () => new Date(), maxFailures = 5, lockoutMs = 15 * 60_000,
-  onRunSettled = () => {},
+  globalMaxFailures = 30, trustedProxyHops = 1, maxTrackedClients = 10_000, onRunSettled = () => {},
 }) {
   const operatorPin = assertOperatorPin(pin);
-  let failures = [];
-  let lockedUntil = 0;
+  if (!Number.isSafeInteger(globalMaxFailures) || globalMaxFailures <= maxFailures) throw new Error('globalMaxFailures must be an integer above maxFailures');
+  if (!Number.isSafeInteger(trustedProxyHops) || trustedProxyHops < 0) throw new Error('trustedProxyHops must be zero or a positive integer');
+  const clients = new Map();
+  let globalFailures = [];
+  let globalLockedUntil = 0;
   let current = null;
   let last = null;
 
   const now = () => clock().getTime();
-  function authorized(supplied) {
-    if (now() < lockedUntil) return { ok: false, status: 429, message: 'Too many wrong PINs. Try again later.' };
-    if (pinMatches(operatorPin, supplied)) { failures = []; return { ok: true }; }
-    failures = [...failures.filter((at) => now() - at < lockoutMs), now()];
-    if (failures.length >= maxFailures) { lockedUntil = now() + lockoutMs; failures = []; }
+  function remember(client) {
+    let entry = clients.get(client);
+    if (!entry) {
+      if (clients.size >= maxTrackedClients) {
+        for (const [key, candidate] of clients) {
+          if (candidate.lockedUntil <= now() && candidate.failures.every((at) => now() - at >= lockoutMs)) clients.delete(key);
+        }
+        // Every remembered client is still counting: forget the oldest.
+        if (clients.size >= maxTrackedClients) clients.delete(clients.keys().next().value);
+      }
+      entry = { failures: [], lockedUntil: 0 };
+      clients.set(client, entry);
+    }
+    return entry;
+  }
+  function authorized(supplied, client) {
+    const wait = { ok: false, status: 429, message: 'Too many wrong PINs. Try again later.' };
+    if (now() < globalLockedUntil || now() < (clients.get(client)?.lockedUntil ?? 0)) return wait;
+    if (pinMatches(operatorPin, supplied)) { clients.delete(client); return { ok: true }; }
+    const entry = remember(client);
+    entry.failures = [...entry.failures.filter((at) => now() - at < lockoutMs), now()];
+    if (entry.failures.length >= maxFailures) { entry.lockedUntil = now() + lockoutMs; entry.failures = []; }
+    globalFailures = [...globalFailures.filter((at) => now() - at < lockoutMs), now()];
+    if (globalFailures.length >= globalMaxFailures) { globalLockedUntil = now() + lockoutMs; globalFailures = []; }
     return { ok: false, status: 401, message: 'Wrong PIN.' };
   }
 
@@ -165,7 +220,7 @@ export function createOperatorServer({
       if (!action) { send(404, { message: 'Not found.' }); return; }
       if (request.method !== 'POST') { response.setHeader('allow', 'POST'); send(405, { message: 'Method not allowed.' }); return; }
       const body = await readBody(request);
-      const check = authorized(request.headers['x-operator-pin'] ?? body.pin);
+      const check = authorized(request.headers['x-operator-pin'] ?? body.pin, clientOf(request, trustedProxyHops));
       if (!check.ok) { send(check.status, { message: check.message }); return; }
       const result = await action();
       send(result.status, result);
