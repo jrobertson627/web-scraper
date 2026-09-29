@@ -106,22 +106,38 @@ export function createOperatorServer({
     return { ok: false, status: 401, message: 'Wrong PIN.' };
   }
 
+  // The run is reserved before the first await: two requests that arrive together
+  // (a double-tap on Start) must not both pass the `current` check while the
+  // checks below are still reading the database (#116). A refused, failed or
+  // stopped-before-start trigger gives the reservation back.
   async function trigger() {
     if (current) return { status: 409, message: `A run started here at ${current.startedAt} is still active.` };
-    const challenged = await unreviewedChallenges();
-    if (challenged.length) {
-      return { status: 409, message: `The crawl is halted: ${challenged.length} challenge stop${challenged.length === 1 ? '' : 's'} (first ${challenged[0].url}) await review. Review them with npm run review before starting a run.` };
-    }
-    const claims = await liveClaims();
-    if (claims > 0) return { status: 409, message: `Another worker holds ${claims} live claim${claims === 1 ? '' : 's'}; not starting a second run.` };
     const controller = new AbortController();
     const startedAt = clock().toISOString();
-    const run = { startedAt, controller, promise: null };
+    const run = { startedAt, controller, promise: null, release: () => {} };
+    run.promise = new Promise((resolve) => { run.release = resolve; });
     current = run;
-    run.promise = Promise.resolve().then(() => startRun(controller.signal)).then(
+    const refuse = (result) => { if (current === run) current = null; run.release(); return result; };
+    let refusal = null;
+    try {
+      const challenged = await unreviewedChallenges();
+      if (challenged.length) {
+        refusal = { status: 409, message: `The crawl is halted: ${challenged.length} challenge stop${challenged.length === 1 ? '' : 's'} (first ${challenged[0].url}) await review. Review them with npm run review before starting a run.` };
+      } else {
+        const claims = await liveClaims();
+        if (claims > 0) refusal = { status: 409, message: `Another worker holds ${claims} live claim${claims === 1 ? '' : 's'}; not starting a second run.` };
+      }
+    } catch (error) {
+      refuse();
+      throw error;
+    }
+    if (refusal) return refuse(refusal);
+    // Stop or shutdown while the checks ran: do not start.
+    if (controller.signal.aborted) return refuse({ status: 409, message: 'The run was stopped before it started.' });
+    Promise.resolve().then(() => startRun(controller.signal)).then(
       (result) => { last = { startedAt, finishedAt: clock().toISOString(), outcome: 'finished', result }; },
       (error) => { last = { startedAt, finishedAt: clock().toISOString(), outcome: 'failed', error: error?.message ?? String(error) }; },
-    ).finally(() => { if (current === run) current = null; onRunSettled(last); });
+    ).finally(() => { if (current === run) current = null; onRunSettled(last); run.release(); });
     return { status: 202, message: `Run started at ${startedAt}.` };
   }
 

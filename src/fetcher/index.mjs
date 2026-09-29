@@ -186,7 +186,10 @@ export class Fetcher {
         const earliest = this.#nextTime(this.policy.minIntervalMs);
         return createFetchResult(rateLimitedRetry(this.policy, job, new Date(Math.max(retryAt.getTime(), Date.parse(earliest))).toISOString()));
       }
-      if (response.status === 403 || response.challenge) return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: 'operator review required for challenge response' });
+      if (response.status === 403 || response.challenge) {
+        const marker = response.challengeMarker ?? (response.status === 403 ? 'status 403' : null);
+        return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: `operator review required for challenge response${marker ? ` (${marker})` : ''}` });
+      }
       if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`);
       // The crawler follows only links the site published, so a 404 or 410 on one may be
       // temporary. Retry on a long backoff; give up only once the budget is spent (#130).
@@ -243,29 +246,45 @@ export class Fetcher {
     }
   }
 
+  // A renewal that fails while the request is on the wire is retried on the next
+  // tick, and once more when the request ends, before a response is thrown away:
+  // one transient database error must not discard a good response if the claim
+  // is still ours (#127). Only a claim that cannot be renewed at the end (it
+  // expired and was recovered, or the database stayed down) loses the response.
   async #requestWithRenewal(job, lease, request) {
     await this.persistence.renewClaim(job.key, lease, this.clock());
     const intervalMs = Math.max(50, Math.min(5_000, Math.floor((this.persistence.claimTimeoutMs ?? 15_000) / 3)));
     let renewalFailure;
     let renewal = Promise.resolve();
     const timer = setInterval(() => {
-      renewal = renewal.then(() => this.persistence.renewClaim(job.key, lease, this.clock())).catch((error) => {
-        renewalFailure = error;
-        clearInterval(timer);
+      renewal = renewal.then(async () => {
+        try {
+          await this.persistence.renewClaim(job.key, lease, this.clock());
+          renewalFailure = undefined;
+        } catch (error) { renewalFailure = error; }
       });
     }, intervalMs);
+    // Ends the timer and settles the last renewal. A renewal that failed is tried
+    // once more here; the claim is lost only if that fails too.
+    const lostClaim = async () => {
+      clearInterval(timer);
+      await renewal;
+      if (!renewalFailure) return null;
+      try {
+        await this.persistence.renewClaim(job.key, lease, this.clock());
+        renewalFailure = undefined;
+        return null;
+      } catch (error) { return error; }
+    };
     try {
       const response = await this.transport.request(request);
-      clearInterval(timer);
-      await renewal;
-      if (renewalFailure) throw Object.assign(new Error('claim renewal failed during request', { cause: renewalFailure }), { code: 'lease_renewal_failed' });
+      const lost = await lostClaim();
+      if (lost) throw Object.assign(new Error('claim renewal failed during request', { cause: lost }), { code: 'lease_renewal_failed' });
       return response;
     } catch (error) {
-      clearInterval(timer);
-      await renewal;
-      if (renewalFailure && error?.code !== 'lease_renewal_failed') {
-        throw Object.assign(new Error('claim renewal failed during request', { cause: renewalFailure }), { code: 'lease_renewal_failed' });
-      }
+      if (error?.code === 'lease_renewal_failed') throw error;
+      const lost = await lostClaim();
+      if (lost) throw Object.assign(new Error('claim renewal failed during request', { cause: lost }), { code: 'lease_renewal_failed' });
       throw error;
     } finally { clearInterval(timer); }
   }

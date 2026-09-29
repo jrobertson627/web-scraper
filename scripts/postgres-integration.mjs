@@ -22,6 +22,7 @@ import { boxScoreDocument, gameLogDocument, schoolIndexDocument, seasonDocument,
 import { present, unavailable } from '../src/contracts/value-state.mjs';
 import { operatorAuthorizer } from '../src/config/operators.mjs';
 import { definePersistenceConformance } from '../fixtures/persistence-conformance.mjs';
+import { assertDisposableDatabase } from './disposable-guard.mjs';
 // Adapter-hardening and API read-query checks share this disposable database.
 import './postgres-ops-integration.mjs';
 
@@ -31,6 +32,8 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 
 const { Pool } = pg;
 const pool = new Pool({ max: 8 });
+// The confirmation above is not enough on its own (#121): refuse a hosted or populated database.
+await assertDisposableDatabase(async (sql) => (await pool.query(sql)).rows, process.env, { mark: true });
 // .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
 mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-test-'));
@@ -437,6 +440,8 @@ test('worker mode runs the production worker end to end on PostgreSQL with the c
     mode: 'worker', stdout: (line) => output.push(line), stderr: () => {},
     env: { ...process.env, PERSISTENCE: 'postgres', PROVIDER_ID: authorization.providerId, PROVIDER_HOST: authorization.scope.allowedHosts[0],
       USER_AGENT: 'web-scraper-test (+ops@example.com)', RAW_STORE_ROOT: join(localRoot, 'raw-cli-worker'),
+      // The fixture index has a handful of schools, far below the real index's floor (#115).
+      MIN_ELIGIBLE_SCHOOLS: '0',
       AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(record('data-contract')) },
     crawlLog: createCrawlLog({ write: (line) => lines.push(JSON.parse(line)) }),
     startWorker: async (context) => {

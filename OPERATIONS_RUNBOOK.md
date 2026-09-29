@@ -88,7 +88,7 @@ A release gives the page a fresh 429 budget.
 
 ## A challenge (403 or CAPTCHA)
 
-A 403 or a challenge page ("Just a moment...") means the site is refusing the crawler. **The crawl halts on the first one.** That page stops as `operator_stop` with code `challenge`, the run ends without another request, and the worker exits `6` (`worker halted: a challenge response on ... awaits operator review`). The halt is durable: every later run, whether a worker restart, a resume or the operator page's Start button, makes no request until each challenge stop has been reviewed. A Render Background Worker restarts after exiting, so it keeps exiting `6`; suspend the service while you review.
+A 403 or a challenge page ("Just a moment...") means the site is refusing the crawler. The stop's reason says which check matched: `status 403`, `challenge response header`, `interstitial title`, or `captcha widget (<name>)`. A CAPTCHA widget in the markup counts only on a response under 32 KiB or a non-2xx one, so an ordinary page that embeds one (a newsletter or feedback form) is parsed, not halted on; if a page fails to parse and mentions a widget, look at it before assuming a block. **The crawl halts on the first one.** That page stops as `operator_stop` with code `challenge`, the run ends without another request, and the worker exits `6` (`worker halted: a challenge response on ... awaits operator review`). The halt is durable: every later run, whether a worker restart, a resume or the operator page's Start button, makes no request until each challenge stop has been reviewed. A Render Background Worker restarts after exiting, so it keeps exiting `6`; suspend the service while you review.
 
 1. Suspend the service. Open the page in a normal browser and check whether the site is up and whether it blocks by address.
 2. Wait at least a day before trying again. Do not change the user agent, address or pace to get around it; the crawler has no bypass by design.
@@ -117,6 +117,10 @@ npm run review:personal -- show <job key | issue id>
 2. Capture fresh fixtures if needed (see [Recapture fixtures](#recapture-fixtures)), write a new parser version that reads the new layout, with tests, and deploy it ([Upgrade a parser](#upgrade-a-parser-in-production)).
 3. Reprocess the failed pages: `npm run reprocess:personal -- --state parse_failed`. Each one that parses becomes `parsed`, and the pages it links to are queued.
 4. Start the worker again to fetch those.
+
+### The school index yields too few schools
+
+If the index job ends `parse_failed` with `the school index yields only N eligible schools; expected at least 300 (about 360)`, the eligibility rule (`To == 2026`) no longer matches the site. The usual cause is that Sports Reference added a new season, so every active school's `To` moved to 2027. Nothing was queued, and nothing is wrong with the stored page. Do not lower the floor to get past it: decide the eligibility rule first (issue #115), then reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`). `npm run reconcile` applies the same floor to a stored index and reports it under `eligible_school_count`. `MIN_ELIGIBLE_SCHOOLS` lowers the floor for a store that is not the real index, such as a local experiment; leave it unset for a real crawl.
 
 ### A conflicting record
 
@@ -180,6 +184,8 @@ PG_SMOKE_CONFIRM=disposable npm run smoke:migrations   # applies every migration
 PG_TEST_CONFIRM=disposable npm run test:postgres
 docker stop scraper-pg
 ```
+
+The two `*_CONFIRM` variables are set per command on purpose; `.env.example` does not set them, so a `.env` copied from it never satisfies the guard. The scripts also refuse, whatever the variables say, a `PGHOST` that is not local (localhost, 127.0.0.1, ::1, or a unix socket directory) and a database that already holds crawl data. `test:postgres` marks the database it runs against with a `disposable_test_marker` table, so re-running it, or `smoke:migrations`, on the same local test database works. `PG_DESTRUCTIVE_OVERRIDE=<database name>` skips both checks for a private throwaway server; never set it for a database you care about.
 
 A migration must be repeat-safe (the smoke applies it twice). In production it runs as the pre-deploy command. A migration that rewrites existing rows needs a backup first; the free database plan has none, so export the affected tables with `pg_dump` before deploying.
 

@@ -266,7 +266,7 @@ export async function createWorkerApplication({
   const missing = missingProductionParsers(parsers, config.parserVersions);
   if (missing.length) throw refuse(`no production parser is registered for ${missing.join(', ')}`);
 
-  const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope });
+  const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope, minEligibleSchools: config.minEligibleSchools });
   const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts, events });
   // Only the data contract's retained fields are stored (#89).
   const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
@@ -341,7 +341,7 @@ export function createReprocessApplication({
   const missing = missingProductionParsers(parsers, config.parserVersions);
   // exit names the CLI exit code (EXIT_CODES.workerNotReady), as for the worker.
   if (missing.length) throw Object.assign(refuse(`no production parser is registered for ${missing.join(', ')}`), { exit: 'workerNotReady' });
-  const discovery = assertBoundaryPort('discovery', new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope }));
+  const discovery = assertBoundaryPort('discovery', new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope, minEligibleSchools: config.minEligibleSchools }));
   const normalizer = assertBoundaryPort('domain', new Normalizer({ retainedFields: config.dataContract.retainedFields }));
   return {
     config,
@@ -393,7 +393,7 @@ export function createReviewApplication({
   const store = rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
   if (!(store instanceof FileRawStore)) throw refuse('raw store must be the filesystem raw store');
   if (!(parsers instanceof ParserRegistry)) throw refuse('parsers must be a ParserRegistry');
-  const discovery = new Discovery({ providerId: config.providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope });
+  const discovery = new Discovery({ providerId: config.providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope, minEligibleSchools: config.minEligibleSchools });
   const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
   return reviewOperations({ persistence, rawStore: store, parsers, discovery, normalizer, clock });
 }
