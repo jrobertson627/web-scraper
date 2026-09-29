@@ -13,6 +13,7 @@ Every command below runs in the crawl host's shell (the Render service shell), w
 | `npm run status` | progress by page type, request pace, projected time left, and the crawl scope | no |
 | `npm run review:personal -- list` | pages stopped for review and open reconciliation issues; `show`, `hold`, `release-retry`, `release-permanent`, `accept`, `dismiss` | no |
 | `npm run reprocess:personal -- ...` | re-parses stored raw pages with the configured parser versions | no |
+| `npm run manifest` | the manifest dry-run report: eligible schools, linked and unavailable seasons, unique URLs, projected requests, hours and storage | no |
 | `npm run reconcile` | the reconciliation report (exit 5 when it names failures) | no |
 | `npm run repair:raw` | the raw-store inventory: missing or damaged objects and orphans (exit 5 when something needs repair) | no |
 | `npm run robots:check -- robots.txt` | checks a saved robots.txt against the paths the crawler refuses | no |
@@ -39,9 +40,19 @@ Exit codes: `0` success, `1` unexpected failure (including an unreachable or unm
 
 Set `CRAWL_SAMPLE={"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}` on the service, then start the worker (resume the Background Worker, or press Start on the operator page). It makes about 75 requests in about 9 minutes. `npm run status` shows `scope: SAMPLE, not complete coverage`. When it finishes, run `npm run reconcile > reconciliation-sample.json` and keep the file.
 
+### The manifest dry run (#44)
+
+Before the full backfill, and after the sample, run the manifest stage. Set `CRAWL_STAGE=manifest` (and no `CRAWL_SAMPLE`), then start the worker. It fetches the school index and every eligible school's history page, about 366 requests or 40 minutes, and stops. Season pages stay queued. Then:
+
+```sh
+npm run manifest > manifest.txt
+```
+
+The report gives eligible schools against index rows, linked target seasons, unavailable seasons per school, unique URLs, and the projected remaining requests, hours at the policy pace, and raw storage. Box scores are an estimate (16.5 per season, from the captures) until the game logs are parsed. An operator reviews it before the backfill: check the storage plan against the projected size, and look for surprising unavailable seasons. Then remove `CRAWL_STAGE` for the backfill. It continues from the queued seasons; nothing is fetched twice.
+
 ### The full backfill
 
-Remove `CRAWL_SAMPLE` and start the worker. If the store holds a sample, the worker records the full scope and first runs discovery again over the stored index and history pages, with no requests, to queue every eligible school and season; pages already parsed are not refetched. The run then takes 60 to 70 hours at one request every 6 to 7 seconds (about 34,000 requests; `npm run status` projects the rest).
+Remove `CRAWL_SAMPLE` and `CRAWL_STAGE`, and start the worker. If the store holds a sample, the worker records the full scope and first runs discovery again over the stored index and history pages, with no requests, to queue every eligible school and season; pages already parsed are not refetched. The run then takes 60 to 70 hours at one request every 6 to 7 seconds (about 34,000 requests; `npm run status` projects the rest).
 
 A scope can only widen. A worker started with a narrower scope than the store holds exits `1` with `crawl scope refused`, and nothing is changed.
 

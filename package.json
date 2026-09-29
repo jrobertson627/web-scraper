@@ -29,6 +29,7 @@
     "start:api": "node src/application/cli.mjs api",
     "status": "node src/application/cli.mjs status",
     "reconcile": "node src/application/cli.mjs reconcile",
+    "manifest": "node src/application/cli.mjs manifest",
     "repair:raw": "node src/application/cli.mjs repair",
     "robots:check": "node scripts/robots-check.mjs",
     "smoke:foundation": "node scripts/foundation-smoke.mjs",

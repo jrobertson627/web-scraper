@@ -33,11 +33,12 @@ export class IngestionOrchestrator {
 
   // Processes every job that is claimable now, then returns. Returns job
   // counts by state rather than the jobs themselves.
-  async runOnce(workerId = 'worker') {
+  // pageTypes limits the run to those page types (a manifest run, #44).
+  async runOnce(workerId = 'worker', { pageTypes } = {}) {
     let processed = 0;
     const events = [];
     for (;;) {
-      const job = await this.persistence.claimNextJob(this.clock(), workerId);
+      const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
       if (!job) break;
       const event = await this.#process(job);
       if (event) events.push(Object.freeze(event));
@@ -54,11 +55,11 @@ export class IngestionOrchestrator {
   // finishes (a request on the wire completes, a request not yet started is
   // skipped and its host released) and the loop returns. Events are passed to
   // onEvent and tallied by kind rather than kept.
-  async run({ workerId = 'worker', signal, maxIdleMs = 30_000, minIdleMs = 250, onEvent = () => {}, sleep = abortableDelay } = {}) {
+  async run({ workerId = 'worker', signal, maxIdleMs = 30_000, minIdleMs = 250, onEvent = () => {}, sleep = abortableDelay, pageTypes } = {}) {
     let processed = 0;
     const outcomes = {};
     while (!signal?.aborted) {
-      const job = await this.persistence.claimNextJob(this.clock(), workerId);
+      const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
       if (job) {
         const event = await this.#process(job, signal);
         processed += 1;
@@ -68,7 +69,7 @@ export class IngestionOrchestrator {
         }
         continue;
       }
-      const outlook = await this.persistence.workOutlook();
+      const outlook = await this.persistence.workOutlook({ pageTypes });
       if (!outlook.remaining) break;
       await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, outlook.wakeInMs ?? maxIdleMs)), signal);
     }

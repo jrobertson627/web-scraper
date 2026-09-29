@@ -1,5 +1,5 @@
 import { deepFreeze } from './boundaries.mjs';
-import { TARGET_ENDING_YEARS } from './source.mjs';
+import { PAGE_TYPES, TARGET_ENDING_YEARS } from './source.mjs';
 
 // What a crawl covers (#78; see "Decision: crawl scope" in REQUEST_POLICY.md).
 // The full scope is the project's fixed contract: every school whose index row
@@ -67,4 +67,18 @@ export function nextCrawlScope(previous, scope) {
     throw new Error(`crawl scope refused: this store was crawled under ${describeScope(previous)}, which ${describeScope(next)} does not cover. A scope may only widen.`);
   }
   return { scope: next, changed: !previous || !sameScope(previous, next), widened: Boolean(previous) && !sameScope(previous, next) };
+}
+
+// How deep a run goes (#44). The manifest stage fetches only the school index
+// and history pages: enough to count eligible schools, linked target seasons
+// and unavailable ones, without a season, game-log or box-score request. The
+// season jobs it queues stay pending, so a later full run continues from them.
+export const CRAWL_STAGES = Object.freeze({
+  full: Object.freeze([...PAGE_TYPES]),
+  manifest: Object.freeze(['school_index', 'school_history']),
+});
+
+export function assertCrawlStage(stage = 'full') {
+  if (!Object.hasOwn(CRAWL_STAGES, stage)) throw new Error(`crawl stage ${stage} is invalid. Expected full or manifest. Example: CRAWL_STAGE=manifest`);
+  return stage;
 }

@@ -5,6 +5,8 @@ import { createFixtureApplication, createReprocessApplication, createReviewAppli
 import { JOB_DISPOSITIONS, formatReviewList } from './review.mjs';
 import { buildReconciliationReport } from './reconciliation.mjs';
 import { assertOperatorPin, createOperatorServer } from './operator-server.mjs';
+import { buildManifestReport, formatManifestReport } from './manifest.mjs';
+import { CRAWL_STAGES } from '../contracts/crawl-scope.mjs';
 import { operatorAllowlist, operatorAuthorizer } from '../config/operators.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { runWorkerLoop } from './worker-loop.mjs';
@@ -95,6 +97,7 @@ function workerConfiguration(env) {
     dataContract: parseDataContract(env.DATA_CONTRACT_JSON),
     parserVersions: parseParserVersions(env.PARSER_VERSIONS),
     crawlScope: parseCrawlSample(env.CRAWL_SAMPLE),
+    crawlStage: env.CRAWL_STAGE || 'full',
   });
 }
 
@@ -120,6 +123,12 @@ export function parseReprocessArgs(args) {
   const unknownState = selection.states?.find((state) => !REPROCESS_STATES.includes(state));
   if (unknownState !== undefined) throw new Error(`reprocess --state ${unknownState} is invalid. Expected ${REPROCESS_STATES.join(' or ')}. ${REPROCESS_USAGE}`);
   return selection;
+}
+
+// The page types a run claims: all of them, or for CRAWL_STAGE=manifest (#44)
+// only the school index and history pages.
+function stagePageTypes(config) {
+  return config.crawlStage === 'manifest' ? CRAWL_STAGES.manifest : undefined;
 }
 
 const REVIEW_USAGE = 'Example: npm run review -- list, npm run review -- show <job key | issue id>, '
@@ -373,7 +382,7 @@ export async function runCli({
       startRun: async (signal) => {
         const worker = await startWorker({ config, settings, env, events: crawlLog, openPostgres });
         try {
-          const result = await worker.orchestrator.run({ workerId: worker.workerId ?? env.WORKER_ID ?? 'operator', signal });
+          const result = await worker.orchestrator.run({ workerId: worker.workerId ?? env.WORKER_ID ?? 'operator', signal, pageTypes: stagePageTypes(config) });
           crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
           return result;
         } finally { await worker.close?.(); }
@@ -411,6 +420,26 @@ export async function runCli({
       const report = await persistence.repairRawObjects({ rawStore: new FileRawStore(env.RAW_STORE_ROOT) });
       stdout(JSON.stringify({ mode, ...report }, null, 2));
       return { exitCode: report.counts.pending ? EXIT_CODES.reconciliationFailed : EXIT_CODES.success, report };
+    } finally { await persistence.close(); }
+  }
+
+  if (mode === 'manifest') {
+    // The manifest dry-run report (#44) over the durable store: read-only, no
+    // transport. Run a worker with CRAWL_STAGE=manifest first.
+    let settings;
+    try {
+      settings = persistenceSettings(env);
+      if (settings.kind !== 'postgres') throw new Error('manifest reads the durable store, but PERSISTENCE is memory. Example: PERSISTENCE=postgres');
+      if (args.some((arg) => arg !== '--json')) throw new Error('manifest takes only --json. Example: npm run manifest');
+    } catch (error) {
+      stderr(`manifest configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    const persistence = await openPostgres(settings);
+    try {
+      const report = await buildManifestReport(persistence);
+      stdout(args.includes('--json') ? JSON.stringify({ mode, ...report }, null, 2) : formatManifestReport(report));
+      return { exitCode: EXIT_CODES.success, report };
     } finally { await persistence.close(); }
   }
 
@@ -514,14 +543,15 @@ export async function runCli({
     // The loop runs until the work is done or SIGTERM/SIGINT stops it, then
     // releases what startWorker opened.
     try {
-      const result = await runWorkerLoop({ orchestrator: worker.orchestrator, workerId: worker.workerId ?? env.WORKER_ID ?? 'worker', log: stderr });
+      const result = await runWorkerLoop({ orchestrator: worker.orchestrator, workerId: worker.workerId ?? env.WORKER_ID ?? 'worker', log: stderr,
+        pageTypes: stagePageTypes(config) });
       crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
       stdout(JSON.stringify({ mode, ...result }));
       return { exitCode: EXIT_CODES.success, result };
     } finally { await worker.close?.(); }
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, operator, reprocess, review, reconcile, repair, api, or status. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, operator, reprocess, review, reconcile, repair, manifest, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 

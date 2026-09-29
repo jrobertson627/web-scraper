@@ -100,9 +100,10 @@ export function createFixtureApplication({
     parserVersions: config.parserVersions,
   });
 
-  async function runWorkerOnce(workerId = 'fixture-worker') {
+  // pageTypes limits the run (CRAWL_STAGES.manifest for a manifest dry run, #44).
+  async function runWorkerOnce(workerId = 'fixture-worker', { pageTypes } = {}) {
     await ready;
-    const result = await orchestrator.runOnce(workerId);
+    const result = await orchestrator.runOnce(workerId, { pageTypes });
     // The fixture corpus is small, so the local run still reports every job.
     const jobs = await persistence.listJobs();
     events.summary?.({ jobStates: jobStateCounts(jobs) });

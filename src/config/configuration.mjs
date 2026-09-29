@@ -2,7 +2,7 @@ import { REQUIRED_ELIGIBILITY_PREDICATE, TARGET_ENDING_YEARS } from '../contract
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { requireAuthorization } from './authorization.mjs';
-import { createCrawlScope } from '../contracts/crawl-scope.mjs';
+import { assertCrawlStage, createCrawlScope } from '../contracts/crawl-scope.mjs';
 import { contractFingerprint, requireDataContract } from './data-contract.mjs';
 import { isAbsolute } from 'node:path';
 
@@ -35,6 +35,11 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
     config.crawlScope = createCrawlScope(config.crawlScope);
   } catch (error) {
     throw new Error(`crawlScope is invalid: ${error.message}`);
+  }
+  try {
+    config.crawlStage = assertCrawlStage(config.crawlStage ?? 'full');
+  } catch (error) {
+    throw new Error(`crawlStage is invalid: ${error.message}`);
   }
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
     throw configError('rawStore', 'is invalid', 'Expected memory or filesystem', 'rawStore: memory');

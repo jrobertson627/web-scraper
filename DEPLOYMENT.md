@@ -73,6 +73,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `USER_AGENT` | transparent application name and operator contact, for example `web-scraper (+you@example.com)` | yes (it carries the operator's contact address) |
 | `OPERATOR_IDS` | comma-separated reviewers allowed to record operator dispositions with `npm run review`, for example `jessica`; unset means nobody may (see "Operator review" in `JOB_LIFECYCLE.md`) | no |
 | `CRAWL_SAMPLE` | optional; restricts the crawl to a sample, for example `{"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}` for #78. Remove it for the full backfill (see "Decision: crawl scope" in `REQUEST_POLICY.md`) | no |
+| `CRAWL_STAGE` | optional; `manifest` fetches only the index and history pages for the #44 dry run (see `OPERATIONS_RUNBOOK.md`); unset for a full crawl | no |
 | `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
 | `OPERATOR_PIN` | only for the operator trigger service; at least 8 characters (see [Operator trigger](#operator-trigger-55)) | yes |
 | `NODE_VERSION` | `22` | no |
