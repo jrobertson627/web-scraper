@@ -215,6 +215,14 @@ export class PostgresPersistence {
     });
   }
 
+  // Jobs holding an unexpired claim by the database clock: a worker is running
+  // them now. The operator trigger refuses to start a second run while any do.
+  async liveClaimCount() {
+    const result = await this.pool.query(`SELECT count(*)::int AS n FROM crawl_jobs
+      WHERE state IN ('fetching','fetched') AND claim_expires_at > clock_timestamp()`);
+    return result.rows[0].n;
+  }
+
   // Job counts by state, without loading jobs or their history.
   async jobCounts() {
     const result = await this.pool.query('SELECT state, count(*)::int AS count FROM crawl_jobs GROUP BY state ORDER BY state');

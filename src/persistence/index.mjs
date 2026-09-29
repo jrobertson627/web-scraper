@@ -481,6 +481,14 @@ export class InMemoryPersistence {
     return { ...cloneJob(current), lease };
   }
 
+  // Jobs holding an unexpired claim by this store's clock: a worker is running
+  // them now. The operator trigger refuses to start a second run while any do.
+  liveClaimCount() {
+    const now = this.clock();
+    return [...this.jobs.values()].filter((job) => ['fetching', 'fetched'].includes(job.state) && job.claim
+      && new Date(job.claim.expiresAt) > now).length;
+  }
+
   // Job counts by state, without copying jobs or their history.
   jobCounts() {
     const counts = {};

@@ -24,7 +24,7 @@ Nothing in this repository creates or changes Render resources by itself. `rende
 | Durable store | The existing Render PostgreSQL instance | Required. Not declared in `render.yaml`, so applying the Blueprint cannot create or replace it. |
 | Raw store | Persistent disk on the worker, mounted at `/var/data` | 1 GB for the #78 sample. The full backfill (about 8 GB) is deferred until storage is upgraded (#45). |
 | Read API (`start:api`) | Not deployed | Optional, and not needed by the tracker. See [Read API](#read-api). |
-| Operator trigger (#55) | Not deployed | Not built yet. See [Operator trigger](#operator-trigger-55). |
+| Operator trigger (#55) | Not deployed | Built; a web service that replaces the worker as crawl host. See [Operator trigger](#operator-trigger-55). |
 
 The tracker is a consumer of the database, not of this service. The scraper's schema (`POSTGRES_SCHEMA.md`, `PARSED_DOCUMENTS.md`) is the contract between them.
 
@@ -72,6 +72,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `OPERATOR_IDS` | comma-separated reviewers allowed to record operator dispositions with `npm run review`, for example `jessica`; unset means nobody may (see "Operator review" in `JOB_LIFECYCLE.md`) | no |
 | `CRAWL_SAMPLE` | optional; restricts the crawl to a sample, for example `{"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}` for #78. Remove it for the full backfill (see "Decision: crawl scope" in `REQUEST_POLICY.md`) | no |
 | `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
+| `OPERATOR_PIN` | only for the operator trigger service; at least 8 characters (see [Operator trigger](#operator-trigger-55)) | yes |
 | `NODE_VERSION` | `22` | no |
 
 `PROVIDER_ID`, `PROVIDER_HOST`, `AUTHORIZATION_JSON` and `DATA_CONTRACT_JSON` are set by `start:worker:personal` from the checked-in records. If a future deployment uses `start:worker` directly, supply them as dashboard values; they are configuration, not secrets, but they are never echoed into logs either.
@@ -98,7 +99,19 @@ The tracker does not need the API, so none is deployed. If one is wanted later, 
 
 ## Operator trigger (#55)
 
-The PIN-protected trigger endpoint is not built. When it is, it will be its own authenticated route group, separate from the read-only API, and the PIN will be a dashboard secret (`OPERATOR_PIN`, `sync: false`) on whichever service hosts it. Because the API is not deployed, the trigger will need its own web service or will move into the worker process behind the same PIN; that decision belongs to #55. Until then, a run is started or paused by resuming or suspending the worker service.
+`npm run start:operator:personal` serves a PIN-protected page for starting, checking and stopping a crawl from a phone. It is its own server and route group (`src/application/operator-server.mjs`); the read-only API neither serves nor imports it.
+
+| Route | Does |
+| --- | --- |
+| `GET /operator` | the page: a PIN field and Start or resume, Status, and Stop buttons |
+| `POST /operator/trigger` | starts a run of the production worker in this process, the same assembly `start:worker` uses |
+| `POST /operator/status` | crawl progress (`npm run status`), whether a run is active here, and how the last one ended |
+| `POST /operator/stop` | asks the active run to stop after its current job |
+
+- **PIN.** `OPERATOR_PIN` is a dashboard secret (`sync: false`), at least 8 characters, never committed or logged. Use a long random value: it is the only authentication. It is compared in constant time. Five wrong PINs within 15 minutes lock every PIN check for 15 minutes, which also locks out the operator. That is the price of making a PIN unguessable over the network.
+- **One run at a time.** A trigger is refused (409) while this process runs one, or while any job holds a live claim (another worker, judged by the job leases themselves). Leases and host request locks would keep two runs from overlapping requests even so; this keeps a second run from starting.
+- **Hosting.** A Render disk attaches to one service, and the raw store lives on it, so the trigger service is the crawl host. It replaces the Background Worker rather than sitting beside it. To use it, create a web service with the worker's build and pre-deploy commands, disk and environment, plus `HOST=0.0.0.0` and `OPERATOR_PIN`, with the start command `npm run start:operator:personal`. Then suspend or delete `web-scraper-worker`. Render terminates TLS, so open `https://<service>.onrender.com/operator` on the phone. `render.yaml` still declares the Background Worker; switching the Blueprint is a deliberate deployment change. On a deploy or restart (`SIGTERM`), an active run finishes its current job and stops, like the worker. Trigger it again afterwards.
+- **Headers.** Every response is `Cache-Control: no-store`, with a `default-src 'none'` content security policy, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`. Bodies are limited to 2 KiB and must be a form or JSON.
 
 ## Provisioning steps
 

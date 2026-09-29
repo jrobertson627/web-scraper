@@ -20,6 +20,7 @@ npm run start:worker:personal  # loads the private, self-attested M1 records; se
 npm run reprocess -- --page-type box_score   # re-parse stored raw snapshots with PARSER_VERSIONS; no requests
 npm run review -- list  # pages stopped for review and open issues; show/hold/release/accept/dismiss (JOB_LIFECYCLE.md)
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
+npm run start:operator:personal  # PIN-protected page to start, check and stop a crawl (OPERATOR_PIN; DEPLOYMENT.md)
 npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
 npm run reconcile     # reconciliation report over PostgreSQL; exit 5 when it names failures (FOUNDATION_HANDOFF.md)
 npm test
