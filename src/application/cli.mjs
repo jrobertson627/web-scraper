@@ -17,6 +17,7 @@ import { MIN_ELIGIBLE_SCHOOLS, PAGE_TYPES } from '../contracts/source.mjs';
 import { REPROCESS_STATES } from '../contracts/jobs.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { FileRawStore } from '../persistence/index.mjs';
+import { RawStoreMismatchError, assertRawStoreMatchesDatabase } from '../persistence/raw-store-identity.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
 import { createCrawlLog } from './crawl-log.mjs';
 import { STATUS_WINDOW_MS, formatCrawlStatus, summarizeCrawlStatus } from './crawl-status.mjs';
@@ -445,9 +446,15 @@ export async function runCli({
     }
     const persistence = await openPostgres(settings);
     try {
-      const report = await persistence.repairRawObjects({ rawStore: new FileRawStore(env.RAW_STORE_ROOT) });
+      const rawStore = new FileRawStore(env.RAW_STORE_ROOT);
+      await assertRawStoreMatchesDatabase({ persistence, rawStore });
+      const report = await persistence.repairRawObjects({ rawStore });
       stdout(JSON.stringify({ mode, ...report }, null, 2));
       return { exitCode: report.counts.pending ? EXIT_CODES.reconciliationFailed : EXIT_CODES.success, report };
+    } catch (error) {
+      if (!(error instanceof RawStoreMismatchError)) throw error;
+      stderr(`repair refused: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
     } finally { await persistence.close(); }
   }
 

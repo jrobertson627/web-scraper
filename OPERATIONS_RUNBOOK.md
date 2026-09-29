@@ -113,7 +113,7 @@ npm run review:personal -- show <job key | issue id>
 
 `parse_failed` means the parser could not read the page with confidence. Usually Sports Reference changed its layout. The raw page is stored, so fixing it needs no refetch:
 
-1. Read the stored page at the `show` output's `objectPath`, and the error.
+1. Read the stored page named by the `show` output's `objectPath` (a `raw:<xx>/<checksum>` reference, which is the file `<xx>/<checksum>` under `RAW_STORE_ROOT`), and the error.
 2. Capture fresh fixtures if needed (see [Recapture fixtures](#recapture-fixtures)), write a new parser version that reads the new layout, with tests, and deploy it ([Upgrade a parser](#upgrade-a-parser-in-production)).
 3. Reprocess the failed pages: `npm run reprocess:personal -- --state parse_failed`. Each one that parses becomes `parsed`, and the pages it links to are queued.
 4. Start the worker again to fetch those.
@@ -161,7 +161,7 @@ Exit `0` means every check passed and nothing is quarantined; `5` means the repo
 - `orphans`: files no fetch refers to. They are kept, not deleted.
 - `temporary` files: left by an interrupted write.
 
-It changes no raw file. It exits `5` if anything is pending. See `RAW_STORAGE.md`.
+It changes no raw file. It exits `5` if anything is pending. It, the worker, `reprocess` and `review accept` refuse (exit `3`) a `RAW_STORE_ROOT` that is not the raw store the database was crawled with; see "Object references and store identity" in `RAW_STORAGE.md`. To move the raw store to a bigger disk or another root, copy the whole directory (its `.raw-store-id` file included), change `RAW_STORE_ROOT`, and run `npm run repair:raw` to check it. Do not point a worker on another machine at the production database: it would refuse, and a copy without the marker would be a different store.
 
 ## Recapture fixtures
 

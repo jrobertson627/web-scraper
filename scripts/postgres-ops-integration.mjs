@@ -3,7 +3,7 @@
 // against the same explicitly disposable database; never run on its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
@@ -187,4 +187,47 @@ test('API reads are keyed or keyset-paged statements that PostgreSQL can serve f
     await client.query('ROLLBACK');
     client.release();
   }
+});
+
+// #117: the raw store identity, and migration 014's rewrite of recorded paths.
+test('the first raw store id a database records is kept, and another id does not replace it', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool });
+  const first = '11111111-1111-4111-8111-111111111111';
+  const second = '22222222-2222-4222-8222-222222222222';
+  assert.equal(await persistence.rawStoreId(), null);
+  assert.equal(await persistence.claimRawStoreId(first), first);
+  assert.equal(await persistence.claimRawStoreId(second), first, 'a later claim gets the recorded id back');
+  assert.equal(await persistence.rawStoreId(), first);
+  await assert.rejects(pool.query(`INSERT INTO raw_store_identity (singleton, store_id) VALUES (false, $1)`, [second]), /violates check constraint/);
+  await assert.rejects(pool.query(`UPDATE raw_store_identity SET store_id = 'not a uuid'`), /violates check constraint/);
+  await reset(pool);
+});
+
+test('migration 014 rewrites a recorded absolute path to the root-independent reference, once', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool });
+  const source = job('/box/legacy.html');
+  await persistence.addJob(source);
+  const { rows: [row] } = await pool.query(`SELECT id, provider_id, canonical_path FROM crawl_jobs`);
+  const checksum = 'cd'.repeat(32);
+  const legacy = `file:///var/data/raw/cd/${checksum}`;
+  await pool.query(`INSERT INTO source_fetches (job_id,provider_id,canonical_path,http_status,fetched_at,checksum,raw_object_path)
+    VALUES ($1,$2,$3,200,clock_timestamp(),$4,$5)`, [row.id, row.provider_id, row.canonical_path, checksum, legacy]);
+  await pool.query(`INSERT INTO raw_object_repair (checksum,object_path,state,observed_at,reason) VALUES ($1,$2,'pending',now(),'missing')`, [checksum, legacy]);
+  const sql = readFileSync(join(process.cwd(), 'migrations', '014_raw_store_identity.sql'), 'utf8');
+  await pool.query(sql);
+  const key = `raw:cd/${checksum}`;
+  assert.equal((await pool.query('SELECT raw_object_path FROM source_fetches')).rows[0].raw_object_path, key);
+  assert.equal((await pool.query('SELECT object_path FROM raw_object_repair')).rows[0].object_path, key);
+  await pool.query(sql); // repeat-safe
+  assert.equal((await pool.query('SELECT raw_object_path FROM source_fetches')).rows[0].raw_object_path, key);
+  // A reference recorded as an absolute path still resolves when read back.
+  await pool.query(`UPDATE source_fetches SET raw_object_path = $1`, [legacy]);
+  assert.equal((await persistence.lastSuccessfulFetch(source.key)).objectPath, key);
+  await reset(pool);
 });

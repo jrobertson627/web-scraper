@@ -89,7 +89,7 @@ test('the review list shows stopped and failed jobs with their parser, failure, 
   assert.equal(detail.kind, 'job');
   assert.equal(detail.lastParseRun.failureDetails.error, 'fixture layout changed; column meaning is uncertain');
   assert.match(detail.snapshot.checksum, /^[0-9a-f]{64}$/);
-  assert.equal(detail.snapshot.objectPath, `memory://${detail.snapshot.checksum}`);
+  assert.equal(detail.snapshot.objectPath, `raw:${detail.snapshot.checksum.slice(0, 2)}/${detail.snapshot.checksum}`);
   assert.deepEqual(detail.history.map((event) => event.to), ['fetching', 'fetched', 'parse_failed']);
   assert.match(detail.nextSteps.at(-1), /npm run reprocess -- --job fixture-provider:fixture\.example\/box\/shift\.html:box_score/);
   await assert.rejects(run.app.review.show('fixture-provider:fixture.example/nope:season'), /is not queued/);
@@ -195,6 +195,8 @@ test('review arguments name a command, a target, and for an action the operator 
 
 // Reads answer from memory; the pool is never queried.
 class ReviewPostgres extends PostgresPersistence {
+  async rawStoreId() { return null; }
+  async claimRawStoreId(storeId) { return storeId; }
   constructor(options) { super({ pool: { end: async () => {} }, ...options }); this.closed = 0; }
   async reviewJobs() { return { items: [], nextCursor: null }; }
   async reviewIssues() { return { items: [], nextCursor: null }; }

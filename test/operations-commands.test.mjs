@@ -52,5 +52,13 @@ test('repair:raw prints the raw store inventory and exits 5 when an object is pe
 
   assert.equal((await run({ PERSISTENCE: 'memory' })).exitCode, EXIT_CODES.configurationRejected);
   assert.equal((await run({ RAW_STORE_ROOT: 'relative/raw' })).exitCode, EXIT_CODES.configurationRejected);
+
+  // A store other than the one the database was crawled with is refused (#117).
+  const recordedElsewhere = '11111111-1111-4111-8111-111111111111';
+  persistence.claimRawStoreId(recordedElsewhere);
+  const refused = await run({});
+  assert.equal(refused.exitCode, EXIT_CODES.configurationRejected);
+  assert.match(errors.at(-1), /repair refused: the raw store is not the one this database was crawled with/);
+  assert.ok(errors.at(-1).includes(recordedElsewhere), 'the id the database records is named so the marker can be restored');
   assert.doesNotMatch(errors.join(' '), /TOP_SECRET/);
 });

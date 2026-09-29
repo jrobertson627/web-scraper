@@ -15,7 +15,7 @@ import { FULL_CRAWL_SCOPE, createCrawlScope, nextCrawlScope } from '../contracts
 import { PAGE_TYPES, canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
 import {
-  assertFetchVerification, assertReprocessSelection, assertReviewStates, inventoryRawObjects, reconciliationJob, reviewJobSummary,
+  assertFetchVerification, assertReprocessSelection, assertReviewStates, inventoryRawObjects, normalizeObjectReference, reconciliationJob, reviewJobSummary,
 } from './index.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
 // instead of holding a lease or a pool client indefinitely.
@@ -430,7 +430,7 @@ export class PostgresPersistence {
       ORDER BY f.fetched_at DESC, f.id DESC LIMIT 1`, jobKeyParts(jobKey));
     const row = result.rows[0];
     return row ? { id: portId('fetch', row.id), jobKey, status: row.http_status, checksum: row.checksum,
-      objectPath: row.raw_object_path, etag: row.etag, lastModified: row.last_modified,
+      objectPath: normalizeObjectReference(row.raw_object_path), etag: row.etag, lastModified: row.last_modified,
       cacheControl: row.cache_control, cacheHit: row.cache_hit, fetchedAt: iso(row.fetched_at) } : null;
   }
 
@@ -505,6 +505,20 @@ export class PostgresPersistence {
       if (transitioned) await this.transition(client, job, 'parsed', { reprocessed: true, parserVersion: parseRun.parserVersion });
       return { parseRunId, committed: true, ...written, transitioned };
     });
+  }
+
+  // The id of the raw store this database's objects live in (#117), or null until
+  // a worker records it. claimRawStoreId records it if none is recorded and returns
+  // the id that is, so two workers starting at once agree. Same contract as the
+  // in-memory adapter's.
+  async rawStoreId() {
+    const result = await this.pool.query('SELECT store_id FROM raw_store_identity');
+    return result.rows[0]?.store_id ?? null;
+  }
+
+  async claimRawStoreId(storeId) {
+    await this.pool.query('INSERT INTO raw_store_identity (store_id) VALUES ($1) ON CONFLICT (singleton) DO NOTHING', [storeId]);
+    return this.rawStoreId();
   }
 
   // The scope this store is crawled under (#78): the latest recorded, or the
@@ -631,7 +645,7 @@ export class PostgresPersistence {
         parserVersion: row.run_parser_version, status: row.parse_status, warnings: row.warnings, failureDetails: row.failure_details,
         parsedAt: iso(row.parsed_at) },
       snapshot: row.fetch_id == null ? null : { sourceFetchId: portId('fetch', row.fetch_id), status: row.http_status,
-        checksum: row.checksum, objectPath: row.raw_object_path, fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit },
+        checksum: row.checksum, objectPath: normalizeObjectReference(row.raw_object_path), fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit },
       dispositions: dispositions.filter((entry) => entry.job_id === row.id).map((entry) => ({ kind: entry.disposition,
         operatorId: entry.operator_id, reason: entry.reason, at: iso(entry.recorded_at) })),
     }) }));
@@ -679,7 +693,7 @@ export class PostgresPersistence {
       FROM source_fetches f JOIN crawl_jobs j ON j.id = f.job_id WHERE f.id = $1`, [sqlId('fetch', sourceFetchId)]);
     const row = result.rows[0];
     return row ? deepFreeze({ id: portId('fetch', row.id), jobKey: row.job_key, status: row.http_status, checksum: row.checksum,
-      objectPath: row.raw_object_path, fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit }) : null;
+      objectPath: normalizeObjectReference(row.raw_object_path), fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit }) : null;
   }
 
   // Accepts the quarantined revision an open conflicting_page_reprocess issue
@@ -752,7 +766,7 @@ export class PostgresPersistence {
     const fetched = await this.pool.query('SELECT id,checksum,raw_object_path FROM source_fetches WHERE checksum IS NOT NULL ORDER BY id');
     const observed = await this.pool.query('SELECT clock_timestamp() AS now');
     const report = await inventoryRawObjects({ rawStore, observedAt: iso(observed.rows[0].now),
-      fetches: fetched.rows.map((row) => ({ id: portId('fetch', row.id), checksum: row.checksum, objectPath: row.raw_object_path })) });
+      fetches: fetched.rows.map((row) => ({ id: portId('fetch', row.id), checksum: row.checksum, objectPath: normalizeObjectReference(row.raw_object_path) })) });
     for (const item of report.pending) {
       await this.pool.query(`INSERT INTO raw_object_repair
         (checksum,object_path,state,observed_at,reason,source_fetch_ids)
