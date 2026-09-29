@@ -113,3 +113,4 @@ The PIN-protected trigger endpoint is not built. When it is, it will be its own 
 - The worker's stderr is a stream of JSON crawl-log lines with periodic `crawl.summary` lines.
 - Search the service logs for the database password and user agent value; neither should appear.
 - The tracker can read the #78 sample tables with the read-only role and cannot write to them.
+- `npm run reconcile` on the worker's shell prints the reconciliation report for what has been loaded (exit 0 when it passes, 5 when it names failures).

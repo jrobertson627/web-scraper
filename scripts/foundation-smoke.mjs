@@ -5,7 +5,7 @@ const faults = process.argv.includes('--faults');
 const app = createFixtureApplication({ fixtureEntries: foundationCorpus({ faults }) });
 const preview = app.previewDryRun();
 const result = await app.runWorkerOnce('foundation-smoke-worker');
-const reconciliation = app.reconcile();
+const reconciliation = await app.reconcile();
 console.log(JSON.stringify({
   mode: 'fixture-smoke', readiness: 'ready', faults, preview,
   jobs: result.jobs.length,

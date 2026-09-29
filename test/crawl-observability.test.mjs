@@ -21,7 +21,7 @@ test('a supervised fixture run produces a structured log covering requests, jobs
   const { log, entries } = recordingLog();
   const app = createFixtureApplication({ fixtureEntries: foundationCorpus({ faults: true }), events: log });
   const result = await app.runWorkerOnce();
-  app.reconcile();
+  await app.reconcile();
   const logged = entries();
   assert.ok(logged.every((entry) => typeof entry.at === 'string' && typeof entry.event === 'string'));
   const counters = log.counters();

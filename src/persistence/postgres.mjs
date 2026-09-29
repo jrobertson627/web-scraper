@@ -13,7 +13,9 @@ import {
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 import { PAGE_TYPES, canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
-import { assertFetchVerification, assertReprocessSelection, assertReviewStates, reviewJobSummary } from './index.mjs';
+import {
+  assertFetchVerification, assertReprocessSelection, assertReviewStates, inventoryRawObjects, reconciliationJob, reviewJobSummary,
+} from './index.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
 // instead of holding a lease or a pool client indefinitely.
 import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
@@ -471,6 +473,69 @@ export class PostgresPersistence {
     });
   }
 
+  // Reconciliation reads (#46); same contracts as the in-memory adapter's.
+  // Every job, without history: one row each, so the full backfill's job list
+  // is a few megabytes.
+  async reconciliationJobs() {
+    const result = await this.pool.query(`SELECT j.provider_id, j.canonical_path, j.page_type, j.state, j.source_url,
+        j.school_source_path, j.last_error, p.provider_id || ':' || p.canonical_path || ':' || p.page_type AS parent_key
+      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id ORDER BY j.id`);
+    return result.rows.map((row) => {
+      const canonicalPath = canonicalFromRow(row);
+      return reconciliationJob({ key: sourceKey(canonicalPath, row.page_type), pageType: row.page_type, state: row.state,
+        parentKey: row.parent_key ?? undefined, schoolSourcePath: row.school_source_path ?? undefined,
+        sourceUrl: createSourceUrl(row.provider_id, row.source_url), canonicalPath, lastError: row.last_error });
+    });
+  }
+
+  // The latest accepted revision for each key that has one.
+  async acceptedPages(recordKeys) {
+    if (!recordKeys.length) return [];
+    const result = await this.pool.query(`SELECT DISTINCT ON (r.record_key) r.record_key, r.page_type, r.data,
+        j.provider_id || ':' || j.canonical_path || ':' || j.page_type AS job_key
+      FROM normalized_page_revisions r JOIN source_fetches f ON f.id = r.source_fetch_id JOIN crawl_jobs j ON j.id = f.job_id
+      WHERE r.record_key = ANY($1::text[]) AND r.disposition = 'accepted' ORDER BY r.record_key, r.id DESC`, [[...recordKeys]]);
+    return result.rows.map((row) => deepFreeze({ recordKey: row.record_key, jobKey: row.job_key, kind: row.page_type, data: row.data }));
+  }
+
+  // The latest accepted revision of each observation the given pages emitted.
+  async acceptedObservations(jobKeys) {
+    if (!jobKeys.length) return [];
+    const parts = jobKeys.map(jobKeyParts);
+    const result = await this.pool.query(`SELECT DISTINCT ON (o.job_id, o.observation_key) o.observation_key, o.observation
+      FROM page_observation_revisions o JOIN crawl_jobs j ON j.id = o.job_id
+      JOIN unnest($1::text[], $2::text[], $3::text[]) k(provider_id, canonical_path, page_type)
+        ON j.provider_id = k.provider_id AND j.canonical_path = k.canonical_path AND j.page_type = k.page_type
+      WHERE o.accepted ORDER BY o.job_id, o.observation_key, o.id DESC`,
+    [parts.map((part) => part[0]), parts.map((part) => part[1]), parts.map((part) => part[2])]);
+    return result.rows.map((row) => deepFreeze({ key: row.observation_key, observation: withoutProvenance(row.observation) }));
+  }
+
+  async coverageGaps() {
+    const result = await this.pool.query('SELECT provider_id, school_source_path, ending_year FROM unavailable_coverage');
+    return result.rows.map((row) => deepFreeze({ schoolSourcePath: `${row.provider_id}:${row.school_source_path}`, endingYear: row.ending_year }));
+  }
+
+  // Jobs with a structural failure and no valid parse run at all.
+  async failedParses() {
+    const result = await this.pool.query(`SELECT j.provider_id || ':' || j.canonical_path || ':' || j.page_type AS job_key
+      FROM crawl_jobs j WHERE EXISTS (SELECT 1 FROM parse_runs r WHERE r.job_id = j.id AND r.status = 'structural_failure')
+        AND NOT EXISTS (SELECT 1 FROM parse_runs r WHERE r.job_id = j.id AND r.status = 'valid') ORDER BY j.id`);
+    return result.rows.map((row) => deepFreeze({ jobKey: row.job_key }));
+  }
+
+  async openIssues() {
+    const result = await this.pool.query(`SELECT id, record_key, issue_type FROM reconciliation_issues WHERE status = 'open' ORDER BY id`);
+    return result.rows.map((row) => deepFreeze({ id: portId('issue', row.id), recordKey: row.record_key, issueType: row.issue_type }));
+  }
+
+  async rejectedUrls() {
+    const result = await this.pool.query(`SELECT DISTINCT ON (job_id, observation_key) observation_key, observation
+      FROM page_observation_revisions WHERE accepted AND observation->>'kind' = 'rejected_url'
+      ORDER BY job_id, observation_key, id DESC`);
+    return result.rows.map((row) => deepFreeze({ key: row.observation_key, absoluteUrl: row.observation.absoluteUrl, reason: row.observation.reason }));
+  }
+
   // Operator review (#48). Jobs stopped for review (parse_failed and
   // operator_stop by default), keyset-paged on the job id, each with its latest
   // parse run, latest stored snapshot and recorded dispositions.
@@ -623,51 +688,29 @@ export class PostgresPersistence {
     });
   }
 
+  // Same inventory as the in-memory adapter (inventoryRawObjects); pending and
+  // orphan findings are also recorded in raw_object_repair.
   async repairRawObjects({ rawStore } = {}) {
-    if (!rawStore || typeof rawStore.entries !== 'function' || typeof rawStore.verify !== 'function') {
-      throw new Error('raw repair requires a raw store with entries() and verify()');
-    }
-    const fetched = await this.pool.query('SELECT id,checksum,raw_object_path FROM source_fetches WHERE checksum IS NOT NULL');
-    const referenced = new Map();
-    for (const row of fetched.rows) {
-      const group = referenced.get(row.checksum) ?? [];
-      group.push(row);
-      referenced.set(row.checksum, group);
-    }
-    const observedAt = new Date().toISOString();
-    const healthy = [];
-    const pending = [];
-    const orphans = [];
-    for (const [checksum, rows] of referenced) {
-      const paths = [...new Set(rows.map((row) => row.raw_object_path))];
-      const verified = await rawStore.verify(checksum, paths.length === 1 ? paths[0] : undefined);
-      if (verified.ok && paths.length === 1) {
-        healthy.push({ checksum, objectPath: verified.objectPath, sourceFetchIds: rows.map((row) => portId('fetch', row.id)) });
-        continue;
-      }
-      const item = { checksum, objectPath: paths[0] ?? verified.objectPath ?? 'missing', state: 'pending',
-        observedAt, reason: paths.length > 1 ? 'source fetches disagree about the raw object path' : verified.reason,
-        sourceFetchIds: rows.map((row) => portId('fetch', row.id)) };
-      pending.push(item);
+    const fetched = await this.pool.query('SELECT id,checksum,raw_object_path FROM source_fetches WHERE checksum IS NOT NULL ORDER BY id');
+    const observed = await this.pool.query('SELECT clock_timestamp() AS now');
+    const report = await inventoryRawObjects({ rawStore, observedAt: iso(observed.rows[0].now),
+      fetches: fetched.rows.map((row) => ({ id: portId('fetch', row.id), checksum: row.checksum, objectPath: row.raw_object_path })) });
+    for (const item of report.pending) {
       await this.pool.query(`INSERT INTO raw_object_repair
         (checksum,object_path,state,observed_at,reason,source_fetch_ids)
         VALUES ($1,$2,'pending',$3,$4,$5::jsonb) ON CONFLICT (checksum) DO UPDATE SET
         object_path = EXCLUDED.object_path,state = EXCLUDED.state,observed_at = EXCLUDED.observed_at,
         reason = EXCLUDED.reason,source_fetch_ids = EXCLUDED.source_fetch_ids,updated_at = clock_timestamp()`,
-      [checksum, item.objectPath, observedAt, item.reason, JSON.stringify(item.sourceFetchIds)]);
+      [item.checksum, item.objectPath, item.observedAt, item.reason, JSON.stringify(item.sourceFetchIds)]);
     }
-    for (const entry of await rawStore.entries()) {
-      if (referenced.has(entry.checksum)) continue;
-      const item = { checksum: entry.checksum, objectPath: entry.objectPath, state: 'retained',
-        detectedAs: 'orphan', observedAt, reason: 'orphan raw object retained for operator review' };
-      orphans.push(item);
+    for (const item of report.orphans) {
       await this.pool.query(`INSERT INTO raw_object_repair (checksum,object_path,state,observed_at,reason)
         VALUES ($1,$2,'retained',$3,$4) ON CONFLICT (checksum) DO UPDATE SET
         object_path = EXCLUDED.object_path,state = EXCLUDED.state,observed_at = EXCLUDED.observed_at,
         reason = EXCLUDED.reason,updated_at = clock_timestamp()`,
-      [item.checksum, item.objectPath, observedAt, item.reason]);
+      [item.checksum, item.objectPath, item.observedAt, item.reason]);
     }
-    return { observedAt, healthy, pending, orphans };
+    return report;
   }
 
   // Read port for the query service: each route runs one statement. Lists are
@@ -757,6 +800,10 @@ export class PostgresPersistence {
       windowMs, firstAt: iso(row.first_fetch_at), lastAt: iso(row.last_fetch_at) } });
   }
 }
+
+// Stored observations carry their page's provenance; the report reads only the
+// observed facts, and both adapters return them without it.
+function withoutProvenance({ provenance, ...observation }) { return observation; }
 
 function issueSqlId(issueId) {
   try { return sqlId('issue', issueId); } catch { throw new Error('issue id is invalid. Expected an id from the review list. Example: issue-12'); }

@@ -2,6 +2,7 @@ import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { createFixtureApplication, createReprocessApplication, createReviewApplication } from './composition-root.mjs';
 import { JOB_DISPOSITIONS, formatReviewList } from './review.mjs';
+import { buildReconciliationReport } from './reconciliation.mjs';
 import { operatorAllowlist, operatorAuthorizer } from '../config/operators.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { runWorkerLoop } from './worker-loop.mjs';
@@ -23,6 +24,8 @@ export const EXIT_CODES = Object.freeze({
   // Configuration is valid, but the worker cannot crawl yet (a production part is missing).
   workerNotReady: 4,
   sourceAdapterMissing: 4, // earlier name for workerNotReady
+  // The reconciliation report ran and found failing checks or quarantined records.
+  reconciliationFailed: 5,
 });
 
 // Best-effort scrub for stderr/console output. Matches "key=value" (env-style)
@@ -325,6 +328,35 @@ export async function runCli({
     } finally { await persistence.close(); }
   }
 
+  if (mode === 'reconcile') {
+    // The reconciliation report over the durable store (#46, #78): read-only,
+    // no transport. Exit 0 when every check passes and nothing is quarantined,
+    // 5 when the report names failures.
+    let settings;
+    try {
+      settings = persistenceSettings(env);
+      if (settings.kind !== 'postgres') throw new Error('reconcile reads the durable store, but PERSISTENCE is memory. Example: PERSISTENCE=postgres');
+      if (args.some((arg) => arg !== '--require-coverage')) throw new Error('reconcile takes only --require-coverage. Example: npm run reconcile');
+    } catch (error) {
+      stderr(`reconcile configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    let persistence;
+    try {
+      persistence = await openPostgres(settings);
+    } catch (error) {
+      stderr(`reconcile persistence unavailable: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.runtimeFailure };
+    }
+    try {
+      const report = await buildReconciliationReport(persistence, { requireCoverage: args.includes('--require-coverage') });
+      crawlLog.emit('reconciliation.completed', { passed: report.passed,
+        failedChecks: report.checks.filter((check) => !check.passed).length, quarantined: report.quarantined.length });
+      stdout(JSON.stringify({ mode, ...report }, null, 2));
+      return { exitCode: report.passed ? EXIT_CODES.success : EXIT_CODES.reconciliationFailed, report };
+    } finally { await persistence.close(); }
+  }
+
   if (mode === 'review') {
     // Operator review (#48): database-backed, read-mostly; actions are recorded
     // dispositions by an OPERATOR_IDS reviewer. No transport is built.
@@ -403,7 +435,7 @@ export async function runCli({
     } finally { await worker.close?.(); }
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, reprocess, review, api, or status. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, reprocess, review, reconcile, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 

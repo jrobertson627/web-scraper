@@ -21,6 +21,7 @@ npm run reprocess -- --page-type box_score   # re-parse stored raw snapshots wit
 npm run review -- list  # pages stopped for review and open issues; show/hold/release/accept/dismiss (JOB_LIFECYCLE.md)
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
 npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
+npm run reconcile     # reconciliation report over PostgreSQL; exit 5 when it names failures (FOUNDATION_HANDOFF.md)
 npm test
 npm run test:postgres    # real, explicitly disposable PostgreSQL database
 npm run smoke:migrations # applies all migrations twice to a disposable database
@@ -34,7 +35,7 @@ Start with an empty disposable PostgreSQL database and explicit `PGHOST`, `PGDAT
 
 CI (`.github/workflows/ci.yml`) runs on every push to `master` and every pull request. It runs `npm run check` and `smoke:foundation` on Node 20.18.1 and 22, then runs local mode and the unit suite with the `pg` driver removed, and runs `smoke:migrations`, `migrate` and `test:postgres` against a throwaway `postgres:16` service container. The real Sports Reference captures are not in the repository, so their tests skip in CI.
 
-The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, and `4` means configuration is valid but the worker cannot crawl (a configured `pageType@version` has no production parser).
+The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, `4` means configuration is valid but the worker cannot crawl (a configured `pageType@version` has no production parser), and `5` means `npm run reconcile` ran and its report names failures.
 
 ### Durable persistence
 
@@ -53,7 +54,7 @@ The fetcher and orchestrator report crawl operations to an injected `events` sin
 | `throttle.paused` | fetcher, each pacing sleep | `throttlePauses`, `throttleWaitMs` |
 | `page.discovered` | orchestrator, after discovery | `discoveredChildren`, `duplicateDiscoveries` |
 | `job.settled` | orchestrator, one per processed job | `parsed`, `retryWaits`, `operatorStops`, `challengeStops`, `permanentFailures`, `parseFailures`, `parseWarnings`, `mergeConflicts` |
-| `reconciliation.completed` | composition root, `reconcile()` | `reconciliationFailures` |
+| `reconciliation.completed` | composition root `reconcile()`, and `npm run reconcile` | `reconciliationFailures` |
 | `crawl.summary` | every 100 settled jobs and at the end of a run | all counters, settled jobs by page type, and job-state counts |
 
 Duplicate discovery is counted within one process; persistence still deduplicates jobs durably. Log lines carry job keys, page types, hosts, codes, counts, and timings, never configuration or environment values. `start:local` writes this log to stderr.

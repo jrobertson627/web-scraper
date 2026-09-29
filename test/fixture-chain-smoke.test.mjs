@@ -37,7 +37,7 @@ test('integration: full HTML fixture chain is isolated, reconciles, and is idemp
   assert.equal(app.persistence.queryModels().schools.filter((school) => school.eligible).length, 2);
   assert.equal(app.persistence.observations.size > 0, true);
   assert.deepEqual(app.transport.calls.sort(), fixtures.map((fixture) => fixture.url).sort());
-  assert.deepEqual(app.reconcile().checks.filter((check) => !check.passed), []);
+  assert.deepEqual((await app.reconcile()).checks.filter((check) => !check.passed), []);
 
   const before = {
     pages: app.persistence.pages.size,
@@ -51,7 +51,7 @@ test('integration: full HTML fixture chain is isolated, reconciles, and is idemp
   } });
   const second = await resumed.runWorkerOnce('restarted-fixture-worker');
   assert.equal(second.processed, 0);
-  assert.equal(resumed.reconcile().passed, true);
+  assert.equal((await resumed.reconcile()).passed, true);
   assert.deepEqual({
     pages: app.persistence.pages.size,
     observations: app.persistence.observations.size,
@@ -79,13 +79,13 @@ test('integration: a new worker composition recovers an expired claim after a si
   assert.equal(restarted.persistence.getJob(abandoned.key).attempts, 2);
   assert.equal(restarted.persistence.getJob(abandoned.key).history.some((event) => event.to === 'retry_wait'), true);
   assert.equal(restarted.transport.calls.length, fixtures.length);
-  assert.equal(restarted.reconcile().passed, true);
+  assert.equal((await restarted.reconcile()).passed, true);
 });
 
 test('integration: shifted layout and off-host link identify exact quarantined records', async () => {
   const app = createFixtureApplication({ fixtureEntries: foundationCorpus({ faults: true }) });
   await app.runWorkerOnce();
-  const report = app.reconcile();
+  const report = await app.reconcile();
   assert.equal(report.passed, false);
   const resolution = report.checks.find((check) => check.id === 'linked_game_resolution');
   assert.equal(resolution.passed, false);
@@ -110,7 +110,7 @@ test('integration: reconciliation identifies inconsistent results, records, and 
   });
   const app = createFixtureApplication({ fixtureEntries: fixtures });
   await app.runWorkerOnce();
-  const report = app.reconcile();
+  const report = await app.reconcile();
   assert.equal(report.passed, false);
   const check = (id) => report.checks.find((entry) => entry.id === id);
 
@@ -139,7 +139,7 @@ test('integration: reconciliation compares player season totals with box-score l
     : fixture));
   const app = createFixtureApplication({ fixtureEntries: fixtures });
   await app.runWorkerOnce();
-  const players = app.reconcile().checks.find((entry) => entry.id === 'player_season_totals_match_box_scores');
+  const players = (await app.reconcile()).checks.find((entry) => entry.id === 'player_season_totals_match_box_scores');
   assert.deepEqual(players.records.map(({ field, season, boxScores }) => ({ field, season, boxScores })),
     [{ field: '/players/b-forward.pts', season: 45, boxScores: 47 }]);
 });

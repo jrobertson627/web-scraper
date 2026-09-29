@@ -26,6 +26,7 @@
     "review:personal": "node scripts/personal-worker.mjs review",
     "start:api": "node src/application/cli.mjs api",
     "status": "node src/application/cli.mjs status",
+    "reconcile": "node src/application/cli.mjs reconcile",
     "smoke:foundation": "node scripts/foundation-smoke.mjs",
     "migrate": "node scripts/migrate.mjs",
     "smoke:migrations": "node scripts/migration-smoke.mjs",
