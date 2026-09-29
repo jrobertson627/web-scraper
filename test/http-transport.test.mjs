@@ -285,3 +285,59 @@ test('real 429, challenge, server errors, and socket resets produce the required
     }
   } finally { await origin.close(); }
 });
+
+// #128: every validated address is tried, not just the first.
+function transportFor(addresses, options = {}) {
+  return new HttpTransport({
+    resolve: async () => addresses, allowAddress: (address) => addresses.some((entry) => entry.address === address), ca, ...options,
+  });
+}
+const get = (transport, origin, path = '/page') => transport.request({ method: 'GET', url: origin.url(path), timeoutMs: 5_000, maxResponseBytes: 4096 });
+
+test('an unreachable first address falls back to the next one that connects', async () => {
+  const origin = await serverFor((request, response) => { response.writeHead(200, { 'content-type': 'text/plain' }); response.end('ok'); });
+  try {
+    // The server listens on IPv4 loopback only, so the IPv6 loopback connection is refused
+    // (or unroutable, on a host without IPv6): either way nothing was sent to it.
+    const transport = transportFor([{ address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 }]);
+    const response = await get(transport, origin);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.toString(), 'ok');
+    assert.equal(origin.requests.length, 1, 'the origin saw exactly one request');
+    assert.equal(transport.preferredFamily, 4, 'the family that worked is tried first next time');
+    assert.equal((await get(transport, origin)).status, 200);
+    assert.equal(origin.requests.length, 2);
+  } finally { await origin.close(); }
+});
+
+test('an address that never answers is abandoned after the connect timeout, within the deadline', async () => {
+  const origin = await serverFor((request, response) => { response.writeHead(200); response.end('ok'); });
+  try {
+    // 192.0.2.1 (TEST-NET-1) is unroutable: the connection hangs or fails fast, depending on the host.
+    const transport = transportFor([{ address: '192.0.2.1', family: 4 }, { address: '127.0.0.1', family: 4 }], { connectTimeoutMs: 200 });
+    const startedAt = Date.now();
+    assert.equal((await get(transport, origin)).status, 200);
+    assert.ok(Date.now() - startedAt < 4_500, 'the second address was reached well inside the 5 s deadline');
+  } finally { await origin.close(); }
+});
+
+test('when every address refuses the connection the request fails as a network error', async () => {
+  const origin = await serverFor(() => {});
+  const closed = origin.url('/page');
+  await origin.close();
+  const transport = transportFor([{ address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 }]);
+  await assert.rejects(
+    transport.request({ method: 'GET', url: closed, timeoutMs: 5_000, maxResponseBytes: 4096 }),
+    (error) => error.code === 'transient_network' && error.connectFailure === true,
+  );
+  assert.equal(transport.preferredFamily, null, 'nothing connected, so no family is preferred');
+});
+
+test('the public-address policy still applies to every address before any is tried', async () => {
+  const origin = await serverFor((request, response) => { response.writeHead(200); response.end('ok'); });
+  try {
+    const transport = new HttpTransport({ resolve: async () => [{ address: '127.0.0.1', family: 4 }, { address: '10.0.0.5', family: 4 }], ca, allowAddress: (address) => address === '127.0.0.1' });
+    await assert.rejects(get(transport, origin), (error) => error.code === 'dns_rejected');
+    assert.equal(origin.requests.length, 0);
+  } finally { await origin.close(); }
+});

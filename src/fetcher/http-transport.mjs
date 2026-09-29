@@ -62,11 +62,20 @@ function isChallenge(status, headers, body) {
     || /<(?:iframe|div|input)[^>]+(?:g-recaptcha|h-captcha|cf-chl|captcha)/i.test(html);
 }
 
+// How long one address gets to accept a connection when another is left to try.
+const CONNECT_TIMEOUT_MS = 5_000;
+
 export class HttpTransport {
-  constructor({ resolve = (host) => lookup(host, { all: true }), allowAddress = isPublicAddress, ca } = {}) {
+  // connectTimeoutMs bounds a connection attempt to an address that has others
+  // behind it, so an unroutable first address cannot use the whole deadline.
+  constructor({ resolve = (host) => lookup(host, { all: true }), allowAddress = isPublicAddress, ca, connectTimeoutMs = CONNECT_TIMEOUT_MS } = {}) {
     this.resolve = resolve;
     this.allowAddress = allowAddress;
     this.ca = ca;
+    this.connectTimeoutMs = connectTimeoutMs;
+    // The address family that last connected; tried first next time, so a host
+    // with no route for one family pays for it once, not on every request.
+    this.preferredFamily = null;
   }
 
   async request({ method, url, headers = {}, redirect = 'manual', timeoutMs, maxResponseBytes }) {
@@ -98,20 +107,50 @@ export class HttpTransport {
       !entry || typeof entry.address !== 'string' || isIP(entry.address) !== entry.family || !this.allowAddress(entry.address))) {
       throw new TransportFailure('dns_rejected', 'resolved address is missing or outside the public address policy');
     }
-    const selected = addresses[0];
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new TransportFailure('transport_timeout', 'request timed out before connection');
+    // Every address was checked above. Try them in turn, the family that last
+    // worked first, moving on only when a connection could not be made (nothing
+    // was sent, so pacing is unaffected) and never past the request deadline.
+    const ordered = [...addresses].sort((left, right) => Number(right.family === this.preferredFamily) - Number(left.family === this.preferredFamily));
+    let failure;
+    for (const [index, selected] of ordered.entries()) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw failure ?? new TransportFailure('transport_timeout', 'request timed out before connection');
+      const last = index === ordered.length - 1;
+      try {
+        const response = await this.#attempt({
+          target, selected, headers, remaining, maxResponseBytes,
+          // The last address has the whole deadline; others a bounded share of it.
+          connectTimeoutMs: last ? null : Math.min(this.connectTimeoutMs, remaining / 2),
+        });
+        this.preferredFamily = selected.family;
+        return response;
+      } catch (error) {
+        failure = error;
+        if (!error?.connectFailure || last) throw error;
+      }
+    }
+    throw failure;
+  }
 
+  // One request to one validated address. A rejection with connectFailure set
+  // means no connection was made, so another address may be tried.
+  #attempt({ target, selected, headers, remaining, maxResponseBytes, connectTimeoutMs }) {
+    const hostname = target.hostname.replace(/^\[|\]$/g, '');
     return new Promise((resolve, reject) => {
       let settled = false;
+      let connected = false;
       let failure;
       let timer;
+      let connectTimer;
       const finish = (error, response) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        if (error) reject(classifyError(error));
-        else resolve(response);
+        clearTimeout(connectTimer);
+        if (!error) { resolve(response); return; }
+        const classified = classifyError(error);
+        if (!connected && ['transient_network', 'connect_timeout'].includes(classified.code)) classified.connectFailure = true;
+        reject(classified);
       };
       const request = httpsRequest(target, {
         method: 'GET', headers: { ...headers, 'accept-encoding': 'identity' }, agent: false,
@@ -156,8 +195,19 @@ export class HttpTransport {
           });
         });
       });
+      request.on('socket', (socket) => {
+        const onConnect = () => { connected = true; clearTimeout(connectTimer); };
+        if (socket.connecting) socket.once('connect', onConnect); else onConnect();
+      });
       request.on('error', (error) => { failure = classifyError(error); });
       request.on('close', () => { if (!settled) finish(failure ?? new TransportFailure('transient_network', 'connection closed before response completed')); });
+      if (connectTimeoutMs !== null) {
+        connectTimer = setTimeout(() => {
+          if (connected) return;
+          failure = new TransportFailure('connect_timeout', 'connection attempt timed out');
+          request.destroy(failure);
+        }, connectTimeoutMs);
+      }
       timer = setTimeout(() => {
         failure = new TransportFailure('transport_timeout', 'request timed out');
         request.destroy(failure);
