@@ -197,6 +197,16 @@ function configuredHost(env) {
   return host;
 }
 
+// How many proxies stand in front of the operator trigger. The client address is
+// the X-Forwarded-For entry that many from the end, which Render's proxy appends,
+// so the wrong-PIN lockout is per client (#125). Use 0 when nothing proxies it.
+function configuredProxyHops(env) {
+  const value = env.OPERATOR_TRUSTED_PROXY_HOPS;
+  if (value === undefined || value === '') return 1;
+  if (!/^\d$/.test(value)) throw new Error('invalid OPERATOR_TRUSTED_PROXY_HOPS. Expected a whole number from 0 through 9. Example: OPERATOR_TRUSTED_PROXY_HOPS=1');
+  return Number(value);
+}
+
 function displayUrl(host, port) {
   return `http://${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
 }
@@ -374,12 +384,14 @@ export async function runCli({
     let port;
     let host;
     let pin;
+    let trustedProxyHops;
     try {
       settings = persistenceSettings(env);
       config = workerConfiguration(env);
       port = configuredPort(env);
       host = configuredHost(env);
       pin = assertOperatorPin(env.OPERATOR_PIN);
+      trustedProxyHops = configuredProxyHops(env);
       if (settings.kind !== 'postgres') throw new Error('the operator trigger runs real crawls, which need PERSISTENCE=postgres. Example: PERSISTENCE=postgres');
     } catch (error) {
       stderr(`operator configuration rejected: ${safeMessage(error)}`);
@@ -390,6 +402,7 @@ export async function runCli({
     const persistence = await openPostgres(settings);
     const operator = createOperatorServer({
       pin,
+      trustedProxyHops,
       liveClaims: () => persistence.liveClaimCount(),
       unreviewedChallenges: () => persistence.unreviewedChallenges(),
       status: async () => summarizeCrawlStatus(await persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS })),

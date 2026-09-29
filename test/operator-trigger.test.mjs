@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
 import { EXIT_CODES, runCli } from '../src/application/cli.mjs';
-import { MIN_PIN_LENGTH, assertOperatorPin, createOperatorServer, pinMatches } from '../src/application/operator-server.mjs';
+import { MIN_PIN_LENGTH, assertOperatorPin, clientKey, clientOf, createOperatorServer, pinMatches } from '../src/application/operator-server.mjs';
 import { InMemoryPersistence } from '../src/persistence/index.mjs';
 
 const PIN = 'correct horse battery';
@@ -152,7 +152,7 @@ test('the read-only API has no operator route and never imports the trigger', as
     assert.doesNotMatch(source, /operator-server|orchestrator|production-worker|composition-root/, file);
   }
   const operatorSource = readFileSync('src/application/operator-server.mjs', 'utf8');
-  assert.deepEqual([...operatorSource.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1]), ['node:crypto', 'node:http']);
+  assert.deepEqual([...operatorSource.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1]), ['node:crypto', 'node:http', 'node:net']);
 });
 
 async function availablePort() {
@@ -203,6 +203,92 @@ test('operator mode needs a PIN and PostgreSQL, and runs the production worker o
   }
   assert.equal(store.closed, 1);
   assert.doesNotMatch(`${errors.join(' ')} ${output.join(' ')}`, /TOP_SECRET|correct horse/);
+});
+
+// #125: wrong PINs are counted per client address.
+const from = (address) => ({ headers: { 'x-forwarded-for': address } });
+
+test('client keys collapse IPv4-mapped addresses and IPv6 /64 prefixes, and reject non-addresses', () => {
+  assert.equal(clientKey('203.0.113.7'), '203.0.113.7');
+  assert.equal(clientKey('::ffff:203.0.113.7'), '203.0.113.7');
+  assert.equal(clientKey('2001:db8:1:2:aaaa:bbbb:cccc:dddd'), '2001:db8:1:2::/64');
+  assert.equal(clientKey('2001:DB8:1:2::9'), '2001:db8:1:2::/64');
+  assert.equal(clientKey('2001:db8::1'), '2001:db8:0:0::/64');
+  assert.equal(clientKey('fe80::1%eth0'), 'fe80:0:0:0::/64');
+  for (const bad of ['not an address', '', undefined, '999.1.1.1']) assert.equal(clientKey(bad), null, String(bad));
+});
+
+test('the client is the X-Forwarded-For entry the proxy appended, never an earlier one', () => {
+  const request = (forwarded, remoteAddress = '10.0.0.9') => ({ headers: forwarded === undefined ? {} : { 'x-forwarded-for': forwarded }, socket: { remoteAddress } });
+  assert.equal(clientOf(request('203.0.113.1'), 1), '203.0.113.1');
+  assert.equal(clientOf(request('9.9.9.9, 203.0.113.1'), 1), '203.0.113.1', 'a client-supplied first entry is ignored');
+  assert.equal(clientOf(request('9.9.9.9, 203.0.113.1, 10.1.1.1'), 2), '203.0.113.1');
+  assert.equal(clientOf(request(undefined), 1), '10.0.0.9', 'no header: the peer address');
+  assert.equal(clientOf(request('203.0.113.1'), 0), '10.0.0.9', 'not behind a proxy: the header is ignored');
+  assert.equal(clientOf(request('203.0.113.1'), 2), '10.0.0.9', 'fewer entries than trusted hops: the header is not trusted');
+  assert.equal(clientOf(request('garbage'), 1), '10.0.0.9', 'an unparseable entry falls back to the peer address');
+  assert.equal(clientOf({ headers: {}, socket: {} }, 1), 'unknown');
+});
+
+test('wrong PINs from one address lock out that address only', async (t) => {
+  const run = await operator({ server: { maxFailures: 3, lockoutMs: 60_000 } });
+  t.after(run.close);
+  const as = (address) => ({ headers: { 'x-forwarded-for': address } });
+  for (let attempt = 0; attempt < 3; attempt += 1) assert.equal((await run.post('status', `wrong guess ${attempt}`, as('203.0.113.1'))).status, 401);
+  assert.equal((await run.post('status', PIN, as('203.0.113.1'))).status, 429, 'the guessing address is locked out, even with the right PIN');
+  assert.equal((await run.post('status', PIN, as('203.0.113.2'))).status, 200, 'another address is not');
+  // Rotating a client-supplied first entry does not escape the lockout: the proxy's entry counts.
+  assert.equal((await run.post('status', PIN, as('198.51.100.9, 203.0.113.1'))).status, 429);
+  run.advance(60_001);
+  assert.equal((await run.post('status', PIN, as('203.0.113.1'))).status, 200);
+});
+
+test('failures from many addresses still add up to a global lockout', async (t) => {
+  const run = await operator({ server: { maxFailures: 3, globalMaxFailures: 6, lockoutMs: 60_000 } });
+  t.after(run.close);
+  const as = (address) => ({ headers: { 'x-forwarded-for': address } });
+  for (const address of ['203.0.113.1', '203.0.113.2', '203.0.113.3']) {
+    for (let attempt = 0; attempt < 2; attempt += 1) assert.equal((await run.post('status', 'wrong guess', as(address))).status, 401);
+  }
+  assert.equal((await run.post('status', PIN, as('203.0.113.4'))).status, 429, 'the global limit locks every address, including a new one');
+  assert.equal((await run.post('status', PIN, as('203.0.113.1'))).status, 429);
+  run.advance(60_001);
+  assert.equal((await run.post('status', PIN, as('203.0.113.4'))).status, 200);
+});
+
+test('a right PIN clears only that address, and the failure window is per address', async (t) => {
+  const run = await operator({ server: { maxFailures: 3, lockoutMs: 60_000 } });
+  t.after(run.close);
+  const as = (address) => ({ headers: { 'x-forwarded-for': address } });
+  await run.post('status', 'wrong guess', as('203.0.113.1'));
+  await run.post('status', 'wrong guess', as('203.0.113.1'));
+  assert.equal((await run.post('status', PIN, as('203.0.113.1'))).status, 200);
+  for (let attempt = 0; attempt < 2; attempt += 1) assert.equal((await run.post('status', 'wrong guess', as('203.0.113.1'))).status, 401, 'the count restarted');
+  run.advance(61_000);
+  assert.equal((await run.post('status', 'wrong guess', as('203.0.113.1'))).status, 401, 'old failures fell out of the window');
+  assert.equal((await run.post('status', PIN, as('203.0.113.1'))).status, 200);
+});
+
+test('the header is ignored when no proxy is trusted, and remembered addresses are bounded', async (t) => {
+  const direct = await operator({ server: { maxFailures: 2, trustedProxyHops: 0 } });
+  t.after(direct.close);
+  const as = (address) => ({ headers: { 'x-forwarded-for': address } });
+  await direct.post('status', 'wrong guess', as('203.0.113.1'));
+  await direct.post('status', 'wrong guess', as('203.0.113.2'));
+  assert.equal((await direct.post('status', PIN, as('203.0.113.3'))).status, 429, 'every request is one client, so spoofed headers cannot dodge the count');
+
+  const bounded = await operator({ server: { maxFailures: 2, maxTrackedClients: 2, globalMaxFailures: 50 } });
+  t.after(bounded.close);
+  for (const address of ['203.0.113.1', '203.0.113.2', '203.0.113.3']) await bounded.post('status', 'wrong guess', as(address));
+  // The oldest address was forgotten to stay within the bound, so it starts a fresh count.
+  assert.equal((await bounded.post('status', 'wrong guess', as('203.0.113.1'))).status, 401);
+  assert.equal((await bounded.post('status', PIN, as('203.0.113.1'))).status, 200, 'its earlier failure was forgotten, so one more did not lock it');
+});
+
+test('lockout settings are validated', () => {
+  const base = { pin: PIN, startRun() {}, status() {}, liveClaims() {} };
+  assert.throws(() => createOperatorServer({ ...base, maxFailures: 5, globalMaxFailures: 5 }), /globalMaxFailures/);
+  assert.throws(() => createOperatorServer({ ...base, trustedProxyHops: -1 }), /trustedProxyHops/);
 });
 
 // #116: the run is reserved before the trigger's database checks, so requests
