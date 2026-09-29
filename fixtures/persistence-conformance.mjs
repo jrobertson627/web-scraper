@@ -89,6 +89,15 @@ export function definePersistenceConformance(test, { label, createStores }) {
     await assert.rejects(async () => stores.persistence.recordCrawlScope(sample), /crawl scope refused/);
   });
 
+  test(`${label}: counts the jobs a worker holds a live claim on`, async () => {
+    const stores = await createStores();
+    const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: stores });
+    await app.ready;
+    assert.equal(await stores.persistence.liveClaimCount(), 0);
+    await stores.persistence.claimNextJob(new Date(), 'conformance-worker');
+    assert.equal(await stores.persistence.liveClaimCount(), 1);
+  });
+
   test(`${label}: the raw repair inventory has the documented shape and finds an orphan`, async () => {
     const stores = await createStores();
     await crawl(stores, false);

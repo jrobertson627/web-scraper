@@ -20,6 +20,8 @@
     "start:local": "node src/application/cli.mjs local",
     "start:worker": "node src/application/cli.mjs worker",
     "start:worker:personal": "node scripts/personal-worker.mjs",
+    "start:operator": "node src/application/cli.mjs operator",
+    "start:operator:personal": "node scripts/personal-worker.mjs operator",
     "reprocess": "node src/application/cli.mjs reprocess",
     "reprocess:personal": "node scripts/personal-worker.mjs reprocess",
     "review": "node src/application/cli.mjs review",

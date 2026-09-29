@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { createFixtureApplication, createReprocessApplication, createReviewApplication } from './composition-root.mjs';
 import { JOB_DISPOSITIONS, formatReviewList } from './review.mjs';
 import { buildReconciliationReport } from './reconciliation.mjs';
+import { assertOperatorPin, createOperatorServer } from './operator-server.mjs';
 import { operatorAllowlist, operatorAuthorizer } from '../config/operators.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { runWorkerLoop } from './worker-loop.mjs';
@@ -188,7 +189,7 @@ async function listen(server, port, host) {
 
 // Listens, wires SIGINT/SIGTERM to an idempotent close, and marks the
 // lifecycle running. onClose releases anything the server was reading from.
-async function serveApi({ lifecycle, server, port, host, stdout, onClose = async () => {} }) {
+async function serveApi({ lifecycle, server, port, host, stdout, onClose = async () => {}, label = 'API' }) {
   let closing;
   const close = () => {
     if (closing) return closing;
@@ -206,7 +207,7 @@ async function serveApi({ lifecycle, server, port, host, stdout, onClose = async
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   lifecycle.running();
-  stdout(`API ready on ${displayUrl(host, port)}`);
+  stdout(`${label} ready on ${displayUrl(host, port)}`);
   return close;
 }
 
@@ -339,6 +340,56 @@ export async function runCli({
     } finally { await persistence.close(); }
   }
 
+  if (mode === 'operator') {
+    // The PIN-protected operator trigger (#55): an HTTP server whose trigger
+    // runs the same production worker as worker mode, in this process. It is
+    // separate from the read-only API and needs the worker configuration.
+    let settings;
+    let config;
+    let port;
+    let host;
+    let pin;
+    try {
+      settings = persistenceSettings(env);
+      config = workerConfiguration(env);
+      port = configuredPort(env);
+      host = configuredHost(env);
+      pin = assertOperatorPin(env.OPERATOR_PIN);
+      if (settings.kind !== 'postgres') throw new Error('the operator trigger runs real crawls, which need PERSISTENCE=postgres. Example: PERSISTENCE=postgres');
+    } catch (error) {
+      stderr(`operator configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    const lifecycle = new ApplicationLifecycle('operator');
+    // This handle serves status and the live-claim check; each run opens its own.
+    const persistence = await openPostgres(settings);
+    const operator = createOperatorServer({
+      pin,
+      liveClaims: () => persistence.liveClaimCount(),
+      status: async () => summarizeCrawlStatus(await persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS })),
+      startRun: async (signal) => {
+        const worker = await startWorker({ config, settings, env, events: crawlLog, openPostgres });
+        try {
+          const result = await worker.orchestrator.run({ workerId: worker.workerId ?? env.WORKER_ID ?? 'operator', signal });
+          crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
+          return result;
+        } finally { await worker.close?.(); }
+      },
+      onRunSettled: (last) => stderr(JSON.stringify({ at: new Date().toISOString(), event: 'operator.run_settled', outcome: last?.outcome,
+        processed: last?.result?.processed, stopped: last?.result?.stopped, error: last?.error ? safeMessage(last.error) : undefined })),
+    });
+    try {
+      lifecycle.ready();
+      const close = await serveApi({ lifecycle, server: operator.server, port, host, stdout, label: 'operator trigger',
+        onClose: async () => { await operator.shutdown(); await persistence.close(); } });
+      return { exitCode: EXIT_CODES.success, lifecycle, operator, server: operator.server, close };
+    } catch (error) {
+      lifecycle.stop();
+      await persistence.close().catch(() => {});
+      throw error;
+    }
+  }
+
   if (mode === 'reconcile') {
     // The reconciliation report over the durable store (#46, #78): read-only,
     // no transport. Exit 0 when every check passes and nothing is quarantined,
@@ -446,7 +497,7 @@ export async function runCli({
     } finally { await worker.close?.(); }
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, reprocess, review, reconcile, api, or status. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, operator, reprocess, review, reconcile, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 
