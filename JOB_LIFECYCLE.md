@@ -52,6 +52,7 @@ An issue moves from `open` to `accepted` or `resolved`.
 | Failure | Counter | Cap | When the cap is reached |
 | --- | --- | --- | --- |
 | Transport error, timeout, 5xx, or an infrastructure error while fetching (raw store write, database call, lease renewal) | `failureAttempts` | request policy `maxAttempts` (3) | `permanently_failed` |
+| 404 or 410 on a link the site published | `failureAttempts` (same budget) | request policy `maxAttempts` (3), with a `notFoundRetryBaseMs` (15 min) backoff doubling to `notFoundRetryMaxMs` (2 h) | `permanently_failed` |
 | 429 with a usable `Retry-After` | `rateLimitAttempts` | request policy `maxRateLimitAttempts` (5) | `operator_stop` (`rate_limit_cap`) |
 | Claim expired without the job completing (worker crashed or lost its lease) | `claimRecoveries` | persistence option `maxClaimRecoveries` (3) | `permanently_failed` |
 | Host busy (another job owns the host's request slot) | none | none | retries after one second |
