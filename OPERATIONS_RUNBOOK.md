@@ -181,6 +181,8 @@ PG_TEST_CONFIRM=disposable npm run test:postgres
 docker stop scraper-pg
 ```
 
+The two `*_CONFIRM` variables are set per command on purpose; `.env.example` does not set them, so a `.env` copied from it never satisfies the guard. The scripts also refuse, whatever the variables say, a `PGHOST` that is not local (localhost, 127.0.0.1, ::1, or a unix socket directory) and a database that already holds crawl data. `test:postgres` marks the database it runs against with a `disposable_test_marker` table, so re-running it, or `smoke:migrations`, on the same local test database works. `PG_DESTRUCTIVE_OVERRIDE=<database name>` skips both checks for a private throwaway server; never set it for a database you care about.
+
 A migration must be repeat-safe (the smoke applies it twice). In production it runs as the pre-deploy command. A migration that rewrites existing rows needs a backup first; the free database plan has none, so export the affected tables with `pg_dump` before deploying.
 
 ## Secrets
