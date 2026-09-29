@@ -11,7 +11,7 @@ export const BOUNDARY_PORT_METHODS = Object.freeze({
   discovery: Object.freeze(['discover']),
   parsers: Object.freeze(['get', 'parse']),
   domain: Object.freeze(['normalize']),
-  persistence: Object.freeze(['claimNextJob', 'listJobs', 'getJob', 'transitionJob', 'recordParse', 'commitPage', 'commitPageAndTransition', 'recoverExpiredClaims']),
+  persistence: Object.freeze(['claimNextJob', 'listJobs', 'getJob', 'transitionJob', 'recordParse', 'commitPage', 'commitPageAndTransition', 'recoverExpiredClaims', 'unreviewedChallenges']),
   api: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'getGame', 'health']),
   // The keyed, paged reads the query service is built on; see BOUNDARY_CONTRACTS.md.
   persistenceReads: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'getGame', 'health']),

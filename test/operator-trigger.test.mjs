@@ -88,7 +88,7 @@ test('a trigger starts one run; another is refused until it settles, and stop as
 
   const status = await run.post('status', PIN, { json: true });
   assert.equal(status.status, 200);
-  assert.deepEqual((await status.json()).detail, { active: true, last: null, summary: { totals: { done: 3, remaining: 1 } } });
+  assert.deepEqual((await status.json()).detail, { active: true, last: null, challengesAwaitingReview: [], summary: { totals: { done: 3, remaining: 1 } } });
 
   const stopped = await run.post('stop', PIN, { json: true });
   assert.equal(stopped.status, 202);

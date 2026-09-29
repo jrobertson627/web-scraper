@@ -17,7 +17,8 @@ import { createServer } from 'node:http';
 // claim: that is another worker's run, judged by the job leases themselves
 // (JOB_LIFECYCLE.md). Leases and host request locks keep two runs from ever
 // overlapping requests even if both started; this check keeps a second one
-// from starting.
+// from starting. It is also refused while a challenge stop awaits review: the
+// crawl halts on a challenge until an operator has looked (npm run review).
 
 export const MIN_PIN_LENGTH = 8;
 const MAX_BODY_BYTES = 2048;
@@ -81,12 +82,13 @@ async function readBody(request) {
 }
 
 // startRun(signal) starts a run and returns a promise of its result; status()
-// returns a progress summary; liveClaims() counts jobs holding a live claim.
+// returns a progress summary; liveClaims() counts jobs holding a live claim;
+// unreviewedChallenges() lists challenge stops no operator has reviewed.
 // failures within lockoutMs of each other, maxFailures of them, lock every PIN
 // check for lockoutMs, so a short PIN cannot be guessed; a lockout also delays
 // the operator, which is the trade-off.
 export function createOperatorServer({
-  pin, startRun, status, liveClaims, clock = () => new Date(), maxFailures = 5, lockoutMs = 15 * 60_000,
+  pin, startRun, status, liveClaims, unreviewedChallenges = async () => [], clock = () => new Date(), maxFailures = 5, lockoutMs = 15 * 60_000,
   onRunSettled = () => {},
 }) {
   const operatorPin = assertOperatorPin(pin);
@@ -106,6 +108,10 @@ export function createOperatorServer({
 
   async function trigger() {
     if (current) return { status: 409, message: `A run started here at ${current.startedAt} is still active.` };
+    const challenged = await unreviewedChallenges();
+    if (challenged.length) {
+      return { status: 409, message: `The crawl is halted: ${challenged.length} challenge stop${challenged.length === 1 ? '' : 's'} (first ${challenged[0].url}) await review. Review them with npm run review before starting a run.` };
+    }
     const claims = await liveClaims();
     if (claims > 0) return { status: 409, message: `Another worker holds ${claims} live claim${claims === 1 ? '' : 's'}; not starting a second run.` };
     const controller = new AbortController();
@@ -121,8 +127,10 @@ export function createOperatorServer({
 
   async function report() {
     const summary = await status();
-    return { status: 200, message: current ? `A run started at ${current.startedAt} is active.` : 'No run is active here.',
-      detail: { active: Boolean(current), last, summary } };
+    const challenged = await unreviewedChallenges();
+    const halted = challenged.length ? ` The crawl is halted: ${challenged.length} challenge stop(s) await review.` : '';
+    return { status: 200, message: `${current ? `A run started at ${current.startedAt} is active.` : 'No run is active here.'}${halted}`,
+      detail: { active: Boolean(current), last, challengesAwaitingReview: challenged, summary } };
   }
 
   function stop() {

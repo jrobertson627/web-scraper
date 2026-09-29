@@ -12,7 +12,7 @@ export const NO_CRAWL_EVENTS = Object.freeze({ emit() {} });
 export const CRAWL_COUNTERS = Object.freeze([
   'requestsStarted', 'cacheHits', 'notModified', 'throttlePauses', 'throttleWaitMs', 'retryWaits', 'challengeStops',
   'operatorStops', 'permanentFailures', 'parsed', 'parseWarnings', 'parseFailures', 'discoveredChildren',
-  'duplicateDiscoveries', 'mergeConflicts', 'reconciliationFailures',
+  'duplicateDiscoveries', 'mergeConflicts', 'reconciliationFailures', 'runHalts',
 ]);
 
 function settledFields(event) {
@@ -75,6 +75,8 @@ export function createCrawlLog({
       byPageType[pageType] ??= {};
       byPageType[pageType][kind] = (byPageType[pageType][kind] ?? 0) + 1;
       settled += 1;
+    } else if (event === 'run.halted') {
+      counters.runHalts += 1;
     } else if (event === 'reconciliation.completed') {
       counters.reconciliationFailures += (fields.failedChecks ?? 0) + (fields.quarantined ?? 0);
     }

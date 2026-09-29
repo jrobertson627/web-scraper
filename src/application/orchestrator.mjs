@@ -1,7 +1,7 @@
 import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
 import { normalizeParsedPage, parseSnapshot, parserVersionFor, snapshotFor } from './page-pipeline.mjs';
 import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
-import { isTransientStoreError } from '../contracts/jobs.mjs';
+import { HALTING_STOP_CODES, isTransientStoreError } from '../contracts/jobs.mjs';
 
 // Sleeps for ms, ending early (without throwing) if the signal aborts.
 function abortableDelay(ms, signal) {
@@ -31,21 +31,45 @@ export class IngestionOrchestrator {
     this.clock = clock;
   }
 
+  // A run halts on a challenge (HALTING_STOP_CODES): after the job that got it,
+  // and before claiming anything while any challenge stop still awaits an
+  // operator's review (npm run review), so a restarted worker makes no request
+  // either. Returns the halt, or null.
+  async #haltBeforeStart() {
+    const pending = await this.persistence.unreviewedChallenges();
+    if (!pending.length) return null;
+    return this.#halt({ jobKey: pending[0].jobKey, pageType: pending[0].pageType, awaitingReview: pending.length });
+  }
+
+  #halt({ jobKey, pageType, awaitingReview = 1 }) {
+    const halt = Object.freeze({ reason: 'challenge', jobKey, pageType, awaitingReview });
+    this.events.emit('run.halted', halt);
+    return halt;
+  }
+
+  #haltAfter(event) {
+    return event?.kind === 'operator_stop' && HALTING_STOP_CODES.includes(event.code)
+      ? this.#halt({ jobKey: event.jobKey, pageType: event.pageType }) : null;
+  }
+
   // Processes every job that is claimable now, then returns. Returns job
-  // counts by state rather than the jobs themselves.
+  // counts by state rather than the jobs themselves, and `halt` when a
+  // challenge stopped the run.
   // pageTypes limits the run to those page types (a manifest run, #44).
   async runOnce(workerId = 'worker', { pageTypes } = {}) {
     let processed = 0;
     const events = [];
-    for (;;) {
+    let halt = await this.#haltBeforeStart();
+    while (!halt) {
       const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
       if (!job) break;
       const event = await this.#process(job);
       if (event) events.push(Object.freeze(event));
       if (event) this.events.emit('job.settled', event);
       processed += 1;
+      halt = this.#haltAfter(event);
     }
-    return { processed, counts: await this.persistence.jobCounts(), events: Object.freeze(events) };
+    return { processed, counts: await this.persistence.jobCounts(), events: Object.freeze(events), ...(halt ? { halt } : {}) };
   }
 
   // Long-running worker loop. When nothing is claimable it sleeps until the
@@ -58,7 +82,8 @@ export class IngestionOrchestrator {
   async run({ workerId = 'worker', signal, maxIdleMs = 30_000, minIdleMs = 250, onEvent = () => {}, sleep = abortableDelay, pageTypes } = {}) {
     let processed = 0;
     const outcomes = {};
-    while (!signal?.aborted) {
+    let halt = await this.#haltBeforeStart();
+    while (!halt && !signal?.aborted) {
       const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
       if (job) {
         const event = await this.#process(job, signal);
@@ -67,13 +92,16 @@ export class IngestionOrchestrator {
           outcomes[event.kind] = (outcomes[event.kind] ?? 0) + 1;
           onEvent(Object.freeze(event));
         }
+        halt = this.#haltAfter(event);
         continue;
       }
       const outlook = await this.persistence.workOutlook({ pageTypes });
       if (!outlook.remaining) break;
       await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, outlook.wakeInMs ?? maxIdleMs)), signal);
     }
-    return { processed, stopped: Boolean(signal?.aborted), outcomes, counts: await this.persistence.jobCounts() };
+    // stopped: the run ended with work left, for a signal or a challenge halt.
+    const stopReason = halt ? 'challenge' : signal?.aborted ? 'signal' : null;
+    return { processed, stopped: Boolean(stopReason), stopReason, ...(halt ? { halt } : {}), outcomes, counts: await this.persistence.jobCounts() };
   }
 
   async #process(job, signal) {
@@ -89,7 +117,9 @@ export class IngestionOrchestrator {
         return { kind: 'retry_wait', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason, nextAllowedAt: result.nextAllowedAt };
       }
       if (result.kind === 'operator_stop') {
-        await this.persistence.transitionJob(job.key, 'operator_stop', job.lease, { lastError: result.reason });
+        // The code (for example challenge) is recorded so a restarted run can
+        // tell an unreviewed challenge from other stops.
+        await this.persistence.transitionJob(job.key, 'operator_stop', job.lease, { lastError: result.reason, ...(result.code ? { code: result.code } : {}) });
         return { kind: 'operator_stop', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       if (result.kind === 'permanently_failed') {
