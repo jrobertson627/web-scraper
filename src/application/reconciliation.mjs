@@ -1,8 +1,7 @@
 import { assertBoundaryPort } from '../contracts/boundaries.mjs';
 import { CORE_STAT_FIELDS } from '../contracts/parsed-documents.mjs';
-import {
-  TARGET_ENDING_YEARS, canonicalizeSourceUrl, createSourceUrl, serializeCanonicalPath,
-} from '../contracts/source.mjs';
+import { canonicalizeSourceUrl, createSourceUrl, serializeCanonicalPath } from '../contracts/source.mjs';
+import { LEGACY_SEASON_ENDING_YEAR } from '../contracts/season.mjs';
 
 const MINUTES_TOLERANCE = 1;
 const SOURCE_VALUE_STATES = Object.freeze(['blank', 'unavailable', 'null', 'present']);
@@ -88,20 +87,23 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
     return own ? { own, other: game.data.teams.find((team) => team !== own) } : null;
   };
 
-  // School index: the stored eligibility decision agrees with To == 2026.
+  // School index: the stored eligibility decision agrees with the rule, To equal to
+  // the season the decision was made under (recorded on each observation, #115;
+  // an observation from before that is 2026).
   const indexJobs = parsedJobs('school_index');
   const indexPages = await pagesFor(indexJobs.map((job) => job.key));
   const schoolObservations = new Map((indexJobs.length ? await reads.acceptedObservations(indexJobs.map((job) => job.key)) : [])
     .map((entry) => [entry.key, entry.observation]));
   const eligibleRecords = [];
   for (const page of indexPages.values()) {
-    const eligibleCount = (page.data.schools ?? []).filter((school) => school.to === 2026).length;
-    if (eligibleCount < minEligibleSchools) eligibleRecords.push({ key: page.jobKey, eligibleSchools: eligibleCount, minimum: minEligibleSchools });
+    let eligibleCount = 0;
     for (const [rowIndex, school] of (page.data.schools ?? []).entries()) {
       const observation = schoolObservations.get(`school:${page.jobKey}:${rowIndex}`);
-      const expected = school.to === 2026;
+      const expected = school.to === (observation?.seasonEndingYear ?? LEGACY_SEASON_ENDING_YEAR);
+      if (expected) eligibleCount += 1;
       if (observation?.eligible !== expected) eligibleRecords.push({ key: `${page.jobKey}:${rowIndex}`, expected, observed: observation?.eligible ?? null });
     }
+    if (eligibleCount < minEligibleSchools) eligibleRecords.push({ key: page.jobKey, eligibleSchools: eligibleCount, minimum: minEligibleSchools });
   }
   add('eligible_school_count', eligibleRecords);
 
@@ -227,7 +229,7 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
     }
 
     for (const season of seasonPages.values()) {
-      if (!TARGET_ENDING_YEARS.includes(season.data.endingYear)) scopeRecords.push({ key: season.jobKey, endingYear: season.data.endingYear });
+      if (!scopeYears.includes(season.data.endingYear)) scopeRecords.push({ key: season.jobKey, endingYear: season.data.endingYear });
       const logJob = childrenOf(season.jobKey, 'game_log').find((job) => job.state === 'parsed');
       const log = logJob ? logPages.get(logJob.key) : null;
       if (!log) continue;

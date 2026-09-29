@@ -8,7 +8,7 @@ The school population is the men's schools table at:
 
 - <https://www.sports-reference.com/cbb/schools/#all_NCAAM_schools>
 
-A school is eligible when its index row has `To == 2026`.
+A school is eligible when its index row has `To` equal to the current season's ending year (`To == 2026` for the 2025-26 season; see `REQUEST_POLICY.md`, "Decision: the current season").
 
 For every eligible school, ingest only these five seasons:
 
@@ -228,8 +228,8 @@ Required properties:
 
 Produce reconciliation reports covering these invariants:
 
-- Eligible-school count equals index rows with `To == 2026`.
-- No accepted season has an ending year outside `2022`–`2026`.
+- Eligible-school count equals index rows whose `To` is the season the index was read under, and is at least 300.
+- No accepted season has an ending year outside the crawl's recorded scope (`2022`–`2026` for the 2025-26 season).
 - Discovered season count equals the linked target-season rows for each school.
 - Every completed game-log row with a box-score link resolves to one game.
 - One canonical box-score URL creates only one game.

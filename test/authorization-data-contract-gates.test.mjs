@@ -4,7 +4,8 @@ import { authorizationStatus, publicationStatus } from '../src/config/authorizat
 import { createDataContract, dataContractStatus, contractFingerprint } from '../src/config/data-contract.mjs';
 import { validateConfiguration } from '../src/config/configuration.mjs';
 
-const scope = { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+const scope = { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'CurrentSeasonEndingYear-4..CurrentSeasonEndingYear' };
+const configScope = { eligibilityPredicate: scope.eligibilityPredicate, currentSeasonEndingYear: 2026 };
 const contract = { providerId: 'provider', version: 'v1', retainedFields: ['school', 'games'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'public', retention: 'indefinite', effectiveAt: '2026-01-01T00:00:00.000Z' };
 const authorization = { providerId: 'provider', status: 'active', uses: ['crawl', 'publish'], evidenceRef: 'vault://grant-1', contractVersion: 'v1', scope };
 const policy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'test (+ops@example.com)' };
@@ -25,7 +26,7 @@ test('authorization fails closed for scope, contract, expiry, and revocation mis
 });
 
 test('worker/public configuration requires matching authorization and public data contract', () => {
-  const input = { mode: 'worker', providerId: 'provider', allowedHosts: scope.allowedHosts, rawStore: 'memory', publication: 'private', policy, authorization, dataContract: contract, ...scope };
+  const input = { mode: 'worker', providerId: 'provider', allowedHosts: scope.allowedHosts, rawStore: 'memory', publication: 'private', policy, authorization, dataContract: contract, ...configScope };
   input.authorization = { ...authorization, contractFingerprint: contractFingerprint(contract) };
   assert.doesNotThrow(() => validateConfiguration(input, { clock: () => new Date('2026-01-02T00:00:00Z') }));
   assert.throws(() => validateConfiguration({ ...input, authorization: { ...authorization, scope: { ...scope, targetEndingYears: [2024] } } }), /scope/);

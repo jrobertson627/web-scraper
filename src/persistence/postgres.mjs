@@ -512,7 +512,7 @@ export class PostgresPersistence {
   async crawlScope(client = this.pool) {
     const result = await client.query('SELECT kind, schools, ending_years FROM crawl_scopes ORDER BY id DESC LIMIT 1');
     const row = result.rows[0];
-    return row ? createCrawlScope(row.kind === 'full' ? { kind: 'full' } : { schools: row.schools, endingYears: row.ending_years }) : FULL_CRAWL_SCOPE;
+    return row ? createCrawlScope(row.kind === 'full' ? { kind: 'full', endingYears: row.ending_years } : { schools: row.schools, endingYears: row.ending_years }) : FULL_CRAWL_SCOPE;
   }
 
   // Records the scope a crawl runs under, refusing one that does not cover the

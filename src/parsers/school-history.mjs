@@ -1,4 +1,3 @@
-import { TARGET_ENDING_YEARS } from '../contracts/source.mjs';
 import {
   assertTableLayout,
   loadSportsReferenceHtml,
@@ -8,7 +7,11 @@ import {
   tableDataRows,
 } from './sports-reference-html.mjs';
 
-const targetYears = new Set(TARGET_ENDING_YEARS);
+// The oldest season a history row is kept for. The target seasons are the last
+// five up to the current season (contracts/season.mjs, #115), which moves forward
+// each year, so the parser keeps every linked season from here on and discovery
+// applies the window. 2022 is the oldest a window can ever start at.
+const FIRST_KEPT_ENDING_YEAR = 2022;
 
 function historyTableId(snapshot) {
   const match = /^\/cbb\/schools\/([^/]+)\/men\/?$/.exec(snapshot?.sourceUrl?.path ?? '');
@@ -41,7 +44,7 @@ export class SchoolHistoryParser {
         const cell = requiredCell($, row, 'season', id);
         const endingYear = endingYearOf(cell.text());
         const href = cell.find('a').attr('href');
-        if (!href || !targetYears.has(endingYear)) continue;
+        if (!href || endingYear < FIRST_KEPT_ENDING_YEAR) continue;
         const source = snapshot.sourceUrlFrom(href);
         const expected = `/cbb/schools/${id}/men/${endingYear}.html`;
         if (source.path !== expected) throw new Error(`season ${endingYear} links to ${source.path}, expected ${expected}`);

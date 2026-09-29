@@ -1,14 +1,29 @@
 import { deepFreeze } from './boundaries.mjs';
-import { PAGE_TYPES, TARGET_ENDING_YEARS } from './source.mjs';
+import { PAGE_TYPES } from './source.mjs';
+import { LEGACY_SEASON_ENDING_YEAR, targetEndingYearsFor } from './season.mjs';
 
 // What a crawl covers (#78; see "Decision: crawl scope" in REQUEST_POLICY.md).
-// The full scope is the project's fixed contract: every school whose index row
-// has To == 2026, and each one's linked seasons ending in 2022-2026. A sample
+// The full scope is the project's contract: every school whose index row has To
+// equal the current season's ending year, and each one's linked seasons over the
+// last five ending years up to it (contracts/season.mjs, #115). A sample
 // restricts it to named schools and some of those years, never wider, so the
 // full-scope checks stay exactly as they are. The scope a store was crawled
 // under is recorded with it, and may only widen.
+//
+// FULL_CRAWL_SCOPE is the scope of a store that recorded none: the fixed
+// 2022-2026 scope every store was crawled under before the season was resolved.
 
-export const FULL_CRAWL_SCOPE = deepFreeze({ kind: 'full', schools: null, endingYears: [...TARGET_ENDING_YEARS] });
+export const FULL_CRAWL_SCOPE = deepFreeze({ kind: 'full', schools: null, endingYears: [...targetEndingYearsFor(LEGACY_SEASON_ENDING_YEAR)] });
+
+// The full scope over the given target ending years.
+export function fullCrawlScope(targetEndingYears) {
+  return sameYears(targetEndingYears, FULL_CRAWL_SCOPE.endingYears) ? FULL_CRAWL_SCOPE
+    : deepFreeze({ kind: 'full', schools: null, endingYears: [...targetEndingYears] });
+}
+
+function sameYears(left, right) {
+  return left.length === right.length && left.every((year, index) => year === right[index]);
+}
 
 const MAX_SAMPLE_SCHOOLS = 50;
 // A site path such as /cbb/schools/duke/men/: no scheme, host, query or fragment.
@@ -18,12 +33,16 @@ function scopeError(problem) {
   return new Error(`crawl sample ${problem}. Example: {"schools":["/cbb/schools/duke/men/"],"endingYears":[2024]}`);
 }
 
-// undefined or { kind: 'full' } is the full scope; { schools, endingYears }
-// (kind 'sample' optional) is a sample.
-export function createCrawlScope(input) {
-  if (input === undefined || input === null) return FULL_CRAWL_SCOPE;
+// undefined or { kind: 'full' } is the full scope over `targetEndingYears`;
+// { kind: 'full', endingYears } is a recorded one; { schools, endingYears }
+// (kind 'sample' optional) is a sample. With `targetEndingYears`, a sample's years
+// must be among them; without it, they need only be plausible years, which is how
+// a recorded scope is read back.
+export function createCrawlScope(input, { targetEndingYears } = {}) {
+  const legacy = targetEndingYears === undefined;
+  if (input === undefined || input === null) return fullCrawlScope(targetEndingYears ?? FULL_CRAWL_SCOPE.endingYears);
   if (typeof input !== 'object' || Array.isArray(input)) throw scopeError('is invalid: expected an object of schools and endingYears');
-  if (input.kind === 'full') return FULL_CRAWL_SCOPE;
+  if (input.kind === 'full') return fullCrawlScope(targetEndingYears ?? input.endingYears ?? FULL_CRAWL_SCOPE.endingYears);
   if (input.kind !== undefined && input.kind !== 'sample') throw scopeError(`kind ${input.kind} is invalid: expected sample or full`);
   const extra = Object.keys(input).filter((key) => !['kind', 'schools', 'endingYears'].includes(key));
   if (extra.length) throw scopeError(`has unknown fields ${extra.join(', ')}`);
@@ -35,9 +54,10 @@ export function createCrawlScope(input) {
     throw scopeError('schools must be site paths of school pages, without host, query or fragment');
   }
   if (new Set(schools).size !== schools.length) throw scopeError('schools repeat a path');
-  if (!Array.isArray(endingYears) || !endingYears.length || endingYears.some((year) => !TARGET_ENDING_YEARS.includes(year))
+  const inRange = (year) => (legacy ? Number.isSafeInteger(year) && year >= 1900 && year <= 2200 : targetEndingYears.includes(year));
+  if (!Array.isArray(endingYears) || !endingYears.length || endingYears.some((year) => !inRange(year))
       || new Set(endingYears).size !== endingYears.length) {
-    throw scopeError(`endingYears must be distinct years from ${TARGET_ENDING_YEARS.join(', ')}`);
+    throw scopeError(legacy ? 'endingYears must be distinct four-digit years' : `endingYears must be distinct years from ${targetEndingYears.join(', ')}`);
   }
   return deepFreeze({ kind: 'sample', schools: [...schools].sort(), endingYears: [...endingYears].sort((a, b) => a - b) });
 }

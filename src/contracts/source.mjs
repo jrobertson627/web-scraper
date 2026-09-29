@@ -6,9 +6,6 @@ export const PAGE_TYPES = Object.freeze([
   'box_score',
 ]);
 
-export const TARGET_ENDING_YEARS = Object.freeze([2022, 2023, 2024, 2025, 2026]);
-export const REQUIRED_ELIGIBILITY_ENDING_YEAR = 2026;
-export const REQUIRED_ELIGIBILITY_PREDICATE = `To == ${REQUIRED_ELIGIBILITY_ENDING_YEAR}`;
 
 // About 360 schools are eligible in a normal season (the index lists about 365
 // with To == 2026). An index that yields far fewer means the eligibility rule no
@@ -17,8 +14,9 @@ export const REQUIRED_ELIGIBILITY_PREDICATE = `To == ${REQUIRED_ELIGIBILITY_ENDI
 export const EXPECTED_ELIGIBLE_SCHOOLS = 360;
 export const MIN_ELIGIBLE_SCHOOLS = 300;
 
-export function isEligibleSchool(school) {
-  return school?.to === REQUIRED_ELIGIBILITY_ENDING_YEAR;
+// A school is eligible when its To is the current season's ending year (season.mjs).
+export function isEligibleSchool(school, seasonEndingYear) {
+  return school?.to === seasonEndingYear;
 }
 
 export function assertPageType(pageType) {

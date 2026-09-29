@@ -6,7 +6,7 @@ function baseConfig(overrides = {}) {
   return {
     mode: 'worker', providerId: 'provider', allowedHosts: ['provider.example'], rawStore: 'filesystem', rawStoreRoot: '/var/lib/raw',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' },
-    eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+    eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026],
     publication: 'private',
     ...overrides,
   };

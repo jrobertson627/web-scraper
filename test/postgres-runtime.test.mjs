@@ -36,7 +36,7 @@ function fakePersistence(models = {}) {
 function workerEnv(extra) {
   const dataContract = { providerId: 'provider', version: 'v1', retainedFields: ['school'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'private', retention: 'indefinite' };
   const authorization = { providerId: 'provider', status: 'active', uses: ['crawl'], evidenceRef: 'private-record', contractVersion: 'v1', contractFingerprint: contractFingerprint(dataContract),
-    scope: { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] } };
+    scope: { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'CurrentSeasonEndingYear-4..CurrentSeasonEndingYear' } };
   return { USER_AGENT: 'test (+ops@example.com)', RAW_STORE_ROOT: process.cwd(), AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(dataContract), ...extra };
 }
 

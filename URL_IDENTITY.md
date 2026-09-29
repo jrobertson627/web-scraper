@@ -26,8 +26,8 @@ A school's identity is its men's history path. Opponent and scorebox links point
 
 Discovery follows only links the page publishes. It never builds a URL from a year range, a date or a display name. With a source adapter (worker mode), each child link must classify as the expected page type; a mismatched or refused link becomes a `rejected_url` observation and no job.
 
-1. School index: every row is observed with its eligibility; a history job is queued only for `To == 2026` schools.
-2. School history: linked seasons in 2022-2026 are queued. A target season the page does not link is recorded as unavailable coverage (`not_linked`, or `link_rejected` when its link was refused), not as a failure.
+1. School index: every row is observed with its eligibility; a history job is queued only for schools whose `To` is the current season's ending year.
+2. School history: linked seasons in the target window (the five ending years up to the current season, 2022-2026 for the 2025-26 season) are queued. A target season the page does not link is recorded as unavailable coverage (`not_linked`, or `link_rejected` when its link was refused), not as a failure.
 3. Season: the published game-log link is queued; a season without one produces a warning.
 4. Game log: every row is observed, including incomplete rows, with `canonicalBoxScorePath` and `opponentSchoolSourcePath` (`null` for an unlinked opponent). Only a row's published box-score link creates a job. Opponents are never crawled.
 5. Box score: observed with each team's `schoolSourcePath`; no jobs. Previous/next game links are ignored.
