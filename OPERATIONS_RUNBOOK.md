@@ -62,7 +62,7 @@ A scope can only widen. A worker started with a narrower scope than the store ho
 - The crawl log (stderr, one JSON object per line). A `crawl.summary` line every 100 settled jobs carries the counters. Watch:
   - `runHalts` and `challengeStops`: the crawl halted on a challenge ([Challenges](#a-challenge-403-or-captcha));
   - `operatorStops`: pages stopped for review, for example after five 429s;
-  - `retryWaits` and `permanentFailures`: some are normal (a missing page is a 404);
+  - `retryWaits` and `permanentFailures`: some are normal (a page the site links to but does not serve is retried after 15 and 30 minutes on a 404 or 410, then given up on);
   - `parseFailures`: a layout change ([Parse failures](#a-parse-failure-layout-change)).
 - `npm run review:personal -- list` for anything stopped.
 
@@ -117,6 +117,10 @@ npm run review:personal -- show <job key | issue id>
 2. Capture fresh fixtures if needed (see [Recapture fixtures](#recapture-fixtures)), write a new parser version that reads the new layout, with tests, and deploy it ([Upgrade a parser](#upgrade-a-parser-in-production)).
 3. Reprocess the failed pages: `npm run reprocess:personal -- --state parse_failed`. Each one that parses becomes `parsed`, and the pages it links to are queued.
 4. Start the worker again to fetch those.
+
+### The school index yields too few schools
+
+If the index job ends `parse_failed` with `the school index yields only N eligible schools; expected at least 300 (about 360)`, the eligibility rule (`To == 2026`) no longer matches the site. The usual cause is that Sports Reference added a new season, so every active school's `To` moved to 2027. Nothing was queued, and nothing is wrong with the stored page. Do not lower the floor to get past it: decide the eligibility rule first (issue #115), then reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`). `npm run reconcile` applies the same floor to a stored index and reports it under `eligible_school_count`. `MIN_ELIGIBLE_SCHOOLS` lowers the floor for a store that is not the real index, such as a local experiment; leave it unset for a real crawl.
 
 ### A conflicting record
 

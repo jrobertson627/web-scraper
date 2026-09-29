@@ -12,11 +12,17 @@ export const REQUEST_POLICY_DEFAULTS = Object.freeze({
   maxResponseBytes: 16 * 1024 * 1024,
   maxRetryAfterMs: 86_400_000,
   maxRateLimitAttempts: 5,
+  // A 404 or 410 on a link the site published is retried with a much longer
+  // backoff than a transport error: a page that is missing during the site's own
+  // deploy is usually back within the hour (#130).
+  notFoundRetryBaseMs: 900_000,
+  notFoundRetryMaxMs: 7_200_000,
 });
 
 // Retry budgets (see JOB_LIFECYCLE.md):
-// - transport errors, 5xx responses and fetch-phase infrastructure errors are
-//   charged to job.failureAttempts and capped by policy.maxAttempts;
+// - transport errors, 5xx responses, 404/410 responses and fetch-phase
+//   infrastructure errors are charged to job.failureAttempts and capped by
+//   policy.maxAttempts;
 // - 429 responses are charged to job.rateLimitAttempts and capped by
 //   policy.maxRateLimitAttempts, which escalates to operator_stop;
 // - host-busy waits and claim recovery are never charged to either budget.
@@ -25,11 +31,17 @@ export const REQUEST_POLICY_DEFAULTS = Object.freeze({
 
 // The outcome of a failure charged to policy.maxAttempts: a retry_wait with
 // bounded exponential backoff, or permanently_failed once the budget is spent.
-export function chargedRetry(policy, job, reason, code, now) {
+export function chargedRetry(policy, job, reason, code, now, { baseMs = policy.retryBaseMs, maxMs = policy.retryMaxMs } = {}) {
   const attempt = (job.failureAttempts ?? 0) + 1;
   if (attempt >= policy.maxAttempts) return { kind: 'permanently_failed', code, reason: `${reason}; retry limit reached` };
-  const delay = Math.min(policy.retryBaseMs * (2 ** (attempt - 1)), policy.retryMaxMs);
+  const delay = Math.min(baseMs * (2 ** (attempt - 1)), maxMs);
   return { kind: 'retry_wait', code, reason, charge: 'failure', nextAllowedAt: new Date(now.getTime() + delay).toISOString() };
+}
+
+// The outcome of a 404 or 410: a charged retry on the long not-found backoff,
+// permanently_failed only once policy.maxAttempts is spent.
+export function notFoundRetry(policy, job, status, now) {
+  return chargedRetry(policy, job, `upstream ${status}`, 'not_found', now, { baseMs: policy.notFoundRetryBaseMs, maxMs: policy.notFoundRetryMaxMs });
 }
 
 // The outcome of a 429 with a usable Retry-After: a retry_wait charged to the
@@ -61,11 +73,12 @@ export function validateRequestPolicy(input) {
     ['requestTimeoutMs', 1_000, MAX_REQUEST_TIMEOUT_MS], ['maxAttempts', 1, 10], ['retryBaseMs', 100, 60_000],
     ['retryMaxMs', 100, 600_000], ['maxRedirects', 0, 10], ['cacheMaxAgeMs', 0, 86_400_000],
     ['maxResponseBytes', 1_024, 64 * 1024 * 1024], ['maxRetryAfterMs', 6_000, 7 * 86_400_000],
-    ['maxRateLimitAttempts', 1, 50],
+    ['maxRateLimitAttempts', 1, 50], ['notFoundRetryBaseMs', 1_000, 86_400_000], ['notFoundRetryMaxMs', 1_000, 86_400_000],
   ]) {
     if (!Number.isSafeInteger(policy[field]) || policy[field] < min || policy[field] > max) invalid(`policy.${field}`, `an integer from ${min} through ${max}`, `${field}: ${REQUEST_POLICY_DEFAULTS[field]}`);
   }
   if (policy.retryMaxMs < policy.retryBaseMs) invalid('policy.retryMaxMs', 'at least policy.retryBaseMs', 'retryMaxMs: 60000');
+  if (policy.notFoundRetryMaxMs < policy.notFoundRetryBaseMs) invalid('policy.notFoundRetryMaxMs', 'at least policy.notFoundRetryBaseMs', 'notFoundRetryMaxMs: 7200000');
   if (policy.maxRetryAfterMs < policy.minIntervalMs) invalid('policy.maxRetryAfterMs', 'at least policy.minIntervalMs', 'maxRetryAfterMs: 86400000');
   return Object.freeze(policy);
 }
