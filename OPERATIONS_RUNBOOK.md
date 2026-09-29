@@ -118,6 +118,10 @@ npm run review:personal -- show <job key | issue id>
 3. Reprocess the failed pages: `npm run reprocess:personal -- --state parse_failed`. Each one that parses becomes `parsed`, and the pages it links to are queued.
 4. Start the worker again to fetch those.
 
+### The school index yields too few schools
+
+If the index job ends `parse_failed` with `the school index yields only N eligible schools; expected at least 300 (about 360)`, the eligibility rule (`To == 2026`) no longer matches the site. The usual cause is that Sports Reference added a new season, so every active school's `To` moved to 2027. Nothing was queued, and nothing is wrong with the stored page. Do not lower the floor to get past it: decide the eligibility rule first (issue #115), then reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`). `npm run reconcile` applies the same floor to a stored index and reports it under `eligible_school_count`. `MIN_ELIGIBLE_SCHOOLS` lowers the floor for a store that is not the real index, such as a local experiment; leave it unset for a real crawl.
+
 ### A conflicting record
 
 An open `conflicting_page_reprocess` issue means a stored page's content changed from the accepted record (the source corrected something). `show <issue id>` lists the fields that differ. Then either:

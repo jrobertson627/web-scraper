@@ -18,7 +18,8 @@ test('reconcile mode reports on the durable store and exits 5 when the report na
   const { foundationCorpus } = await import('../fixtures/foundation-corpus.mjs');
   const { EXIT_CODES, runCli } = await import('../src/application/cli.mjs');
   const assert = (await import('node:assert/strict')).default;
-  const env = { PERSISTENCE: 'postgres', PGHOST: 'db.internal', PGDATABASE: 'scraper', PGUSER: 'scraper', PGPASSWORD: 'TOP_SECRET' };
+  // The fixture index has two schools, far below the real index's floor (#115), so the fixture store lowers it.
+  const env = { PERSISTENCE: 'postgres', PGHOST: 'db.internal', PGDATABASE: 'scraper', PGUSER: 'scraper', PGPASSWORD: 'TOP_SECRET', MIN_ELIGIBLE_SCHOOLS: '0' };
   const events = [];
   const run = async (faults, args = [], overrides = {}) => {
     const app = createFixtureApplication({ fixtureEntries: foundationCorpus({ faults }) });

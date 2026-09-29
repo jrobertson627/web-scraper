@@ -30,6 +30,11 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   if (JSON.stringify(years) !== JSON.stringify(TARGET_ENDING_YEARS)) {
     throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(TARGET_ENDING_YEARS)}`, 'targetEndingYears: [2022, 2023, 2024, 2025, 2026]');
   }
+  // The fewest eligible schools a school index may yield (#115); 0 disables the check.
+  if (config.minEligibleSchools === undefined) config.minEligibleSchools = 0;
+  if (!Number.isSafeInteger(config.minEligibleSchools) || config.minEligibleSchools < 0 || config.minEligibleSchools > 10_000) {
+    throw configError('minEligibleSchools', 'is invalid', 'Expected an integer from 0 through 10000', 'minEligibleSchools: 300');
+  }
   // A sample restricts the full scope above; it never replaces it (#78).
   try {
     config.crawlScope = createCrawlScope(config.crawlScope);
