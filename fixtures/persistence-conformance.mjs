@@ -76,6 +76,19 @@ export function definePersistenceConformance(test, { label, createStores }) {
     assert.deepEqual(comparable(await stores.persistence.health()), comparable(expected.health()));
   });
 
+  test(`${label}: records the crawl scope, widens a sample by rediscovery, and refuses to narrow`, async () => {
+    const stores = await createStores();
+    const sample = { schools: ['/school/a'], endingYears: [2026] };
+    await (createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: stores, crawlScope: sample })).runWorkerOnce();
+    assert.deepEqual(await stores.persistence.crawlScope(), { kind: 'sample', ...sample });
+    assert.deepEqual((await stores.persistence.crawlStatus()).scope, { kind: 'sample', ...sample });
+    const full = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: stores });
+    await full.runWorkerOnce();
+    assert.equal((await stores.persistence.crawlScope()).kind, 'full');
+    assert.deepEqual(await full.reconcile(), await (await reference(false)).app.reconcile());
+    await assert.rejects(async () => stores.persistence.recordCrawlScope(sample), /crawl scope refused/);
+  });
+
   test(`${label}: the raw repair inventory has the documented shape and finds an orphan`, async () => {
     const stores = await createStores();
     await crawl(stores, false);

@@ -7,18 +7,25 @@ import {
   sourceKey,
 } from '../contracts/source.mjs';
 import { createDiscoveryResult, createJob } from '../contracts/boundaries.mjs';
+import { FULL_CRAWL_SCOPE } from '../contracts/crawl-scope.mjs';
 
 // Discovery reads the frozen parsed documents (PARSED_DOCUMENTS.md) and follows
 // only links the page published: it never builds a URL from a range, date, or
 // display name. With a source adapter, every child link must also classify as
 // the expected page type (which refuses robots.txt-disallowed paths), and school
 // links are reduced to the school's identity path.
+//
+// A sample scope (contracts/crawl-scope.mjs, #78) narrows what is queued: the
+// index still records every row's eligibility, but queues a history page only
+// for the named schools, and a history page queues and records coverage only
+// for the sample's years.
 export class Discovery {
-  constructor({ providerId, allowedHosts, targetEndingYears, sourceAdapter }) {
+  constructor({ providerId, allowedHosts, targetEndingYears, sourceAdapter, scope = FULL_CRAWL_SCOPE }) {
     this.providerId = providerId;
     this.allowedHosts = allowedHosts;
     this.targetEndingYears = targetEndingYears;
     this.sourceAdapter = sourceAdapter;
+    this.scope = scope;
   }
 
   discover(pageType, snapshot, document) {
@@ -85,6 +92,13 @@ export class Discovery {
     };
 
     if (pageType === 'school_index') {
+      // The sample's schools as identities, resolved like the index rows' links.
+      const sample = this.scope.kind === 'sample' ? new Set(this.scope.schools.map((path) => {
+        try {
+          const sourceUrl = snapshot.sourceUrlFrom(path, snapshot.sourceUrl?.absoluteUrl);
+          return serializeCanonicalPath(canonicalizeSourceUrl(adapter?.schoolUrl ? adapter.schoolUrl(sourceUrl) : sourceUrl));
+        } catch { return null; }
+      })) : null;
       for (const [rowIndex, school] of (page.schools ?? []).entries()) {
         const eligible = isEligibleSchool(school);
         observations.push({ kind: 'school', school, eligible, parentKey: snapshot.jobKey, rowIndex });
@@ -94,20 +108,21 @@ export class Discovery {
           continue;
         }
         const schoolSourcePath = schoolIdentity(school.path, rowIndex);
-        if (!schoolSourcePath) continue;
+        if (!schoolSourcePath || (sample && !sample.has(schoolSourcePath))) continue;
         addChild(school.historyUrl, 'school_history', { schoolSourcePath });
       }
     }
     if (pageType === 'school_history') {
+      const years = this.scope.kind === 'sample' ? this.scope.endingYears : this.targetEndingYears;
       const linkedYears = new Set();
       const rejectedYears = new Set();
       for (const season of page.seasons ?? []) {
-        if (!season.url || !this.targetEndingYears.includes(season.endingYear)) continue;
+        if (!season.url || !years.includes(season.endingYear)) continue;
         if (addChild(season.url, 'season', { schoolSourcePath: snapshot.schoolSourcePath })) linkedYears.add(season.endingYear);
         else rejectedYears.add(season.endingYear);
       }
       // A season the history page does not link is unavailable, not a failure.
-      for (const year of this.targetEndingYears) {
+      for (const year of years) {
         if (linkedYears.has(year)) continue;
         unavailableCoverage.push({ schoolSourcePath: snapshot.schoolSourcePath, endingYear: year, reason: rejectedYears.has(year) ? 'link_rejected' : 'not_linked' });
       }

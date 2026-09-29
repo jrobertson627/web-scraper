@@ -58,6 +58,9 @@ function recordKeyOf(job) { return job.pageType === 'box_score' ? serializeCanon
 // but do not fail.
 export async function buildReconciliationReport(reads, { requireCoverage = false, batchSize = 50 } = {}) {
   assertBoundaryPort('persistenceReconciliation', reads);
+  // A sample (#78) is checked against its own years, and the report says so.
+  const scope = await reads.crawlScope();
+  const scopeYears = scope.endingYears;
   const jobs = await reads.reconciliationJobs();
   const jobByKey = new Map(jobs.map((job) => [job.key, job]));
   const children = new Map();
@@ -105,14 +108,14 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
   const coverageRecords = [];
   for (const batch of batches(parsedJobs('school_history'), batchSize)) {
     for (const page of (await pagesFor(batch.map((job) => job.key))).values()) {
-      const linked = (page.data.seasons ?? []).filter((season) => season.url && TARGET_ENDING_YEARS.includes(season.endingYear));
+      const linked = (page.data.seasons ?? []).filter((season) => season.url && scopeYears.includes(season.endingYear));
       const seasons = childrenOf(page.jobKey, 'season');
       const parsed = seasons.filter((child) => child.state === 'parsed');
       if (linked.length !== seasons.length || seasons.length !== parsed.length) {
         seasonRecords.push({ key: page.jobKey, linkedRows: linked.length, discovered: seasons.length, parsed: parsed.length });
       }
       const schoolSourcePath = jobByKey.get(page.jobKey)?.schoolSourcePath;
-      for (const year of TARGET_ENDING_YEARS) {
+      for (const year of scopeYears) {
         const expectedMissing = !linked.some((season) => season.endingYear === year);
         const recordedMissing = unavailable.has(`${schoolSourcePath}:${year}`);
         if (expectedMissing !== recordedMissing) coverageRecords.push({ key: page.jobKey, endingYear: year, expectedMissing, recordedMissing });
@@ -315,5 +318,6 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
     ...[...(await reads.rejectedUrls())].sort(byKey).map((entry) => ({ key: entry.key, reason: entry.reason })),
     ...(await reads.openIssues()).map((issue) => ({ key: issue.recordKey, reason: issue.issueType })),
   ];
-  return Object.freeze({ passed: checks.every((check) => check.passed) && quarantined.length === 0, checks: Object.freeze(checks), quarantined: Object.freeze(quarantined) });
+  return Object.freeze({ passed: checks.every((check) => check.passed) && quarantined.length === 0, scope,
+    checks: Object.freeze(checks), quarantined: Object.freeze(quarantined) });
 }

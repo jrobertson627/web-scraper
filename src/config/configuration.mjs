@@ -2,6 +2,7 @@ import { REQUIRED_ELIGIBILITY_PREDICATE, TARGET_ENDING_YEARS } from '../contract
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { requireAuthorization } from './authorization.mjs';
+import { createCrawlScope } from '../contracts/crawl-scope.mjs';
 import { contractFingerprint, requireDataContract } from './data-contract.mjs';
 import { isAbsolute } from 'node:path';
 
@@ -28,6 +29,12 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   const years = [...(config.targetEndingYears ?? [])].sort((a, b) => a - b);
   if (JSON.stringify(years) !== JSON.stringify(TARGET_ENDING_YEARS)) {
     throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(TARGET_ENDING_YEARS)}`, 'targetEndingYears: [2022, 2023, 2024, 2025, 2026]');
+  }
+  // A sample restricts the full scope above; it never replaces it (#78).
+  try {
+    config.crawlScope = createCrawlScope(config.crawlScope);
+  } catch (error) {
+    throw new Error(`crawlScope is invalid: ${error.message}`);
   }
   if (!['memory', 'filesystem'].includes(config.rawStore)) {
     throw configError('rawStore', 'is invalid', 'Expected memory or filesystem', 'rawStore: memory');

@@ -19,6 +19,7 @@ import {
   REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
+import { FULL_CRAWL_SCOPE, nextCrawlScope } from '../contracts/crawl-scope.mjs';
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 
 const CLAIM_EXPIRED = 'claim expired before completion';
@@ -427,6 +428,7 @@ export class InMemoryPersistence {
     this.reconciliationIssues = [];
     this.operatorDispositions = [];
     this.reconciliationDispositions = [];
+    this.crawlScopes = [];
     this.nextIssueId = 1;
     this.rawObjectRepairs = new Map();
     this.inFlight = new Map();
@@ -759,6 +761,18 @@ export class InMemoryPersistence {
     this.#applyTransition(job, nextState, details);
   }
 
+  // The scope this store is crawled under (#78): the latest recorded, or the
+  // full scope when none was. recordCrawlScope refuses one that does not cover
+  // the latest; same contract as the PostgreSQL adapter's.
+  crawlScope() { return this.crawlScopes.at(-1)?.scope ?? FULL_CRAWL_SCOPE; }
+
+  recordCrawlScope(scope) {
+    const previous = this.crawlScopes.at(-1)?.scope ?? null;
+    const next = nextCrawlScope(previous, scope);
+    if (next.changed) this.crawlScopes.push(Object.freeze({ scope: next.scope, recordedAt: this.clock().toISOString() }));
+    return Object.freeze({ ...next, previous });
+  }
+
   // Reconciliation reads (#46); same contracts as the PostgreSQL adapter's.
   // Every job, without history.
   reconciliationJobs() { return [...this.jobs.values()].map(reconciliationJob); }
@@ -1028,6 +1042,7 @@ export class InMemoryPersistence {
   // Same shape as PostgresPersistence#crawlStatus, for `cli.mjs status`.
   crawlStatus({ windowMs = 3_600_000 } = {}) {
     const now = this.clock();
+    const scope = this.crawlScope();
     const counts = new Map();
     for (const job of this.jobs.values()) {
       const key = `${job.pageType}|${job.state}`;
@@ -1036,6 +1051,7 @@ export class InMemoryPersistence {
     const network = this.sourceFetches.filter((fetch) => !fetch.cacheHit).map((fetch) => new Date(fetch.fetchedAt).getTime());
     return deepFreeze({
       observedAt: now.toISOString(),
+      scope,
       jobs: [...counts].map(([key, count]) => { const [pageType, state] = key.split('|'); return { pageType, state, count }; }),
       fetches: {
         total: network.length,

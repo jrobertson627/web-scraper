@@ -1,4 +1,5 @@
 export * from './boundaries.mjs';
+export * from './crawl-scope.mjs';
 export * from './jobs.mjs';
 export * from './parsed-documents.mjs';
 export * from './provenance.mjs';

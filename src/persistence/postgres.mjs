@@ -11,6 +11,7 @@ import {
   createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
+import { FULL_CRAWL_SCOPE, createCrawlScope, nextCrawlScope } from '../contracts/crawl-scope.mjs';
 import { PAGE_TYPES, canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
 import {
@@ -473,6 +474,30 @@ export class PostgresPersistence {
     });
   }
 
+  // The scope this store is crawled under (#78): the latest recorded, or the
+  // full scope when none was. Same contract as the in-memory adapter's.
+  async crawlScope(client = this.pool) {
+    const result = await client.query('SELECT kind, schools, ending_years FROM crawl_scopes ORDER BY id DESC LIMIT 1');
+    const row = result.rows[0];
+    return row ? createCrawlScope(row.kind === 'full' ? { kind: 'full' } : { schools: row.schools, endingYears: row.ending_years }) : FULL_CRAWL_SCOPE;
+  }
+
+  // Records the scope a crawl runs under, refusing one that does not cover the
+  // latest. A table lock keeps two workers from recording at once.
+  async recordCrawlScope(scope) {
+    return this.transaction(async (client) => {
+      await client.query('LOCK TABLE crawl_scopes IN SHARE ROW EXCLUSIVE MODE');
+      const recorded = (await client.query('SELECT count(*)::int AS n FROM crawl_scopes')).rows[0].n > 0;
+      const previous = recorded ? await this.crawlScope(client) : null;
+      const next = nextCrawlScope(previous, scope);
+      if (next.changed) {
+        await client.query('INSERT INTO crawl_scopes (kind, schools, ending_years) VALUES ($1,$2::jsonb,$3::int[])',
+          [next.scope.kind, next.scope.schools ? JSON.stringify(next.scope.schools) : null, next.scope.endingYears]);
+      }
+      return deepFreeze({ ...next, previous });
+    });
+  }
+
   // Reconciliation reads (#46); same contracts as the in-memory adapter's.
   // Every job, without history: one row each, so the full backfill's job list
   // is a few megabytes.
@@ -796,8 +821,8 @@ export class PostgresPersistence {
       (SELECT min(fetched_at) FROM source_fetches WHERE NOT cache_hit) AS first_fetch_at,
       (SELECT max(fetched_at) FROM source_fetches WHERE NOT cache_hit) AS last_fetch_at`, [windowMs]);
     const row = result.rows[0];
-    return deepFreeze({ observedAt: iso(row.observed_at), jobs: row.jobs, fetches: { total: row.fetches, inWindow: row.window_fetches,
-      windowMs, firstAt: iso(row.first_fetch_at), lastAt: iso(row.last_fetch_at) } });
+    return deepFreeze({ observedAt: iso(row.observed_at), scope: await this.crawlScope(), jobs: row.jobs,
+      fetches: { total: row.fetches, inWindow: row.window_fetches, windowMs, firstAt: iso(row.first_fetch_at), lastAt: iso(row.last_fetch_at) } });
   }
 }
 

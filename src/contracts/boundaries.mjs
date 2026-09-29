@@ -23,7 +23,7 @@ export const BOUNDARY_PORT_METHODS = Object.freeze({
   // What the reconciliation report (application/reconciliation.mjs) reads, so
   // it runs against either adapter (#46).
   persistenceReconciliation: Object.freeze(['reconciliationJobs', 'acceptedPages', 'acceptedObservations', 'coverageGaps',
-    'failedParses', 'openIssues', 'rejectedUrls']),
+    'failedParses', 'openIssues', 'rejectedUrls', 'crawlScope']),
 });
 
 export function deepFreeze(value) {

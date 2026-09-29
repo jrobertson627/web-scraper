@@ -70,6 +70,16 @@ function parseParserVersions(value) {
   return { ...Object.fromEntries(PAGE_TYPES.map((pageType) => [pageType, '1'])), ...overrides };
 }
 
+// CRAWL_SAMPLE restricts the crawl to a sample (#78), as JSON, for example
+// {"schools":["/cbb/schools/duke/men/"],"endingYears":[2024]}. Configuration
+// validation checks it against the full scope.
+function parseCrawlSample(value) {
+  if (!value) return undefined;
+  try { return JSON.parse(value); } catch {
+    throw new Error('CRAWL_SAMPLE is invalid JSON. Expected {"schools":[...],"endingYears":[...]}. Example: CRAWL_SAMPLE={"schools":["/cbb/schools/duke/men/"],"endingYears":[2024]}');
+  }
+}
+
 // The worker configuration from the environment; worker and reprocess modes share it.
 function workerConfiguration(env) {
   return validateConfiguration({
@@ -80,6 +90,7 @@ function workerConfiguration(env) {
     authorization: parseAuthorization(env.AUTHORIZATION_JSON),
     dataContract: parseDataContract(env.DATA_CONTRACT_JSON),
     parserVersions: parseParserVersions(env.PARSER_VERSIONS),
+    crawlScope: parseCrawlSample(env.CRAWL_SAMPLE),
   });
 }
 

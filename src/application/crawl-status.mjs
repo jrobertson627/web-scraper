@@ -42,6 +42,7 @@ export function summarizeCrawlStatus(status, { minIntervalMs = 6000 } = {}) {
   const perHour = Math.min(observedPerHour ?? policyPerHour, policyPerHour);
   return Object.freeze({
     observedAt: status.observedAt,
+    scope: status.scope ?? null,
     pageTypes,
     totals,
     pace: {
@@ -80,8 +81,12 @@ export function formatCrawlStatus(summary) {
   const table = rows.map((row) => row.map((cell, column) => (column ? cell.padStart(widths[column]) : cell.padEnd(widths[column]))).join('  '));
   const { pace, projection } = summary;
   const windowMinutes = Math.round(pace.windowMs / 60_000);
+  const scope = summary.scope?.kind === 'sample'
+    ? `scope: SAMPLE, not complete coverage: ${summary.scope.schools.length} school(s) (${summary.scope.schools.join(', ')}), ending years ${summary.scope.endingYears.join(', ')}`
+    : 'scope: full';
   return [
     `crawl status at ${summary.observedAt}`,
+    scope,
     '',
     ...table,
     '',
