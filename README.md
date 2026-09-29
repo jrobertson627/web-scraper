@@ -77,7 +77,7 @@ Duplicate discovery is counted within one process; persistence still deduplicate
 - `RAW_STORAGE.md`: immutable raw objects, durable finalization, and repair protocol.
 - `POSTGRES_SCHEMA.md`: migration ordering, durable constraints, provenance, and compatibility rules.
 - `PARSER_NORMALIZATION.md`: versioned parsing, value states, provenance, conflict quarantine, and offline reprocessing after a parser upgrade.
-- `REQUEST_POLICY.md`: validated runtime scope, pacing, cache, timeout, and retry rules.
+- `REQUEST_POLICY.md`: validated runtime scope and sample crawls (`CRAWL_SAMPLE`), pacing, cache, timeout, and retry rules.
 - `COMPOSITION_READ_BOUNDARY.md`: atomic fixture page commits, worker progress, dry-run preview, and read isolation.
 - `FOUNDATION_HANDOFF.md`: fixture matrix, reconciliation, transition/value glossary, package ownership, and live PostgreSQL evidence.
 - `migrations/`: ordered PostgreSQL schema migrations.

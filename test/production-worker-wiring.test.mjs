@@ -40,6 +40,7 @@ class InMemoryPostgres extends PostgresPersistence {
     this.closed = 0;
   }
   async addJob(job) { this.added.push(job); return job; }
+  async recordCrawlScope(scope) { this.scopes = [...(this.scopes ?? []), scope]; return { scope, changed: true, widened: false, previous: null }; }
   async claimNextJob() { return null; }
   async workOutlook() { return { remaining: 0 }; }
   async jobCounts() { return { pending: this.added.length }; }

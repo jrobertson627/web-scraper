@@ -31,7 +31,7 @@ import {
 // data contract, so retainedFields defaults to every mapped field.
 export function createFixtureApplication({
   sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState, events = NO_CRAWL_EVENTS,
-  retainedFields = MAPPED_RETAINED_FIELDS,
+  retainedFields = MAPPED_RETAINED_FIELDS, crawlScope,
 } = {}) {
   if (sharedState?.transport instanceof HttpTransport) {
     throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
@@ -65,19 +65,21 @@ export function createFixtureApplication({
     mode: 'local', providerId, allowedHosts: [host], rawStore: 'memory',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-fixture (+local@example.com)' },
     eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
-    publication: 'private',
+    publication: 'private', crawlScope,
   }, { clock });
   const rawStore = sharedState?.rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
   const persistence = sharedState?.persistence ?? new InMemoryPersistence(clock, { claimTimeoutMs: config.claimTimeoutMs });
   const parsers = new ParserRegistry();
   for (const pageType of ['school_index', 'school_history', 'season', 'game_log', 'box_score']) parsers.register(new FixtureParser(pageType));
-  const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears });
+  const discovery = new Discovery({ providerId, allowedHosts: [host], targetEndingYears: config.targetEndingYears, scope: config.crawlScope });
   const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep, policy: config.policy, allowedHosts: [host], events });
   const normalizer = new Normalizer({ retainedFields });
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
   const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
-  const ready = Promise.resolve(persistence.addJob(rootJob));
+  const ready = prepareCrawl({ persistence, scope: config.crawlScope, rootJob, events,
+    rediscover: () => rediscoverStoredPages({ persistence, rawStore, parsers, discovery, normalizer, clock, parserVersions: config.parserVersions, events }) });
+  ready.catch(() => {}); // awaited by runWorkerOnce, which reports a refusal
   const boundaryPorts = {
     fetcher: assertBoundaryPort('fetcher', fetcher),
     discovery: assertBoundaryPort('discovery', discovery),
@@ -176,6 +178,33 @@ export function createFixtureApplication({
   };
 }
 
+// Before a crawl starts (#78): record the scope it runs under, which refuses a
+// narrower one than the store already holds; when the scope widened (a sample
+// becoming the full crawl), run discovery again over the stored index and
+// history pages, so the schools and years now in scope are queued without a
+// request; then queue the school index.
+//
+// With the in-memory store the steps run synchronously (the root job is queued
+// when the fixture application is built, as before); a promise is always returned.
+function prepareCrawl({ persistence, scope, rootJob, rediscover, events }) {
+  const finish = (recorded) => {
+    events.emit('crawl.scope', { kind: recorded.scope.kind, schools: recorded.scope.schools?.length ?? null,
+      endingYears: recorded.scope.endingYears, widened: recorded.widened });
+    const queue = () => Promise.resolve(persistence.addJob(rootJob)).then(() => recorded);
+    return recorded.widened ? rediscover().then(queue) : queue();
+  };
+  try {
+    const recorded = persistence.recordCrawlScope(scope);
+    return typeof recorded?.then === 'function' ? recorded.then(finish) : finish(recorded);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
+function rediscoverStoredPages(parts) {
+  return reprocessStoredPages({ ...parts, pageTypes: ['school_index', 'school_history'], states: ['parsed'] });
+}
+
 export const systemClock = () => new Date();
 export const realSleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -236,8 +265,10 @@ export async function createWorkerApplication({
   const missing = missingProductionParsers(parsers, config.parserVersions);
   if (missing.length) throw refuse(`no production parser is registered for ${missing.join(', ')}`);
 
-  const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter });
+  const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope });
   const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts, events });
+  // Only the data contract's retained fields are stored (#89).
+  const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
   const indexPath = adapter.canonicalize(indexUrl);
   const indexPageType = adapter.classify(indexUrl);
   const rootJob = createJob({ key: sourceKey(indexPath, indexPageType), pageType: indexPageType, sourceUrl: indexUrl, canonicalPath: indexPath });
@@ -245,8 +276,7 @@ export async function createWorkerApplication({
     fetcher: assertBoundaryPort('fetcher', fetcher),
     discovery: assertBoundaryPort('discovery', discovery),
     parsers: assertBoundaryPort('parsers', parsers),
-    // Only the data contract's retained fields are stored (#89).
-    normalizer: assertBoundaryPort('domain', new Normalizer({ retainedFields: config.dataContract.retainedFields })),
+    normalizer: assertBoundaryPort('domain', normalizer),
     persistence: assertBoundaryPort('persistence', persistence),
     rawStore: store,
     clock,
@@ -254,9 +284,12 @@ export async function createWorkerApplication({
     parserVersions: config.parserVersions,
   });
   let seeded;
-  // Queues the school index once; addJob keeps an existing root job as it is.
+  // Records the crawl scope, rediscovers stored pages if it widened, and queues
+  // the school index once; addJob keeps an existing root job as it is.
   const seedRootJob = () => {
-    seeded ??= Promise.resolve(persistence.addJob(rootJob)).catch((error) => { seeded = undefined; throw error; });
+    seeded ??= prepareCrawl({ persistence, scope: config.crawlScope, rootJob, events,
+      rediscover: () => rediscoverStoredPages({ persistence, rawStore: store, parsers, discovery, normalizer, clock, parserVersions: config.parserVersions, events }) })
+      .catch((error) => { seeded = undefined; throw error; });
     return seeded;
   };
 
@@ -307,7 +340,7 @@ export function createReprocessApplication({
   const missing = missingProductionParsers(parsers, config.parserVersions);
   // exit names the CLI exit code (EXIT_CODES.workerNotReady), as for the worker.
   if (missing.length) throw Object.assign(refuse(`no production parser is registered for ${missing.join(', ')}`), { exit: 'workerNotReady' });
-  const discovery = assertBoundaryPort('discovery', new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter }));
+  const discovery = assertBoundaryPort('discovery', new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope }));
   const normalizer = assertBoundaryPort('domain', new Normalizer({ retainedFields: config.dataContract.retainedFields }));
   return {
     config,
@@ -359,7 +392,7 @@ export function createReviewApplication({
   const store = rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
   if (!(store instanceof FileRawStore)) throw refuse('raw store must be the filesystem raw store');
   if (!(parsers instanceof ParserRegistry)) throw refuse('parsers must be a ParserRegistry');
-  const discovery = new Discovery({ providerId: config.providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter });
+  const discovery = new Discovery({ providerId: config.providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter, scope: config.crawlScope });
   const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
   return reviewOperations({ persistence, rawStore: store, parsers, discovery, normalizer, clock });
 }

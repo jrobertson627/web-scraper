@@ -70,6 +70,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `RAW_STORE_ROOT` | `/var/data/raw` | no |
 | `USER_AGENT` | transparent application name and operator contact, for example `web-scraper (+you@example.com)` | yes (it carries the operator's contact address) |
 | `OPERATOR_IDS` | comma-separated reviewers allowed to record operator dispositions with `npm run review`, for example `jessica`; unset means nobody may (see "Operator review" in `JOB_LIFECYCLE.md`) | no |
+| `CRAWL_SAMPLE` | optional; restricts the crawl to a sample, for example `{"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}` for #78. Remove it for the full backfill (see "Decision: crawl scope" in `REQUEST_POLICY.md`) | no |
 | `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
 | `NODE_VERSION` | `22` | no |
 
@@ -106,6 +107,12 @@ The PIN-protected trigger endpoint is not built. When it is, it will be its own 
 3. The first deploy runs `npm ci`, then `npm run migrate`, then starts the worker. Check the deploy log for `migrate passed` and for the worker's configuration line.
 4. Check progress with the Render shell on the worker: `npm run status` (the service already has `PERSISTENCE=postgres` and the PG* values). It prints progress by page type, request pace, and projected time remaining. `npm run review:personal -- list` in the same shell lists pages stopped for review; see "Operator review" in `JOB_LIFECYCLE.md`.
 5. Create the tracker's read-only role (above) and give march-madness-tracker those credentials through its own service's secrets.
+
+## The #78 sample, then the full backfill
+
+1. Set `CRAWL_SAMPLE={"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}` on the worker and resume it. The run fetches the index, the two history pages, the two 2024 season pages and game logs, and the box scores those logs link to: about 75 requests, 9 minutes. It records the scope, and `npm run status` reports it as a sample.
+2. When the worker has exited, run `npm run reconcile` in the worker's shell. The report's `scope` says `sample`, and the season checks cover 2024 only.
+3. For the full backfill, remove `CRAWL_SAMPLE` and resume the worker. It records the full scope and runs discovery again over the stored index and history pages, with no requests, to queue every eligible school and season. Pages already parsed are not refetched. A worker started with a narrower scope than the store holds refuses to start.
 
 ## Verification
 
