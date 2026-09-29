@@ -21,3 +21,15 @@ The adapter's pool logs an idle client's `'error'` (by error code only) instead 
 `012_review_dispositions` adds `reconciliation_dispositions`, the record of each operator `accept` or `dismiss` of a reconciliation issue: who, when, why, and for an accept the `normalized_page_revisions` row that became accepted. It also adds `reconciliation_issues.opened_at`, which older rows take from the time the migration ran. An accepted issue has status `accepted` and a dismissed one `resolved`. Stop releases stay in `operator_dispositions`.
 
 `013_crawl_scopes` records the scope each crawl ran under (#78): `kind` is `sample` or `full`, and a sample also has `schools` (site paths) and `ending_years`. The latest row is the store's current scope; a store with none was crawled under the full scope. Readers such as march-madness-tracker should check it before treating the data as complete.
+
+## Migration rules
+
+`npm run migrate` (`scripts/migrate.mjs`, logic in `src/persistence/migrator.mjs`) is how every database, including production, is brought up to date, and the database is added to over time, so the files are append-only history (#120).
+
+- **Skip what is applied.** Only files whose version is not in `schema_migrations` run. A database that is up to date executes no DDL.
+- **Never edit an applied file.** `schema_migrations.checksum` holds the SHA-256 of each file as it was applied (line endings and a byte-order mark ignored). If an applied file's content differs, the run fails before applying anything and names it. Put the change in a new file with the next number.
+- **Number in order.** A new file that sorts before an applied one is refused.
+- **Each file is repeat-safe and records itself.** It carries its own `BEGIN`/`COMMIT`, uses `IF NOT EXISTS` and similar guards, and inserts its own version into `schema_migrations`. `npm run smoke:migrations` applies every file twice to prove it. A run that stopped after a file committed but before its checksum was recorded adopts the file on the next run instead of running it again.
+- **Additive by default.** Adding a table, column or index is one migration. Removing or renaming a column that a reader may use (march-madness-tracker reads this database) is expand-then-contract: add the new shape, move readers, and only then drop the old one in a later migration. 008 dropped a column in one step; do not repeat that.
+- **Locks.** The run holds an advisory lock, and sets `lock_timeout` (5 s) and `statement_timeout` (120 s); a migration that must hold a lock or run longer says so in its pull request and raises `MIGRATE_STATEMENT_TIMEOUT_MS` for that deploy.
+- **An older checkout is not an error.** Versions recorded in the database with no file here are reported and ignored, so code can be rolled back over a newer schema.
