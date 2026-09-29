@@ -80,6 +80,27 @@ export function sameLease(left, right) {
   return Boolean(left && right && left.value === right.value);
 }
 
+// The persistence adapters' default operator authorizer: nobody may record a
+// disposition until the process supplies one (src/config/operators.mjs, #48).
+export const DENY_ALL_OPERATORS = Object.freeze(() => false);
+
+// Jobs an operator reviews (#48): stopped for a challenge or a cap, or failed
+// to parse.
+export const REVIEW_JOB_STATES = Object.freeze(['parse_failed', 'operator_stop']);
+
+// A disposition of a reconciliation issue: accept its quarantined revision, or
+// dismiss it and keep the accepted record. Same shape as an operator-stop
+// disposition.
+export function createReviewDisposition(kind, operatorId, reason, at = new Date()) {
+  if (!['accept', 'dismiss'].includes(kind)) {
+    throw new Error(`invalid review disposition: ${kind}. Expected accept or dismiss. Example: dismiss`);
+  }
+  if (!operatorId || !reason) {
+    throw new Error('review disposition requires operatorId and reason. Example: operatorId: ops-1, reason: source corrected the score');
+  }
+  return Object.freeze({ kind, operatorId, reason, at: new Date(at).toISOString() });
+}
+
 export function createOperatorDisposition(kind, operatorId, reason, at) {
   if (!['hold', 'release_retry', 'release_permanent'].includes(kind)) {
     throw new Error(`invalid operator disposition: ${kind}. Expected hold, release_retry, or release_permanent. Example: release_retry`);

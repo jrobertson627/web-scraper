@@ -22,6 +22,8 @@
     "start:worker:personal": "node scripts/personal-worker.mjs",
     "reprocess": "node src/application/cli.mjs reprocess",
     "reprocess:personal": "node scripts/personal-worker.mjs reprocess",
+    "review": "node src/application/cli.mjs review",
+    "review:personal": "node scripts/personal-worker.mjs review",
     "start:api": "node src/application/cli.mjs api",
     "status": "node src/application/cli.mjs status",
     "smoke:foundation": "node scripts/foundation-smoke.mjs",

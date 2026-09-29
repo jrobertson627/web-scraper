@@ -69,6 +69,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `PG_STATEMENT_TIMEOUT_MS` | optional; server-side statement timeout (default 30000) | no |
 | `RAW_STORE_ROOT` | `/var/data/raw` | no |
 | `USER_AGENT` | transparent application name and operator contact, for example `web-scraper (+you@example.com)` | yes (it carries the operator's contact address) |
+| `OPERATOR_IDS` | comma-separated reviewers allowed to record operator dispositions with `npm run review`, for example `jessica`; unset means nobody may (see "Operator review" in `JOB_LIFECYCLE.md`) | no |
 | `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
 | `NODE_VERSION` | `22` | no |
 
@@ -103,7 +104,7 @@ The PIN-protected trigger endpoint is not built. When it is, it will be its own 
 1. PostgreSQL: use the existing instance. Note its region; the worker must be in the same region.
 2. Apply `render.yaml` from the Render dashboard (New, then Blueprint). Render prompts for each `sync: false` value; enter the internal `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `USER_AGENT`. Set the service's region to the database's region.
 3. The first deploy runs `npm ci`, then `npm run migrate`, then starts the worker. Check the deploy log for `migrate passed` and for the worker's configuration line.
-4. Check progress with the Render shell on the worker: `npm run status` (the service already has `PERSISTENCE=postgres` and the PG* values). It prints progress by page type, request pace, and projected time remaining.
+4. Check progress with the Render shell on the worker: `npm run status` (the service already has `PERSISTENCE=postgres` and the PG* values). It prints progress by page type, request pace, and projected time remaining. `npm run review:personal -- list` in the same shell lists pages stopped for review; see "Operator review" in `JOB_LIFECYCLE.md`.
 5. Create the tracker's read-only role (above) and give march-madness-tracker those credentials through its own service's secrets.
 
 ## Verification

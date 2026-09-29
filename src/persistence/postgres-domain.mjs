@@ -357,7 +357,10 @@ async function recordLogConflict(client, providerId, schoolSourcePath, observati
   }
 }
 
-export async function writeNormalizedPage(client, job, page, provenance, sourceFetchId) {
+// accept (operator review, #48) commits a page that differs from the accepted
+// revision as the new accepted one, as a supersede does, and marks its
+// quarantined revision and observations accepted.
+export async function writeNormalizedPage(client, job, page, provenance, sourceFetchId, { accept = false } = {}) {
   if (page.jobKey !== `${job.provider_id}:${job.canonical_path}:${job.page_type}`) throw new Error('page job identity mismatch');
   if (!page.identity || !page.kind || !page.data) throw new Error('normalized page is incomplete');
   const prior = await client.query(`SELECT r.id,r.data,r.provenance,r.parser_name,r.parser_version,f.checksum,
@@ -369,13 +372,14 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
   const differs = Boolean(accepted) && !accepted.same;
   // A parser change over the same raw body supersedes the accepted revision;
   // any other difference (the source changed) is quarantined for review.
-  const superseded = differs && await parserChangeOnly(client, accepted, provenance, sourceFetchId);
+  const superseded = differs && (accept || await parserChangeOnly(client, accepted, provenance, sourceFetchId));
   const conflict = differs && !superseded;
   const disposition = conflict ? 'quarantined' : 'accepted';
   const revision = await client.query(`INSERT INTO normalized_page_revisions
     (provider_id,record_key,page_type,source_fetch_id,parser_name,parser_version,data,provenance,disposition)
     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9)
-    ON CONFLICT (record_key,source_fetch_id,parser_name,parser_version) DO NOTHING RETURNING id`,
+    ON CONFLICT (record_key,source_fetch_id,parser_name,parser_version)
+    ${accept ? "DO UPDATE SET disposition = 'accepted'" : 'DO NOTHING'} RETURNING id`,
   [job.provider_id, page.identity, page.kind, sourceFetchId, provenance.parserName,
     provenance.parserVersion, JSON.stringify(page.data), JSON.stringify(provenance), disposition]);
   if (conflict && revision.rowCount) {
@@ -393,7 +397,8 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
     const key = observation.key ?? `${observation.kind}:${observation.parentKey ?? page.jobKey}:${observation.rowIndex ?? observation.canonicalBoxScorePath ?? `row-${index}`}`;
     await client.query(`INSERT INTO page_observation_revisions
       (job_id,observation_key,source_fetch_id,observation,accepted) VALUES ($1,$2,$3,$4::jsonb,$5)
-      ON CONFLICT DO NOTHING`, [job.id, key, sourceFetchId, JSON.stringify({ ...observation, provenance }), !conflict]);
+      ON CONFLICT (job_id,observation_key,source_fetch_id) ${accept ? 'DO UPDATE SET accepted = true' : 'DO NOTHING'}`,
+    [job.id, key, sourceFetchId, JSON.stringify({ ...observation, provenance }), !conflict]);
     if (conflict) continue;
     if (observation.kind === 'game_log') {
       await client.query(`INSERT INTO game_observations
@@ -407,7 +412,8 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
       await recordLogConflict(client, job.provider_id, job.school_source_path, observation, sourceFetchId);
     }
   }
-  if (conflict) return { key: page.identity, conflict: true, superseded: false };
+  const revisionId = revision.rows[0]?.id ?? null;
+  if (conflict) return { key: page.identity, conflict: true, superseded: false, revisionId };
 
   const options = { replace: superseded };
   if (page.kind === 'school_index') await writeSchoolIndex(client, job, page, provenance);
@@ -446,7 +452,7 @@ export async function writeNormalizedPage(client, job, page, provenance, sourceF
       await recordLogConflict(client, job.provider_id, row.school_source_path, row.observation, row.source_fetch_id);
     }
   }
-  return { key: page.identity, conflict: false, superseded };
+  return { key: page.identity, conflict: false, superseded, revisionId };
 }
 
 // True when the accepted revision was parsed from the same raw body (by

@@ -20,6 +20,7 @@ import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contra
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
 import { boxScoreDocument, gameLogDocument, schoolIndexDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
 import { present, unavailable } from '../src/contracts/value-state.mjs';
+import { operatorAuthorizer } from '../src/config/operators.mjs';
 // Adapter-hardening and API read-query checks share this disposable database.
 import './postgres-ops-integration.mjs';
 
@@ -701,7 +702,7 @@ test('the work outlook ignores work held behind a stopped parent and reports the
 
 test('retry transitions spend only the budget they name', async () => {
   await reset();
-  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000 });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 5000, authorizeOperator: (operatorId) => operatorId === 'ops' });
   const job = rootJob();
   await persistence.addJob(job);
   const now = () => new Date(Date.now() - 60_000).toISOString(); // ready at once, whatever the clock skew
@@ -784,4 +785,55 @@ test('offline reprocessing supersedes accepted records, replaces their rows, and
   assert.equal(again.superseded, 0);
   assert.equal(await count('SELECT count(*)::int AS n FROM normalized_page_revisions'), revisions);
   assert.equal(await count('SELECT count(*)::int AS n FROM player_game_stats'), 1);
+});
+
+test('operator review lists quarantined work and records accepted and dismissed revisions', async () => {
+  await reset();
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 10000, authorizeOperator: operatorAuthorizer('ops-1') });
+  const raw = createRawStore('filesystem', join(localRoot, 'raw-review'));
+  const app = createFixtureApplication({ fixtureEntries: foundationCorpus({ faults: true }), sharedState: { persistence, rawStore: raw } });
+  await app.runWorkerOnce();
+  const box = 'fixture-provider:fixture.example/box/one.html:box_score';
+  const game = 'fixture-provider:fixture.example/box/one.html';
+
+  const list = await app.review.list();
+  assert.deepEqual(list.jobs.map((job) => [job.state, job.key, job.parser]), [['parse_failed', 'fixture-provider:fixture.example/box/shift.html:box_score', 'box_score@1']]);
+  const shift = await app.review.show(list.jobs[0].key);
+  assert.equal(shift.lastParseRun.failureDetails.error, 'fixture layout changed; column meaning is uncertain');
+  assert.match(shift.snapshot.objectPath, /^file:\/\//);
+  assert.deepEqual(shift.history.map((event) => event.to), ['fetching', 'fetched', 'parse_failed']);
+
+  // A later fetch of box one returned a corrected page; reprocessing holds it as a conflict.
+  const entry = foundationCorpus().find((item) => item.url.endsWith('/box/one.html'));
+  const job = (await pool.query(`SELECT id, provider_id, canonical_path FROM crawl_jobs WHERE canonical_path = 'fixture.example/box/one.html'`)).rows[0];
+  const change = async (venue) => {
+    const document = JSON.parse(/<script[^>]*>([\s\S]*?)<\/script>/.exec(entry.body)[1]);
+    const stored = await raw.put(Buffer.from(entry.body.replace(/(<script[^>]*>)[\s\S]*?(<\/script>)/, `$1${JSON.stringify({ ...document, venue })}$2`)));
+    await pool.query(`INSERT INTO source_fetches (job_id,provider_id,canonical_path,http_status,fetched_at,checksum,raw_object_path)
+      VALUES ($1,$2,$3,200,clock_timestamp(),$4,$5)`, [job.id, job.provider_id, job.canonical_path, stored.checksum, stored.objectPath]);
+    assert.equal((await app.reprocess({ jobKeys: [box] })).conflicts, 1);
+    return (await app.review.list({ jobs: false })).issues.at(-1).id;
+  };
+  const first = await change('Corrected Arena');
+  const second = await change('Another Arena');
+  const detail = await app.review.show(first);
+  assert.deepEqual(detail.changed, ['venue']);
+  assert.equal(detail.quarantinedRevision.jobKey, box);
+  assert.match(detail.quarantinedRevision.id, /^revision-\d+$/);
+
+  await assert.rejects(app.review.accept(first, { operatorId: 'intruder', reason: 'x' }), /not authorized/);
+  const accepted = await app.review.accept(first, { operatorId: 'ops-1', reason: 'the provider corrected the venue' });
+  assert.equal(accepted.revisionId, detail.quarantinedRevision.id);
+  assert.equal((await pool.query(`SELECT venue FROM games WHERE canonical_box_score_path = 'fixture.example/box/one.html'`)).rows[0].venue, 'Corrected Arena');
+  assert.equal((await app.queries.getGame(game)).venue, 'Corrected Arena');
+  const audit = (await pool.query('SELECT disposition, operator_id, reason, revision_id FROM reconciliation_dispositions')).rows;
+  assert.deepEqual(audit.map((row) => [row.disposition, row.operator_id, row.reason, `revision-${row.revision_id}`]),
+    [['accept', 'ops-1', 'the provider corrected the venue', accepted.revisionId]]);
+  assert.equal((await pool.query(`SELECT disposition FROM normalized_page_revisions WHERE id = $1`, [accepted.revisionId.slice('revision-'.length)])).rows[0].disposition, 'accepted');
+
+  await assert.rejects(app.review.accept(second, { operatorId: 'ops-1', reason: 'x' }), /accepted record changed since this issue opened/);
+  await app.review.dismiss(second, { operatorId: 'ops-1', reason: 'superseded by the accepted correction' });
+  assert.deepEqual((await pool.query('SELECT status FROM reconciliation_issues ORDER BY id')).rows.map((row) => row.status), ['accepted', 'resolved']);
+  assert.deepEqual((await app.review.list()).issues, []);
+  assert.equal((await app.review.show(second)).dispositions[0].kind, 'dismiss');
 });

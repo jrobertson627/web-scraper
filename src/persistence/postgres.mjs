@@ -4,8 +4,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, REPROCESS_STATES,
-  assertTransition, createLeaseToken, createOperatorDisposition, positiveInteger,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, ORPHANED_REQUEST_REASON, REPROCESS_STATES,
+  REVIEW_JOB_STATES, assertTransition, createLeaseToken, createOperatorDisposition, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
@@ -13,7 +13,7 @@ import {
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
 import { PAGE_TYPES, canonicalPathString, createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { writeNormalizedPage } from './postgres-domain.mjs';
-import { assertFetchVerification, assertReprocessSelection } from './index.mjs';
+import { assertFetchVerification, assertReprocessSelection, assertReviewStates, reviewJobSummary } from './index.mjs';
 // Server-side cap on any one statement, so a stuck query fails its transaction
 // instead of holding a lease or a pool client indefinitely.
 import { DEFAULT_STATEMENT_TIMEOUT_MS } from '../config/persistence.mjs';
@@ -115,7 +115,7 @@ export class PostgresPersistence {
   // requestTimeoutMs must be at least the workers' request policy timeout; the
   // default is the largest timeout a policy may set.
   constructor({ pool = newPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS }), claimTimeoutMs = 30_000,
-    authorizeOperator = (id) => Boolean(id), onPoolError,
+    authorizeOperator = DENY_ALL_OPERATORS, onPoolError,
     maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES, requestTimeoutMs = MAX_REQUEST_TIMEOUT_MS,
     orphanGraceMs = DEFAULT_ORPHAN_GRACE_MS } = {}) {
     if (!Number.isInteger(claimTimeoutMs) || claimTimeoutMs < 1) throw new Error('claimTimeoutMs must be positive');
@@ -471,6 +471,135 @@ export class PostgresPersistence {
     });
   }
 
+  // Operator review (#48). Jobs stopped for review (parse_failed and
+  // operator_stop by default), keyset-paged on the job id, each with its latest
+  // parse run, latest stored snapshot and recorded dispositions.
+  async reviewJobs({ states = REVIEW_JOB_STATES, limit, cursor } = {}) {
+    assertReviewStates(states);
+    const request = createPageRequest({ limit, cursor });
+    const after = decodePageCursor(request.cursor, ['integer']);
+    const rows = await this.#reviewRows(`j.state = ANY($2::text[]) ${after ? 'AND j.id > $3' : ''} ORDER BY j.id LIMIT $1`,
+      [request.limit + 1, [...states], ...(after ?? [])]);
+    return createReadPage(rows, request.limit, (row) => [Number(row.id)], (row) => row.item);
+  }
+
+  // One job in the review list's shape, whatever its state, or null.
+  async reviewJob(key) {
+    const [row] = await this.#reviewRows(byKey(1, 'j.'), jobKeyParts(key));
+    return row?.item ?? null;
+  }
+
+  async #reviewRows(where, params) {
+    const result = await this.pool.query(`SELECT j.*, p.provider_id || ':' || p.canonical_path || ':' || p.page_type AS parent_key,
+        r.id AS parse_id, r.parser_name, r.parser_version AS run_parser_version, r.status AS parse_status, r.warnings,
+        r.failure_details, r.parsed_at, f.id AS fetch_id, f.http_status, f.checksum, f.raw_object_path, f.fetched_at, f.cache_hit
+      FROM crawl_jobs j LEFT JOIN crawl_jobs p ON p.id = j.parent_job_id
+      LEFT JOIN LATERAL (SELECT * FROM parse_runs WHERE job_id = j.id ORDER BY parsed_at DESC, id DESC LIMIT 1) r ON true
+      LEFT JOIN LATERAL (SELECT * FROM source_fetches WHERE job_id = j.id AND checksum IS NOT NULL
+        ORDER BY fetched_at DESC, id DESC LIMIT 1) f ON true
+      WHERE ${where}`, params);
+    const ids = result.rows.map((row) => row.id);
+    const events = ids.length ? (await this.pool.query('SELECT * FROM job_state_events WHERE job_id = ANY($1::bigint[]) ORDER BY id', [ids])).rows : [];
+    const dispositions = ids.length ? (await this.pool.query(`SELECT job_id, disposition, operator_id, reason, recorded_at
+      FROM operator_dispositions WHERE job_id = ANY($1::bigint[]) ORDER BY id`, [ids])).rows : [];
+    return result.rows.map((row) => ({ id: row.id, item: deepFreeze({
+      ...reviewJobSummary(mapJob(row, events.filter((event) => event.job_id === row.id))),
+      lastParseRun: row.parse_id == null ? null : { id: portId('parse', row.parse_id), parserName: row.parser_name,
+        parserVersion: row.run_parser_version, status: row.parse_status, warnings: row.warnings, failureDetails: row.failure_details,
+        parsedAt: iso(row.parsed_at) },
+      snapshot: row.fetch_id == null ? null : { sourceFetchId: portId('fetch', row.fetch_id), status: row.http_status,
+        checksum: row.checksum, objectPath: row.raw_object_path, fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit },
+      dispositions: dispositions.filter((entry) => entry.job_id === row.id).map((entry) => ({ kind: entry.disposition,
+        operatorId: entry.operator_id, reason: entry.reason, at: iso(entry.recorded_at) })),
+    }) }));
+  }
+
+  // Reconciliation issues, open by default, keyset-paged on the issue id.
+  async reviewIssues({ status = 'open', issueTypes, limit, cursor } = {}) {
+    const request = createPageRequest({ limit, cursor });
+    const after = decodePageCursor(request.cursor, ['integer']);
+    const result = await this.pool.query(`SELECT * FROM reconciliation_issues WHERE status = $2
+      ${issueTypes ? 'AND issue_type = ANY($3::text[])' : ''} ${after ? `AND id > $${issueTypes ? 4 : 3}` : ''}
+      ORDER BY id LIMIT $1`, [request.limit + 1, status, ...(issueTypes ? [[...issueTypes]] : []), ...(after ?? [])]);
+    return createReadPage(result.rows, request.limit, (row) => [Number(row.id)], mapIssue);
+  }
+
+  // One issue with its recorded dispositions and, for a conflicting page, the
+  // quarantined revision it holds (its parser, source fetch and job) and the
+  // record's accepted revision.
+  async getIssue(issueId) {
+    const found = await this.pool.query('SELECT * FROM reconciliation_issues WHERE id = $1', [issueSqlId(issueId)]);
+    if (!found.rowCount) return null;
+    const row = found.rows[0];
+    const dispositions = await this.pool.query(`SELECT * FROM reconciliation_dispositions WHERE issue_id = $1 ORDER BY id`, [row.id]);
+    let quarantinedRevision = null;
+    let acceptedRevision = null;
+    if (row.issue_type === 'conflicting_page_reprocess') {
+      const quarantined = await this.pool.query(`SELECT r.id, r.source_fetch_id, r.parser_name, r.parser_version,
+          j.provider_id || ':' || j.canonical_path || ':' || j.page_type AS job_key
+        FROM normalized_page_revisions r JOIN source_fetches f ON f.id = r.source_fetch_id JOIN crawl_jobs j ON j.id = f.job_id
+        WHERE r.record_key = $1 AND r.disposition = 'quarantined' AND r.data = $2::jsonb ORDER BY r.id DESC LIMIT 1`,
+      [row.record_key, JSON.stringify(row.details.current?.data ?? null)]);
+      quarantinedRevision = quarantined.rows[0] ? revisionReference(quarantined.rows[0]) : null;
+      const accepted = await this.pool.query(`SELECT id, source_fetch_id, parser_name, parser_version FROM normalized_page_revisions
+        WHERE record_key = $1 AND disposition = 'accepted' ORDER BY id DESC LIMIT 1`, [row.record_key]);
+      acceptedRevision = accepted.rows[0] ? revisionReference(accepted.rows[0]) : null;
+    }
+    return deepFreeze({ ...mapIssue(row), quarantinedRevision, acceptedRevision,
+      dispositions: dispositions.rows.map((entry) => ({ kind: entry.disposition, operatorId: entry.operator_id, reason: entry.reason,
+        at: iso(entry.recorded_at), revisionId: entry.revision_id == null ? null : portId('revision', entry.revision_id) })) });
+  }
+
+  // A recorded source fetch by id, for re-deriving a reviewed revision.
+  async getSourceFetch(sourceFetchId) {
+    const result = await this.pool.query(`SELECT f.*, j.provider_id || ':' || j.canonical_path || ':' || j.page_type AS job_key
+      FROM source_fetches f JOIN crawl_jobs j ON j.id = f.job_id WHERE f.id = $1`, [sqlId('fetch', sourceFetchId)]);
+    const row = result.rows[0];
+    return row ? deepFreeze({ id: portId('fetch', row.id), jobKey: row.job_key, status: row.http_status, checksum: row.checksum,
+      objectPath: row.raw_object_path, fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit }) : null;
+  }
+
+  // Accepts the quarantined revision an open conflicting_page_reprocess issue
+  // holds: page is that revision re-derived from its stored snapshot. In one
+  // transaction the page is committed as accepted (its rows replace the old
+  // accepted record's, and any new child links are queued), the issue is
+  // closed as accepted, and the disposition is recorded. Refused when the
+  // accepted record has changed since the issue opened.
+  async acceptRevision({ issueId, page, provenance, operatorId, reason, at }) {
+    const disposition = createReviewDisposition('accept', operatorId, reason, at);
+    if (!this.authorizeOperator(disposition.operatorId, disposition)) throw new Error(`operator ${disposition.operatorId} is not authorized to review quarantined records`);
+    return this.transaction(async (client) => {
+      const issue = await lockOpenIssue(client, issueId, 'conflicting_page_reprocess');
+      if (page.identity !== issue.record_key) throw new Error('the page is not the record this issue holds');
+      const matches = await client.query(`SELECT $1::jsonb = $2::jsonb AS reviewed, (SELECT data = $3::jsonb FROM normalized_page_revisions
+          WHERE record_key = $4 AND disposition = 'accepted' ORDER BY id DESC LIMIT 1) AS unchanged`,
+      [JSON.stringify(page.data), JSON.stringify(issue.details.current?.data ?? null), JSON.stringify(issue.details.previous?.data ?? null), issue.record_key]);
+      if (!matches.rows[0].reviewed) throw new Error('the page does not match the revision this issue holds');
+      if (!matches.rows[0].unchanged) throw new Error('the accepted record changed since this issue opened; dismiss it and review the current record');
+      const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(page.jobKey));
+      const job = found.rows[0];
+      if (!job || !REPROCESS_STATES.includes(job.state)) throw new Error(`accepting a revision requires its job to be parsed. Current state: ${job?.state ?? 'missing'}`);
+      const written = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId), { accept: true });
+      await client.query(`UPDATE reconciliation_issues SET status = 'accepted' WHERE id = $1`, [issue.id]);
+      await client.query(`INSERT INTO reconciliation_dispositions (issue_id,disposition,operator_id,reason,revision_id,recorded_at)
+        VALUES ($1,'accept',$2,$3,$4,$5)`, [issue.id, disposition.operatorId, disposition.reason, written.revisionId, disposition.at]);
+      return deepFreeze({ issueId: portId('issue', issue.id), key: written.key, revisionId: portId('revision', written.revisionId), ...disposition });
+    });
+  }
+
+  // Closes an open issue without changing the accepted record, and records why.
+  async dismissIssue({ issueId, operatorId, reason, at }) {
+    const disposition = createReviewDisposition('dismiss', operatorId, reason, at);
+    if (!this.authorizeOperator(disposition.operatorId, disposition)) throw new Error(`operator ${disposition.operatorId} is not authorized to review quarantined records`);
+    return this.transaction(async (client) => {
+      const issue = await lockOpenIssue(client, issueId);
+      await client.query(`UPDATE reconciliation_issues SET status = 'resolved' WHERE id = $1`, [issue.id]);
+      await client.query(`INSERT INTO reconciliation_dispositions (issue_id,disposition,operator_id,reason,recorded_at)
+        VALUES ($1,'dismiss',$2,$3,$4)`, [issue.id, disposition.operatorId, disposition.reason, disposition.at]);
+      return deepFreeze({ issueId: portId('issue', issue.id), ...disposition });
+    });
+  }
+
   async recordOperatorDisposition(key, disposition) {
     const validated = createOperatorDisposition(disposition.kind, disposition.operatorId, disposition.reason,
       disposition.at ? new Date(disposition.at) : new Date());
@@ -629,6 +758,29 @@ export class PostgresPersistence {
   }
 }
 
+function issueSqlId(issueId) {
+  try { return sqlId('issue', issueId); } catch { throw new Error('issue id is invalid. Expected an id from the review list. Example: issue-12'); }
+}
+
+function mapIssue(row) {
+  return deepFreeze({ id: portId('issue', row.id), issueType: row.issue_type, recordKey: row.record_key, status: row.status,
+    openedAt: iso(row.opened_at), details: row.details });
+}
+
+function revisionReference(row) {
+  return { id: portId('revision', row.id), sourceFetchId: portId('fetch', row.source_fetch_id), parserName: row.parser_name,
+    parserVersion: row.parser_version, ...(row.job_key ? { jobKey: row.job_key } : {}) };
+}
+
+async function lockOpenIssue(client, issueId, issueType) {
+  const found = await client.query('SELECT * FROM reconciliation_issues WHERE id = $1 FOR UPDATE', [issueSqlId(issueId)]);
+  const issue = found.rows[0];
+  if (!issue) throw new Error(`issue ${issueId} does not exist`);
+  if (issue.status !== 'open') throw new Error(`issue ${issueId} is already ${issue.status}`);
+  if (issueType && issue.issue_type !== issueType) throw new Error(`only a ${issueType} issue can be accepted; dismiss a ${issue.issue_type} issue instead`);
+  return issue;
+}
+
 const LATEST_ACCEPTED_GAME_REVISION = `LEFT JOIN LATERAL
   (SELECT data FROM normalized_page_revisions WHERE provider_id = g.provider_id
    AND record_key = g.provider_id || ':' || g.canonical_box_score_path
@@ -676,11 +828,11 @@ export async function assertSchemaCurrent(pool, expected = expectedMigrationVers
 // request is released soon after its real deadline rather than the 120 s
 // default. Options left undefined take the PostgresPersistence defaults.
 export async function openPostgresPersistence({
-  pool: poolConfig, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries,
+  pool: poolConfig, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries, authorizeOperator,
   createPool = newPool,
 } = {}) {
   const pool = createPool({ statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS, ...poolConfig });
-  const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries });
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs, onPoolError, requestTimeoutMs, orphanGraceMs, maxClaimRecoveries, authorizeOperator });
   try {
     await assertSchemaCurrent(persistence.pool);
   } catch (error) {
