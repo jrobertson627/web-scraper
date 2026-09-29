@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createFixtureApplication, createReprocessApplication, createReviewApplication } from './composition-root.mjs';
 import { JOB_DISPOSITIONS, formatReviewList } from './review.mjs';
@@ -13,6 +14,7 @@ import { persistenceSettings } from '../config/persistence.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { REPROCESS_STATES } from '../contracts/jobs.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
+import { FileRawStore } from '../persistence/index.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
 import { createCrawlLog } from './crawl-log.mjs';
 import { STATUS_WINDOW_MS, formatCrawlStatus, summarizeCrawlStatus } from './crawl-status.mjs';
@@ -25,7 +27,8 @@ export const EXIT_CODES = Object.freeze({
   // Configuration is valid, but the worker cannot crawl yet (a production part is missing).
   workerNotReady: 4,
   sourceAdapterMissing: 4, // earlier name for workerNotReady
-  // The reconciliation report ran and found failing checks or quarantined records.
+  // The reconciliation report ran and found failing checks or quarantined
+  // records, or the raw repair inventory found objects pending repair.
   reconciliationFailed: 5,
 });
 
@@ -390,6 +393,27 @@ export async function runCli({
     }
   }
 
+  if (mode === 'repair') {
+    // The raw-store repair inventory (RAW_STORAGE.md): compares every recorded
+    // fetch with the objects under RAW_STORE_ROOT. Read-only for the raw store;
+    // PostgreSQL records the pending and orphan findings. No transport.
+    let settings;
+    try {
+      settings = persistenceSettings(env);
+      if (settings.kind !== 'postgres') throw new Error('repair reads the durable store, but PERSISTENCE is memory. Example: PERSISTENCE=postgres');
+      if (typeof env.RAW_STORE_ROOT !== 'string' || !isAbsolute(env.RAW_STORE_ROOT)) throw new Error('RAW_STORE_ROOT is invalid. Expected an absolute path. Example: RAW_STORE_ROOT=/var/data/raw');
+    } catch (error) {
+      stderr(`repair configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    const persistence = await openPostgres(settings);
+    try {
+      const report = await persistence.repairRawObjects({ rawStore: new FileRawStore(env.RAW_STORE_ROOT) });
+      stdout(JSON.stringify({ mode, ...report }, null, 2));
+      return { exitCode: report.counts.pending ? EXIT_CODES.reconciliationFailed : EXIT_CODES.success, report };
+    } finally { await persistence.close(); }
+  }
+
   if (mode === 'reconcile') {
     // The reconciliation report over the durable store (#46, #78): read-only,
     // no transport. Exit 0 when every check passes and nothing is quarantined,
@@ -497,7 +521,7 @@ export async function runCli({
     } finally { await worker.close?.(); }
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, operator, reprocess, review, reconcile, api, or status. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, operator, reprocess, review, reconcile, repair, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 
