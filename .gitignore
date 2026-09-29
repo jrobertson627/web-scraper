@@ -8,3 +8,6 @@ coverage/
 
 # Real Sports Reference captures stay local; the repo is public (see fixtures/sports-reference/README.md).
 fixtures/sports-reference/raw/
+
+# Local Claude Code state, including worktree copies of the repository.
+.claude/

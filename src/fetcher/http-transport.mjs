@@ -52,14 +52,26 @@ function normalizedHeaders(headers) {
   return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name, Array.isArray(value) ? value[0] : value]));
 }
 
-function isChallenge(status, headers, body) {
-  if (status === 403) return true;
-  const marker = `${headers['cf-mitigated'] ?? ''} ${headers['x-captcha'] ?? ''}`;
-  if (/challenge|captcha/i.test(marker)) return true;
-  if (!/html/i.test(headers['content-type'] ?? '')) return false;
+// An interstitial is a small page. A real page that merely embeds a captcha
+// widget (a newsletter or feedback form, say) is far larger, so a widget marker
+// alone makes a successful response a challenge only below this size (#129).
+const CHALLENGE_PAGE_MAX_BYTES = 32 * 1024;
+
+// The reason a response is a challenge, or null. The reason names which check
+// matched (never page content), so a stop can say why it halted the run.
+export function challengeMarker(status, headers, body) {
+  if (status === 403) return 'status 403';
+  if (/challenge|captcha/i.test(`${headers['cf-mitigated'] ?? ''} ${headers['x-captcha'] ?? ''}`)) return 'challenge response header';
+  if (!/html/i.test(headers['content-type'] ?? '')) return null;
   const html = body.toString('utf8');
-  return /<title>\s*(?:just a moment|access denied|captcha challenge)\b/i.test(html)
-    || /<(?:iframe|div|input)[^>]+(?:g-recaptcha|h-captcha|cf-chl|captcha)/i.test(html);
+  // Interstitial titles are specific enough to count at any status and size.
+  if (/<title>\s*(?:just a moment|access denied|captcha challenge)\b/i.test(html)) return 'interstitial title';
+  const widget = /<(?:iframe|div|input)[^>]+?(g-recaptcha|h-captcha|cf-chl|captcha)/i.exec(html)?.[1];
+  if (!widget) return null;
+  // Ordinary pages carry these widgets too: on a 2xx page only a small body,
+  // which is all a challenge page is, counts.
+  const successful = status >= 200 && status < 300;
+  return !successful || body.length < CHALLENGE_PAGE_MAX_BYTES ? `captcha widget (${widget.toLowerCase()})` : null;
 }
 
 // How long one address gets to accept a connection when another is left to try.
@@ -188,10 +200,12 @@ export class HttpTransport {
           const body = Buffer.concat(chunks, size);
           const status = response.statusCode;
           if (!Number.isInteger(status)) return finish(new TransportFailure('malformed_response', 'response has no status code'));
+          const marker = challengeMarker(status, responseHeaders, body);
           finish(null, {
             status, headers: responseHeaders, body,
             redirectUrl: [301, 302, 303, 307, 308].includes(status) ? responseHeaders.location : undefined,
-            challenge: isChallenge(status, responseHeaders, body),
+            challenge: marker !== null,
+            ...(marker ? { challengeMarker: marker } : {}),
           });
         });
       });

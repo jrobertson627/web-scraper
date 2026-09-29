@@ -4,7 +4,7 @@ import { createServer } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { Fetcher } from '../src/fetcher/index.mjs';
-import { HttpTransport, isPublicAddress } from '../src/fetcher/http-transport.mjs';
+import { HttpTransport, challengeMarker, isPublicAddress } from '../src/fetcher/http-transport.mjs';
 import { createSourceUrl, canonicalizeSourceUrl } from '../src/contracts/source.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
 import { IngestionOrchestrator } from '../src/application/orchestrator.mjs';
@@ -339,5 +339,57 @@ test('the public-address policy still applies to every address before any is tri
     const transport = new HttpTransport({ resolve: async () => [{ address: '127.0.0.1', family: 4 }, { address: '10.0.0.5', family: 4 }], ca, allowAddress: (address) => address === '127.0.0.1' });
     await assert.rejects(get(transport, origin), (error) => error.code === 'dns_rejected');
     assert.equal(origin.requests.length, 0);
+  } finally { await origin.close(); }
+});
+
+// #129: ordinary page markup must not halt the crawl, a real interstitial must.
+const WIDGET = '<div class="g-recaptcha" data-sitekey="site"></div>';
+const html = { 'content-type': 'text/html; charset=utf-8' };
+const padded = (bytes, inner = '') => Buffer.from(`<html><head><title>Season</title></head><body>${inner}<table><tr><td>${'x'.repeat(bytes)}</td></tr></table></body></html>`);
+
+test('a captcha widget counts as a challenge only on a small or unsuccessful response', () => {
+  assert.equal(challengeMarker(200, html, padded(60_000, WIDGET)), null, 'a full page with an embedded widget is a page');
+  assert.equal(challengeMarker(200, html, padded(100, WIDGET)), 'captcha widget (g-recaptcha)', 'a page-sized interstitial is a challenge');
+  assert.equal(challengeMarker(503, html, padded(60_000, WIDGET)), 'captcha widget (g-recaptcha)', 'an unsuccessful response with a widget is a challenge');
+  assert.equal(challengeMarker(200, html, padded(60_000, '<iframe src="x" class="h-captcha"></iframe>')), null);
+  assert.equal(challengeMarker(200, html, padded(60_000, '<input name="cf-chl-bypass">')), null);
+});
+
+test('interstitial titles, status 403 and challenge headers are challenges whatever the size', () => {
+  const interstitial = (title, bytes = 100) => Buffer.from(`<html><head><title>${title}</title></head><body>${'x'.repeat(bytes)}</body></html>`);
+  assert.equal(challengeMarker(200, html, interstitial('Just a moment...')), 'interstitial title');
+  assert.equal(challengeMarker(200, html, interstitial('Just a moment...', 90_000)), 'interstitial title');
+  assert.equal(challengeMarker(503, html, interstitial('Access Denied')), 'interstitial title');
+  assert.equal(challengeMarker(403, {}, Buffer.alloc(0)), 'status 403');
+  assert.equal(challengeMarker(200, { 'cf-mitigated': 'challenge', ...html }, padded(60_000)), 'challenge response header');
+  assert.equal(challengeMarker(200, html, padded(60_000)), null);
+  assert.equal(challengeMarker(200, { 'content-type': 'application/json' }, Buffer.from(WIDGET)), null, 'only HTML is inspected');
+});
+
+test('a normal page containing a reCAPTCHA widget is fetched; a small one stops with the marker recorded', async () => {
+  let body;
+  let status = 200;
+  const origin = await serverFor((request, response) => { response.writeHead(status, html); response.end(body); });
+  try {
+    body = padded(60_000, WIDGET);
+    const normal = setup(origin);
+    const normalClaim = await normal.claim();
+    const fetched = await normal.fetcher.fetch(normalClaim, normalClaim.lease);
+    assert.equal(fetched.kind, 'fetched', 'a page with a widget is stored, not treated as a challenge');
+
+    body = padded(100, WIDGET);
+    const small = setup(origin);
+    const claimed = await small.claim();
+    const stopped = await small.fetcher.fetch(claimed, claimed.lease);
+    assert.equal(stopped.kind, 'operator_stop');
+    assert.equal(stopped.code, 'challenge');
+    assert.match(stopped.reason, /captcha widget \(g-recaptcha\)/);
+
+    body = Buffer.from('<html><head><title>Just a moment...</title></head><body></body></html>');
+    const interstitial = setup(origin);
+    const interstitialClaim = await interstitial.claim();
+    const halted = await interstitial.fetcher.fetch(interstitialClaim, interstitialClaim.lease);
+    assert.equal(halted.code, 'challenge');
+    assert.match(halted.reason, /interstitial title/);
   } finally { await origin.close(); }
 });
