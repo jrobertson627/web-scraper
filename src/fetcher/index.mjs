@@ -186,7 +186,10 @@ export class Fetcher {
         const earliest = this.#nextTime(this.policy.minIntervalMs);
         return createFetchResult(rateLimitedRetry(this.policy, job, new Date(Math.max(retryAt.getTime(), Date.parse(earliest))).toISOString()));
       }
-      if (response.status === 403 || response.challenge) return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: 'operator review required for challenge response' });
+      if (response.status === 403 || response.challenge) {
+        const marker = response.challengeMarker ?? (response.status === 403 ? 'status 403' : null);
+        return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: `operator review required for challenge response${marker ? ` (${marker})` : ''}` });
+      }
       if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`);
       if (response.status < 200 || response.status >= 300) return createFetchResult({ kind: 'permanently_failed', reason: `upstream ${response.status}` });
       const body = Buffer.from(response.body ?? '');

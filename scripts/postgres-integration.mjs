@@ -22,6 +22,7 @@ import { boxScoreDocument, gameLogDocument, schoolIndexDocument, seasonDocument,
 import { present, unavailable } from '../src/contracts/value-state.mjs';
 import { operatorAuthorizer } from '../src/config/operators.mjs';
 import { definePersistenceConformance } from '../fixtures/persistence-conformance.mjs';
+import { assertDisposableDatabase } from './disposable-guard.mjs';
 // Adapter-hardening and API read-query checks share this disposable database.
 import './postgres-ops-integration.mjs';
 
@@ -31,6 +32,8 @@ if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !proc
 
 const { Pool } = pg;
 const pool = new Pool({ max: 8 });
+// The confirmation above is not enough on its own (#121): refuse a hosted or populated database.
+await assertDisposableDatabase(async (sql) => (await pool.query(sql)).rows, process.env, { mark: true });
 // .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
 mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-test-'));

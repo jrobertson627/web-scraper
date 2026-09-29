@@ -290,3 +290,81 @@ test('lockout settings are validated', () => {
   assert.throws(() => createOperatorServer({ ...base, maxFailures: 5, globalMaxFailures: 5 }), /globalMaxFailures/);
   assert.throws(() => createOperatorServer({ ...base, trustedProxyHops: -1 }), /trustedProxyHops/);
 });
+
+// #116: the run is reserved before the trigger's database checks, so requests
+// that arrive together cannot both start one.
+function gate() {
+  let open;
+  const opened = new Promise((resolve) => { open = resolve; });
+  return { opened, open };
+}
+
+test('two simultaneous Start requests start exactly one run; the other gets 409', async (t) => {
+  const checks = gate();
+  const run = await operator({ server: { liveClaims: async () => { await checks.opened; return 0; } } });
+  t.after(run.close);
+  const first = run.post('trigger', PIN, { json: true });
+  const second = run.post('trigger', PIN, { json: true });
+  // Neither request has finished its claim check yet: the reservation alone must decide.
+  const early = await Promise.race([first, second]);
+  assert.equal(early.status, 409, 'the loser is refused while the winner is still checking');
+  checks.open();
+  const statuses = [early.status, (await (early === (await first) ? second : first)).status].sort();
+  assert.deepEqual(statuses, [202, 409]);
+  await settle();
+  assert.equal(run.runs.length, 1, 'one run was started');
+  assert.equal((await run.post('trigger', PIN)).status, 409);
+
+  // Stop reaches the one run there is, and nothing is left behind for shutdown.
+  assert.equal((await run.post('stop', PIN)).status, 202);
+  assert.equal(run.runs[0].signal.aborted, true);
+  await run.server.shutdown();
+  assert.equal(run.server.active(), false);
+});
+
+test('a refused or failed trigger gives the reservation back', async (t) => {
+  let claims = 1;
+  let failure = null;
+  const run = await operator({ server: { liveClaims: async () => { if (failure) throw failure; return claims; } } });
+  t.after(run.close);
+  assert.equal((await run.post('trigger', PIN)).status, 409, 'refused for live claims');
+  assert.equal(run.server.active(), false, 'a refusal is not a run');
+  failure = new Error('database is unavailable');
+  assert.equal((await run.post('trigger', PIN)).status, 500);
+  assert.equal(run.server.active(), false, 'a failed check is not a run');
+  failure = null;
+  claims = 0;
+  assert.equal((await run.post('trigger', PIN)).status, 202, 'the next Start works');
+  await settle();
+  assert.equal(run.runs.length, 1);
+  run.runs[0].finish();
+  await run.server.shutdown();
+});
+
+test('a Stop that arrives while Start is still checking prevents the run from starting', async (t) => {
+  const checks = gate();
+  const run = await operator({ server: { liveClaims: async () => { await checks.opened; return 0; } } });
+  t.after(run.close);
+  const starting = run.post('trigger', PIN, { json: true });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal((await run.post('stop', PIN)).status, 202, 'the reserved run can be stopped');
+  checks.open();
+  const result = await starting;
+  assert.equal(result.status, 409);
+  assert.match((await result.json()).message, /stopped before it started/);
+  assert.equal(run.runs.length, 0);
+  assert.equal(run.server.active(), false);
+});
+
+test('shutdown while Start is still checking waits for it and starts nothing', async (t) => {
+  const checks = gate();
+  const run = await operator({ server: { liveClaims: async () => { await checks.opened; return 0; } } });
+  t.after(run.close);
+  const starting = run.post('trigger', PIN, { json: true });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const shutdown = run.server.shutdown();
+  checks.open();
+  await shutdown;
+  assert.equal((await starting).status, 409);
+  assert.equal(run.runs.length, 0);
+});

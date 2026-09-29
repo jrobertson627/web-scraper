@@ -88,7 +88,7 @@ A release gives the page a fresh 429 budget.
 
 ## A challenge (403 or CAPTCHA)
 
-A 403 or a challenge page ("Just a moment...") means the site is refusing the crawler. **The crawl halts on the first one.** That page stops as `operator_stop` with code `challenge`, the run ends without another request, and the worker exits `6` (`worker halted: a challenge response on ... awaits operator review`). The halt is durable: every later run, whether a worker restart, a resume or the operator page's Start button, makes no request until each challenge stop has been reviewed. A Render Background Worker restarts after exiting, so it keeps exiting `6`; suspend the service while you review.
+A 403 or a challenge page ("Just a moment...") means the site is refusing the crawler. The stop's reason says which check matched: `status 403`, `challenge response header`, `interstitial title`, or `captcha widget (<name>)`. A CAPTCHA widget in the markup counts only on a response under 32 KiB or a non-2xx one, so an ordinary page that embeds one (a newsletter or feedback form) is parsed, not halted on; if a page fails to parse and mentions a widget, look at it before assuming a block. **The crawl halts on the first one.** That page stops as `operator_stop` with code `challenge`, the run ends without another request, and the worker exits `6` (`worker halted: a challenge response on ... awaits operator review`). The halt is durable: every later run, whether a worker restart, a resume or the operator page's Start button, makes no request until each challenge stop has been reviewed. A Render Background Worker restarts after exiting, so it keeps exiting `6`; suspend the service while you review.
 
 1. Suspend the service. Open the page in a normal browser and check whether the site is up and whether it blocks by address.
 2. Wait at least a day before trying again. Do not change the user agent, address or pace to get around it; the crawler has no bypass by design.
@@ -180,6 +180,8 @@ PG_SMOKE_CONFIRM=disposable npm run smoke:migrations   # applies every migration
 PG_TEST_CONFIRM=disposable npm run test:postgres
 docker stop scraper-pg
 ```
+
+The two `*_CONFIRM` variables are set per command on purpose; `.env.example` does not set them, so a `.env` copied from it never satisfies the guard. The scripts also refuse, whatever the variables say, a `PGHOST` that is not local (localhost, 127.0.0.1, ::1, or a unix socket directory) and a database that already holds crawl data. `test:postgres` marks the database it runs against with a `disposable_test_marker` table, so re-running it, or `smoke:migrations`, on the same local test database works. `PG_DESTRUCTIVE_OVERRIDE=<database name>` skips both checks for a private throwaway server; never set it for a database you care about.
 
 A migration must be repeat-safe (the smoke applies it twice). In production it runs as the pre-deploy command. A migration that rewrites existing rows needs a backup first; the free database plan has none, so export the affected tables with `pg_dump` before deploying.
 
