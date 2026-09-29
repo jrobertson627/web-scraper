@@ -457,10 +457,11 @@ export class InMemoryPersistence {
   // authority for claims, lease expiry and retry readiness. The caller's time
   // argument is accepted for interface compatibility and ignored, so a skewed
   // worker clock cannot extend or cut short a lease.
-  claimNextJob(_now, workerId) {
+  // pageTypes limits which jobs are claimed (a manifest run, #44); by default any.
+  claimNextJob(_now, workerId, { pageTypes } = {}) {
     const now = this.clock();
-    let current = this.#findClaimableJob(now);
-    if (!current && this.recoverExpiredClaims() > 0) current = this.#findClaimableJob(now);
+    let current = this.#findClaimableJob(now, pageTypes);
+    if (!current && this.recoverExpiredClaims() > 0) current = this.#findClaimableJob(now, pageTypes);
     if (!current) return null;
     const previousState = current.state;
     const generation = (current.generation ?? 0) + 1;
@@ -498,8 +499,9 @@ export class InMemoryPersistence {
 
   // Same rule as PostgresPersistence.workOutlook: runnable jobs that remain,
   // and how long until the earliest retry falls due or claim expires.
-  workOutlook() {
+  workOutlook({ pageTypes } = {}) {
     const now = this.clock().getTime();
+    const counted = (job) => !pageTypes || pageTypes.includes(job.pageType);
     const stopped = new Set(['operator_stop', 'parse_failed', 'permanently_failed']);
     const live = (job, depth = 0) => {
       const parent = job.parentKey ? this.jobs.get(job.parentKey) : null;
@@ -509,6 +511,7 @@ export class InMemoryPersistence {
     let remaining = 0;
     let wakeAt = null;
     for (const job of this.jobs.values()) {
+      if (!counted(job)) continue;
       if (['pending', 'retry_wait', 'fetching', 'fetched'].includes(job.state) && live(job)) remaining += 1;
       const due = job.state === 'retry_wait' ? job.nextAllowedAt : ['fetching', 'fetched'].includes(job.state) ? job.claim?.expiresAt : null;
       if (due) wakeAt = Math.min(wakeAt ?? Infinity, Date.parse(due));
@@ -1079,8 +1082,9 @@ export class InMemoryPersistence {
     return { ...school, eligible: observation.eligible, provenance: page.provenance };
   }
 
-  #findClaimableJob(now) {
+  #findClaimableJob(now, pageTypes) {
     for (const job of this.jobs.values()) {
+      if (pageTypes && !pageTypes.includes(job.pageType)) continue;
       const retryReady = job.state === 'retry_wait' && job.nextAllowedAt && new Date(job.nextAllowedAt) <= now;
       const parentComplete = !job.parentKey || this.jobs.get(job.parentKey)?.state === 'parsed';
       if (parentComplete && !job.claim && (job.state === 'pending' || retryReady)) return job;

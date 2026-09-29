@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
 import { BOUNDARY_PORT_METHODS, assertBoundaryPort } from '../src/contracts/boundaries.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
+import { buildManifestReport } from '../src/application/manifest.mjs';
+import { CRAWL_STAGES } from '../src/contracts/crawl-scope.mjs';
 import { foundationCorpus } from './foundation-corpus.mjs';
 
 // One behavior suite for both persistence adapters (#46). Each scenario crawls
@@ -87,6 +89,20 @@ export function definePersistenceConformance(test, { label, createStores }) {
     assert.equal((await stores.persistence.crawlScope()).kind, 'full');
     assert.deepEqual(await full.reconcile(), await (await reference(false)).app.reconcile());
     await assert.rejects(async () => stores.persistence.recordCrawlScope(sample), /crawl scope refused/);
+  });
+
+  test(`${label}: a manifest run claims only index and history pages, and reports as the reference does`, async () => {
+    const stores = await createStores();
+    const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: stores });
+    await app.runWorkerOnce('manifest-worker', { pageTypes: CRAWL_STAGES.manifest });
+    const counts = await stores.persistence.jobCounts();
+    assert.deepEqual(counts, { parsed: 3, pending: 3 });
+    assert.deepEqual(await stores.persistence.workOutlook({ pageTypes: CRAWL_STAGES.manifest }), { remaining: 0, wakeInMs: null });
+    assert.equal((await stores.persistence.workOutlook()).remaining, 3);
+    const expected = new InMemoryPersistence();
+    await createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: { persistence: expected, rawStore: new MemoryRawStore() } })
+      .runWorkerOnce('manifest-worker', { pageTypes: CRAWL_STAGES.manifest });
+    assert.deepEqual(await buildManifestReport(stores.persistence), await buildManifestReport(expected));
   });
 
   test(`${label}: counts the jobs a worker holds a live claim on`, async () => {

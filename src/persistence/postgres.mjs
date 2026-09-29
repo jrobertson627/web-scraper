@@ -193,7 +193,8 @@ export class PostgresPersistence {
     return mapJob(result.rows[0], events.rows);
   }
 
-  async claimNextJob(_now, workerId) {
+  // pageTypes limits which jobs are claimed (a manifest run, #44); by default any.
+  async claimNextJob(_now, workerId, { pageTypes } = {}) {
     if (!workerId) throw new Error('workerId is required');
     await this.recoverExpiredClaims();
     return this.transaction(async (client) => {
@@ -201,7 +202,8 @@ export class PostgresPersistence {
         WHERE (j.state = 'pending' OR (j.state = 'retry_wait' AND j.next_allowed_at <= clock_timestamp()))
           AND (j.parent_job_id IS NULL OR EXISTS
             (SELECT 1 FROM crawl_jobs p WHERE p.id = j.parent_job_id AND p.state = 'parsed'))
-        ORDER BY j.created_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`);
+          AND ($1::text[] IS NULL OR j.page_type = ANY($1::text[]))
+        ORDER BY j.created_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, [pageTypes ? [...pageTypes] : null]);
       if (!selected.rowCount) return null;
       const row = selected.rows[0];
       const claimed = await client.query(`UPDATE crawl_jobs SET state = 'fetching', attempts = attempts + 1,
@@ -234,15 +236,18 @@ export class PostgresPersistence {
   // an operator (none of their ancestors is stopped or failed); wakeInMs is how
   // long until the earliest retry falls due or claim expires, by the database
   // clock, or null when nothing is scheduled.
-  async workOutlook() {
+  // pageTypes limits the outlook to the jobs a run claims (a manifest run, #44).
+  async workOutlook({ pageTypes } = {}) {
     const result = await this.pool.query(`WITH RECURSIVE live AS (
-        SELECT id, state FROM crawl_jobs WHERE parent_job_id IS NULL
+        SELECT id, state, page_type FROM crawl_jobs WHERE parent_job_id IS NULL
         UNION ALL
-        SELECT c.id, c.state FROM crawl_jobs c JOIN live p ON c.parent_job_id = p.id
+        SELECT c.id, c.state, c.page_type FROM crawl_jobs c JOIN live p ON c.parent_job_id = p.id
         WHERE p.state NOT IN ('operator_stop','parse_failed','permanently_failed'))
-      SELECT (SELECT count(*)::int FROM live WHERE state IN ('pending','retry_wait','fetching','fetched')) AS remaining,
+      SELECT (SELECT count(*)::int FROM live WHERE state IN ('pending','retry_wait','fetching','fetched')
+          AND ($1::text[] IS NULL OR page_type = ANY($1::text[]))) AS remaining,
         (SELECT CEIL(EXTRACT(EPOCH FROM (min(CASE WHEN state = 'retry_wait' THEN next_allowed_at ELSE claim_expires_at END)
-          - clock_timestamp())) * 1000)::bigint FROM crawl_jobs WHERE state IN ('retry_wait','fetching','fetched')) AS wake_ms`);
+          - clock_timestamp())) * 1000)::bigint FROM crawl_jobs WHERE state IN ('retry_wait','fetching','fetched')
+          AND ($1::text[] IS NULL OR page_type = ANY($1::text[]))) AS wake_ms`, [pageTypes ? [...pageTypes] : null]);
     const row = result.rows[0];
     // Clamped here, not with SQL GREATEST, which ignores NULL and would turn
     // "nothing scheduled" into 0.

@@ -23,6 +23,7 @@ npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:30
 npm run start:operator:personal  # PIN-protected page to start, check and stop a crawl (OPERATOR_PIN; DEPLOYMENT.md)
 npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
 npm run repair:raw    # raw-store inventory: missing or damaged objects and orphans (exit 5 when something needs repair)
+npm run manifest      # manifest dry-run report after a CRAWL_STAGE=manifest run (OPERATIONS_RUNBOOK.md)
 npm run robots:check -- robots.txt  # a saved robots.txt against the paths the crawler refuses
 npm run reconcile     # reconciliation report over PostgreSQL; exit 5 when it names failures (FOUNDATION_HANDOFF.md)
 npm test
