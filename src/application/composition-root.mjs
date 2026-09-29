@@ -17,7 +17,7 @@ import { ApplicationLifecycle } from './lifecycle.mjs';
 import { IngestionOrchestrator } from './orchestrator.mjs';
 import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { SportsReferenceSourceAdapter } from './sports-reference-source-adapter.mjs';
-import { buildFixtureReconciliationReport } from './reconciliation.mjs';
+import { buildReconciliationReport } from './reconciliation.mjs';
 import { reprocessStoredPages } from './reprocess.mjs';
 import { acceptIssue, disposeJob, dismissIssue, listForReview, showReviewItem } from './review.mjs';
 import { NO_CRAWL_EVENTS, jobStateCounts } from './crawl-log.mjs';
@@ -163,8 +163,10 @@ export function createFixtureApplication({
     reprocess: ({ parsers: registry = parsers, parserVersions = config.parserVersions, ...selection } = {}) => reprocessStoredPages({
       persistence, rawStore, parsers: registry, discovery, normalizer, clock, parserVersions, events, ...selection,
     }),
-    reconcile: () => {
-      const report = buildFixtureReconciliationReport(persistence);
+    // The fixture corpus exercises every value state and game status, so the
+    // coverage invariants are required here (see reconciliation.mjs).
+    reconcile: async () => {
+      const report = await buildReconciliationReport(persistence, { requireCoverage: true });
       events.emit('reconciliation.completed', { passed: report.passed,
         failedChecks: report.checks.filter((check) => !check.passed).length, quarantined: report.quarantined.length });
       return report;

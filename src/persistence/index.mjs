@@ -54,6 +54,80 @@ function assertRawReference({ checksum, objectPath }) {
   if (typeof objectPath !== 'string' || !objectPath) throw new Error('raw object path is missing. Expected the immutable store reference.');
 }
 
+// The raw repair inventory both adapters return (RAW_STORAGE.md). fetches are
+// the recorded source fetches, { id, checksum, objectPath }; the store is only
+// read. Referenced objects are healthy or pending repair, with a defect;
+// unreferenced objects are orphans retained for review; interrupted writes are
+// listed as temporary files.
+export async function inventoryRawObjects({ rawStore, fetches, observedAt }) {
+  if (!rawStore || typeof rawStore.entries !== 'function' || typeof rawStore.verify !== 'function') {
+    throw new Error('raw repair requires a raw store with entries() and verify().');
+  }
+  const references = new Map();
+  for (const fetch of fetches.filter((item) => item.checksum)) {
+    const list = references.get(fetch.checksum) ?? [];
+    list.push(fetch);
+    references.set(fetch.checksum, list);
+  }
+
+  const healthy = [];
+  const pending = [];
+  for (const [checksum, referencing] of references) {
+    const expectedPaths = [...new Set(referencing.map((fetch) => fetch.objectPath).filter(Boolean))];
+    const expectedObjectPath = expectedPaths.length === 1 ? expectedPaths[0] : undefined;
+    const verification = await rawStore.verify(checksum, expectedObjectPath);
+    if (verification.ok && expectedPaths.length === 1 && referencing.every((fetch) => fetch.objectPath === expectedObjectPath)) {
+      healthy.push(Object.freeze({ checksum, objectPath: verification.objectPath, sourceFetchIds: referencing.map((fetch) => fetch.id) }));
+      continue;
+    }
+    const reason = expectedPaths.length > 1 ? 'source fetches disagree about the raw object path'
+      : referencing.some((fetch) => !fetch.objectPath) ? 'source fetch is missing a raw object path'
+        : verification.reason;
+    const defect = expectedPaths.length > 1 ? 'path_conflict'
+      : referencing.some((fetch) => !fetch.objectPath) ? 'missing_path'
+        : verification.reason === 'missing raw object' ? 'missing'
+          : verification.reason === 'raw object checksum mismatch' ? 'checksum_mismatch'
+            : 'invalid_reference';
+    pending.push(Object.freeze({
+      checksum,
+      objectPath: expectedObjectPath ?? verification.objectPath ?? expectedPaths[0] ?? 'missing',
+      state: 'pending',
+      defect,
+      observedAt,
+      reason,
+      sourceFetchIds: referencing.map((fetch) => fetch.id),
+    }));
+  }
+
+  const orphans = [];
+  for (const entry of await rawStore.entries()) {
+    if (references.has(entry.checksum)) continue;
+    const verification = await rawStore.verify(entry.checksum, entry.objectPath);
+    orphans.push(Object.freeze({
+      checksum: entry.checksum,
+      objectPath: entry.objectPath,
+      state: 'retained',
+      detectedAs: 'orphan',
+      observedAt,
+      reason: verification.ok ? 'orphan raw object retained for operator review' : `${verification.reason}; orphan retained for operator review`,
+    }));
+  }
+
+  const byChecksum = (left, right) => left.checksum.localeCompare(right.checksum);
+  healthy.sort(byChecksum);
+  pending.sort(byChecksum);
+  orphans.sort(byChecksum);
+  const temporary = (await rawStore.temporaryEntries?.()) ?? [];
+  return Object.freeze({
+    observedAt,
+    counts: Object.freeze({ healthy: healthy.length, pending: pending.length, orphans: orphans.length, temporary: temporary.length }),
+    healthy: Object.freeze(healthy),
+    pending: Object.freeze(pending),
+    orphans: Object.freeze(orphans),
+    temporary: Object.freeze(temporary),
+  });
+}
+
 export function assertReviewStates(states) {
   if (!Array.isArray(states) || !states.length || states.some((state) => !REVIEW_JOB_STATES.includes(state))) {
     throw new Error(`review states are invalid. Expected some of ${REVIEW_JOB_STATES.join(', ')}. Example: parse_failed`);
@@ -124,6 +198,13 @@ function memoryPage(entries, request, shape) {
   const after = decodePageCursor(cursor, shape);
   const ordered = entries.filter((entry) => !after || compareKeys(entry.key, after) > 0).sort((a, b) => compareKeys(a.key, b.key));
   return createReadPage(ordered.slice(0, limit + 1), limit, (entry) => entry.key, (entry) => entry.item());
+}
+
+// The fields of a job the reconciliation report uses; both adapters return this shape.
+export function reconciliationJob(job) {
+  return deepFreeze({ key: job.key, pageType: job.pageType, state: job.state, parentKey: job.parentKey ?? null,
+    schoolSourcePath: job.schoolSourcePath ?? null, sourceUrl: job.sourceUrl, canonicalPath: job.canonicalPath,
+    reason: job.failures?.at(-1)?.reason ?? job.lastError ?? null });
 }
 
 function memoryIssue(issue) {
@@ -513,76 +594,9 @@ export class InMemoryPersistence {
   }
 
   async repairRawObjects({ rawStore } = {}) {
-    if (!rawStore || typeof rawStore.entries !== 'function' || typeof rawStore.verify !== 'function') {
-      throw new Error('raw repair requires a raw store with entries() and verify().');
-    }
-    const observedAt = this.clock().toISOString();
-    const references = new Map();
-    for (const fetch of this.sourceFetches.filter((item) => item.checksum)) {
-      const list = references.get(fetch.checksum) ?? [];
-      list.push(fetch);
-      references.set(fetch.checksum, list);
-    }
-
-    const healthy = [];
-    const pending = [];
-    for (const [checksum, fetches] of references) {
-      const expectedPaths = [...new Set(fetches.map((fetch) => fetch.objectPath).filter(Boolean))];
-      const expectedObjectPath = expectedPaths.length === 1 ? expectedPaths[0] : undefined;
-      const verification = await rawStore.verify(checksum, expectedObjectPath);
-      if (verification.ok && expectedPaths.length === 1 && fetches.every((fetch) => fetch.objectPath === expectedObjectPath)) {
-        healthy.push(Object.freeze({ checksum, objectPath: verification.objectPath, sourceFetchIds: fetches.map((fetch) => fetch.id) }));
-        continue;
-      }
-      const reason = expectedPaths.length > 1 ? 'source fetches disagree about the raw object path'
-        : fetches.some((fetch) => !fetch.objectPath) ? 'source fetch is missing a raw object path'
-          : verification.reason;
-      const defect = expectedPaths.length > 1 ? 'path_conflict'
-        : fetches.some((fetch) => !fetch.objectPath) ? 'missing_path'
-          : verification.reason === 'missing raw object' ? 'missing'
-            : verification.reason === 'raw object checksum mismatch' ? 'checksum_mismatch'
-              : 'invalid_reference';
-      const record = Object.freeze({
-        checksum,
-        objectPath: expectedObjectPath ?? verification.objectPath ?? expectedPaths[0] ?? 'missing',
-        state: 'pending',
-        defect,
-        observedAt,
-        reason,
-        sourceFetchIds: fetches.map((fetch) => fetch.id),
-      });
-      this.rawObjectRepairs.set(checksum, record);
-      pending.push(record);
-    }
-
-    const orphans = [];
-    for (const entry of await rawStore.entries()) {
-      if (references.has(entry.checksum)) continue;
-      const verification = await rawStore.verify(entry.checksum, entry.objectPath);
-      const record = Object.freeze({
-        checksum: entry.checksum,
-        objectPath: entry.objectPath,
-        state: 'retained',
-        detectedAs: 'orphan',
-        observedAt,
-        reason: verification.ok ? 'orphan raw object retained for operator review' : `${verification.reason}; orphan retained for operator review`,
-      });
-      this.rawObjectRepairs.set(entry.checksum, record);
-      orphans.push(record);
-    }
-
-    healthy.sort((left, right) => left.checksum.localeCompare(right.checksum));
-    pending.sort((left, right) => left.checksum.localeCompare(right.checksum));
-    orphans.sort((left, right) => left.checksum.localeCompare(right.checksum));
-    const temporary = (await rawStore.temporaryEntries?.()) ?? [];
-    return Object.freeze({
-      observedAt,
-      counts: Object.freeze({ healthy: healthy.length, pending: pending.length, orphans: orphans.length, temporary: temporary.length }),
-      healthy: Object.freeze(healthy),
-      pending: Object.freeze(pending),
-      orphans: Object.freeze(orphans),
-      temporary: Object.freeze(temporary),
-    });
+    const report = await inventoryRawObjects({ rawStore, fetches: this.sourceFetches, observedAt: this.clock().toISOString() });
+    for (const record of [...report.pending, ...report.orphans]) this.rawObjectRepairs.set(record.checksum, record);
+    return report;
   }
 
   recordParse(run, lease) {
@@ -743,6 +757,46 @@ export class InMemoryPersistence {
     const job = this.#requireLease(key, lease);
     if (this.inFlight.has(key)) throw new Error(`cannot transition job ${key} while its host request is still active`);
     this.#applyTransition(job, nextState, details);
+  }
+
+  // Reconciliation reads (#46); same contracts as the PostgreSQL adapter's.
+  // Every job, without history.
+  reconciliationJobs() { return [...this.jobs.values()].map(reconciliationJob); }
+
+  // The accepted record for each key that has one: { recordKey, jobKey, kind, data }.
+  acceptedPages(recordKeys) {
+    return recordKeys.flatMap((recordKey) => {
+      const page = this.pages.get(recordKey);
+      return page ? [deepFreeze({ recordKey, jobKey: page.jobKey, kind: page.kind, data: page.data })] : [];
+    });
+  }
+
+  // The accepted observations the given pages emitted: { key, observation }.
+  acceptedObservations(jobKeys) {
+    const parents = new Set(jobKeys);
+    return [...this.observations].filter(([, observation]) => parents.has(observation.parentKey))
+      .map(([key, { provenance, ...observation }]) => deepFreeze({ key, observation }));
+  }
+
+  coverageGaps() {
+    return [...this.unavailableCoverage.values()].map(({ schoolSourcePath, endingYear }) => deepFreeze({ schoolSourcePath, endingYear }));
+  }
+
+  // Jobs with a structural failure and no valid parse run at all.
+  failedParses() {
+    const valid = new Set(this.parseRuns.filter((run) => run.status === 'valid').map((run) => run.jobKey));
+    return [...new Set(this.parseRuns.filter((run) => run.status === 'structural_failure' && !valid.has(run.jobKey)).map((run) => run.jobKey))]
+      .map((jobKey) => deepFreeze({ jobKey }));
+  }
+
+  openIssues() {
+    return this.reconciliationIssues.filter((issue) => issue.status === 'open')
+      .map((issue) => deepFreeze({ id: issue.id ?? null, recordKey: issue.recordKey, issueType: issue.issueType }));
+  }
+
+  rejectedUrls() {
+    return [...this.observations].filter(([, observation]) => observation.kind === 'rejected_url')
+      .map(([key, observation]) => deepFreeze({ key, absoluteUrl: observation.absoluteUrl, reason: observation.reason }));
   }
 
   // Operator review (#48); same contracts as the PostgreSQL adapter's methods.

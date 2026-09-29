@@ -21,6 +21,7 @@ import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
 import { boxScoreDocument, gameLogDocument, schoolIndexDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
 import { present, unavailable } from '../src/contracts/value-state.mjs';
 import { operatorAuthorizer } from '../src/config/operators.mjs';
+import { definePersistenceConformance } from '../fixtures/persistence-conformance.mjs';
 // Adapter-hardening and API read-query checks share this disposable database.
 import './postgres-ops-integration.mjs';
 
@@ -836,4 +837,17 @@ test('operator review lists quarantined work and records accepted and dismissed 
   assert.deepEqual((await pool.query('SELECT status FROM reconciliation_issues ORDER BY id')).rows.map((row) => row.status), ['accepted', 'resolved']);
   assert.deepEqual((await app.review.list()).issues, []);
   assert.equal((await app.review.show(second)).dispositions[0].kind, 'dismiss');
+});
+
+// The persistence conformance suite (#46): the same scenarios and expectations
+// as test/persistence-conformance.test.mjs, against PostgreSQL.
+let conformanceStore = 0;
+definePersistenceConformance(test, {
+  label: 'PostgreSQL',
+  createStores: async () => {
+    await reset();
+    conformanceStore += 1;
+    return { persistence: new PostgresPersistence({ pool, claimTimeoutMs: 10000 }),
+      rawStore: createRawStore('filesystem', join(localRoot, `raw-conformance-${conformanceStore}`)) };
+  },
 });

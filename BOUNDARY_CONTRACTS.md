@@ -44,4 +44,4 @@ Paging:
 
 `health` counts job states, fetches, parse runs and warnings, unavailable coverage, open reconciliation issues, and accepted observations. It is bounded in statements and memory, but exact counts still scan their tables; if that becomes slow on the full backfill, switch the large counts to estimates rather than loading rows.
 
-`queryModels()` remains on the in-memory adapter for fixture tests and the reconciliation report; the PostgreSQL adapter no longer implements it.
+`queryModels()` remains on the in-memory adapter for fixture tests; the PostgreSQL adapter no longer implements it. The reconciliation report reads its own port, `BOUNDARY_PORT_METHODS.persistenceReconciliation`, which both adapters implement (see `FOUNDATION_HANDOFF.md`).

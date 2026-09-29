@@ -8,12 +8,27 @@ This is the provider-neutral foundation handoff for issue #6. It proves behavior
 npm run start:local       # reports "fixture local ready", ingests, and exits
 npm run start:api         # ingests fixture data, then reports HTTP readiness
 npm run smoke:foundation   # expanded HTML chain and reconciliation JSON
+npm run reconcile          # the same report against PostgreSQL (PERSISTENCE=postgres)
 npm run check             # syntax and unit/integration/smoke tests
 ```
 
 The expanded fixture chain has index, two school histories, three target-season pages, three game logs, and six canonical box scores. Two team logs link to the same box score; the worker fetches that URL once. A fault variant (`node scripts/foundation-smoke.mjs --faults`) adds an off-host link and a shifted layout, and the reconciliation output names the rejected observation and failed box-score job; it exits nonzero by design. Both variants use synthetic HTML with a `fixture-document` JSON script, so they test raw-body handling without claiming provider-specific selectors. All fixture transport URLs are local to the in-memory fixture map; no real upstream request occurs.
 
-The tests are grouped by behavior: unit contracts/parsing (`foundation`, `issue-7`, `issue-9`), integration page/manifest/reconciliation behavior (`job-lifecycle`, `issue-6`, `issue-8`), and command/API smoke (`issue-6`, `issue-13`). Tests exercise successful and rejected states. `src/application/reconciliation.mjs` checks the eleven invariants at `SCRAPING_PLAN.md:227-243`, plus partial historical coverage. Each failed check returns record keys and observations; `quarantined` lists structural failures, rejected URLs, and conflicting records.
+The tests are grouped by behavior: unit contracts/parsing (`foundation`, `request-policy`, `parser-normalization-seams`), integration page/manifest/reconciliation behavior (`job-lifecycle`, `fixture-chain-smoke`, `atomic-page-commits`, `persistence-conformance`), and command/API smoke (`fixture-chain-smoke`, `runtime-gates-and-adapter-seam`). Tests exercise successful and rejected states.
+
+## Reconciliation report
+
+`src/application/reconciliation.mjs` checks the eleven invariants at `SCRAPING_PLAN.md:227-243`, plus partial historical coverage. Each failed check returns record keys and observations. `quarantined` lists structural failures, rejected URLs, and open reconciliation issues; issues an operator accepted or dismissed (`npm run review`) are no longer listed.
+
+The report reads only the `persistenceReconciliation` port (`reconciliationJobs`, `acceptedPages`, `acceptedObservations`, `coverageGaps`, `failedParses`, `openIssues`, `rejectedUrls`), which both adapters implement, so the same report runs against the fixture store and PostgreSQL (#46). It loads the job list once, then pages in batches: the school index, the school histories, and each batch of seasons with their game logs and the box scores those logs link to. Its memory stays bounded on the full backfill. A structural failure counts as quarantined only while no later parse of the job was valid, so a page fixed by reprocessing is not reported.
+
+Two invariants are about coverage: blank, unavailable, null and zero remain distinct, and canceled, rescheduled, neutral-site and overtime games remain representable. The fixture corpus exercises all of them, so the fixture application requires every one to appear. Real data need not contain each one: Sports Reference never prints an explicit null, and a two-school sample may have no canceled game. So `npm run reconcile` reports what is missing as `informational` without failing, unless it is given `--require-coverage`.
+
+```sh
+npm run reconcile > reconciliation.json   # PERSISTENCE=postgres; exit 0 when it passes, 5 when it names failures
+```
+
+`fixtures/persistence-conformance.mjs` is one behavior suite for both adapters. It checks that each implements every persistence port, and that each matches the in-memory reference on the clean and fault corpora: the reconciliation report, the reconciliation reads, job and health counts, and the raw repair inventory. `test/persistence-conformance.test.mjs` runs it in memory, and `scripts/postgres-integration.mjs` runs it against PostgreSQL in CI.
 
 ## State transitions
 
