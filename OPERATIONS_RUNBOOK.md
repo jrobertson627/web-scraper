@@ -18,7 +18,7 @@ Every command below runs in the crawl host's shell (the Render service shell), w
 | `npm run repair:raw` | the raw-store inventory: missing or damaged objects and orphans (exit 5 when something needs repair) | no |
 | `npm run robots:check -- robots.txt` | checks a saved robots.txt against the paths the crawler refuses | no |
 
-Exit codes: `0` success, `1` unexpected failure (including an unreachable or unmigrated database), `2` invalid mode, `3` rejected configuration (the message names the variable and an example), `4` a configured parser is missing, `5` a report named failures.
+Exit codes: `0` success, `1` unexpected failure (including an unreachable or unmigrated database), `2` invalid mode, `3` rejected configuration (the message names the variable and an example), `4` a configured parser is missing, `5` a report named failures, `6` the crawl halted on a challenge that awaits review.
 
 ## Before each bulk run
 
@@ -60,7 +60,8 @@ A scope can only widen. A worker started with a narrower scope than the store ho
 
 - `npm run status` every so often. The pace should sit at or below the 600-an-hour policy ceiling, and `remaining` should fall. The projected time is a lower bound while discovery is still queueing pages.
 - The crawl log (stderr, one JSON object per line). A `crawl.summary` line every 100 settled jobs carries the counters. Watch:
-  - `challengeStops` and `operatorStops`: any rise needs attention ([Challenges](#a-challenge-403-or-captcha));
+  - `runHalts` and `challengeStops`: the crawl halted on a challenge ([Challenges](#a-challenge-403-or-captcha));
+  - `operatorStops`: pages stopped for review, for example after five 429s;
   - `retryWaits` and `permanentFailures`: some are normal (a missing page is a 404);
   - `parseFailures`: a layout change ([Parse failures](#a-parse-failure-layout-change)).
 - `npm run review:personal -- list` for anything stopped.
@@ -87,16 +88,17 @@ A release gives the page a fresh 429 budget.
 
 ## A challenge (403 or CAPTCHA)
 
-A 403 or a challenge page ("Just a moment...") stops that page as `operator_stop` with code `challenge`. The worker does not retry a challenge by itself. It does carry on with other pages, so **pause the crawl as soon as challenge stops appear** in the summaries or the review list. Several in a row mean the site is refusing the crawler.
+A 403 or a challenge page ("Just a moment...") means the site is refusing the crawler. **The crawl halts on the first one.** That page stops as `operator_stop` with code `challenge`, the run ends without another request, and the worker exits `6` (`worker halted: a challenge response on ... awaits operator review`). The halt is durable: every later run, whether a worker restart, a resume or the operator page's Start button, makes no request until each challenge stop has been reviewed. A Render Background Worker restarts after exiting, so it keeps exiting `6`; suspend the service while you review.
 
-1. Pause. Open the page in a normal browser and check whether the site is up and whether it blocks by address.
+1. Suspend the service. Open the page in a normal browser and check whether the site is up and whether it blocks by address.
 2. Wait at least a day before trying again. Do not change the user agent, address or pace to get around it; the crawler has no bypass by design.
 3. Record the decision for each stopped page:
    - `release-retry` to try again later;
    - `release-permanent` to give up on that page;
    - `hold` to keep it stopped with a note.
 
-   Every decision records who, when and why. Reviewers must be listed in `OPERATOR_IDS`.
+   Every decision records who, when and why. Reviewers must be listed in `OPERATOR_IDS`. Any of the three lets the crawl start again. A released page is tried first, and if it is challenged again, the crawl halts again.
+4. Resume the service.
 
 ## Review what the crawl stopped for
 

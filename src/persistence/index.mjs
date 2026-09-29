@@ -15,8 +15,8 @@ import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, ORPHANED_REQUEST_REASON, REPROCESS_STATES,
-  REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, ORPHANED_REQUEST_REASON,
+  REPROCESS_STATES, REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { FULL_CRAWL_SCOPE, nextCrawlScope } from '../contracts/crawl-scope.mjs';
@@ -480,6 +480,23 @@ export class InMemoryPersistence {
       details: { owner: workerId },
     }));
     return { ...cloneJob(current), lease };
+  }
+
+  // Jobs stopped by a halting code (a challenge) that no operator has reviewed
+  // since: the job is still in operator_stop and no hold was recorded after its
+  // latest stop. A release moves it out of operator_stop. Ordered by the job's
+  // own history, not by clocks. Same contract as the PostgreSQL adapter's.
+  unreviewedChallenges() {
+    const pending = [];
+    for (const job of this.jobs.values()) {
+      if (job.state !== 'operator_stop') continue;
+      const stopIndex = job.history.findLastIndex((event) => event.to === 'operator_stop');
+      if (stopIndex < 0 || !HALTING_STOP_CODES.includes(job.history[stopIndex].details?.code)) continue;
+      if (job.history.slice(stopIndex + 1).some((entry) => entry.type === 'operator_disposition' && entry.disposition === 'hold')) continue;
+      pending.push(deepFreeze({ jobKey: job.key, pageType: job.pageType, url: job.sourceUrl.absoluteUrl,
+        code: job.history[stopIndex].details.code, stoppedAt: job.history[stopIndex].at }));
+    }
+    return pending;
   }
 
   // Jobs holding an unexpired claim by this store's clock: a worker is running

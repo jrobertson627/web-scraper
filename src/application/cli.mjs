@@ -32,6 +32,8 @@ export const EXIT_CODES = Object.freeze({
   // The reconciliation report ran and found failing checks or quarantined
   // records, or the raw repair inventory found objects pending repair.
   reconciliationFailed: 5,
+  // The crawl halted on a challenge response that awaits operator review.
+  haltedForReview: 6,
 });
 
 // Best-effort scrub for stderr/console output. Matches "key=value" (env-style)
@@ -378,6 +380,7 @@ export async function runCli({
     const operator = createOperatorServer({
       pin,
       liveClaims: () => persistence.liveClaimCount(),
+      unreviewedChallenges: () => persistence.unreviewedChallenges(),
       status: async () => summarizeCrawlStatus(await persistence.crawlStatus({ windowMs: STATUS_WINDOW_MS })),
       startRun: async (signal) => {
         const worker = await startWorker({ config, settings, env, events: crawlLog, openPostgres });
@@ -388,7 +391,8 @@ export async function runCli({
         } finally { await worker.close?.(); }
       },
       onRunSettled: (last) => stderr(JSON.stringify({ at: new Date().toISOString(), event: 'operator.run_settled', outcome: last?.outcome,
-        processed: last?.result?.processed, stopped: last?.result?.stopped, error: last?.error ? safeMessage(last.error) : undefined })),
+        processed: last?.result?.processed, stopped: last?.result?.stopped, stopReason: last?.result?.stopReason ?? undefined,
+        error: last?.error ? safeMessage(last.error) : undefined })),
     });
     try {
       lifecycle.ready();
@@ -547,6 +551,11 @@ export async function runCli({
         pageTypes: stagePageTypes(config) });
       crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
       stdout(JSON.stringify({ mode, ...result }));
+      if (result.halt) {
+        stderr(`worker halted: a challenge response on ${result.halt.jobKey} awaits operator review; no request is made until every challenge stop is reviewed. `
+          + 'Pause the service, then: npm run review -- list --state operator_stop (see OPERATIONS_RUNBOOK.md)');
+        return { exitCode: EXIT_CODES.haltedForReview, result };
+      }
       return { exitCode: EXIT_CODES.success, result };
     } finally { await worker.close?.(); }
   }

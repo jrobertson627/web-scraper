@@ -4,8 +4,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, ORPHANED_REQUEST_REASON, REPROCESS_STATES,
-  REVIEW_JOB_STATES, assertTransition, createLeaseToken, createOperatorDisposition, createReviewDisposition, positiveInteger,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, ORPHANED_REQUEST_REASON,
+  REPROCESS_STATES, REVIEW_JOB_STATES, assertTransition, createLeaseToken, createOperatorDisposition, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
@@ -215,6 +215,26 @@ export class PostgresPersistence {
       await this.recordEvent(client, current, row.state, 'fetching', { owner: workerId });
       return mapJob(current);
     });
+  }
+
+  // Jobs stopped by a halting code (a challenge) that no operator has reviewed
+  // since: still in operator_stop, their latest stop event carries the code, and
+  // no hold was recorded after their latest release (a job is only stopped
+  // again after a release). Ordered by disposition ids, not by clocks. Same
+  // contract as the in-memory adapter's.
+  async unreviewedChallenges() {
+    const result = await this.pool.query(`SELECT j.provider_id || ':' || j.canonical_path || ':' || j.page_type AS job_key,
+        j.page_type, j.source_url, e.details->>'code' AS code, e.transitioned_at
+      FROM crawl_jobs j
+      JOIN LATERAL (SELECT details, transitioned_at FROM job_state_events
+        WHERE job_id = j.id AND to_state = 'operator_stop' ORDER BY id DESC LIMIT 1) e ON true
+      WHERE j.state = 'operator_stop' AND e.details->>'code' = ANY($1::text[])
+        AND NOT EXISTS (SELECT 1 FROM operator_dispositions h WHERE h.job_id = j.id AND h.disposition = 'hold'
+          AND h.id > COALESCE((SELECT max(r.id) FROM operator_dispositions r
+            WHERE r.job_id = j.id AND r.disposition <> 'hold'), 0))
+      ORDER BY e.transitioned_at, j.id`, [[...HALTING_STOP_CODES]]);
+    return result.rows.map((row) => deepFreeze({ jobKey: row.job_key, pageType: row.page_type, url: row.source_url,
+      code: row.code, stoppedAt: iso(row.transitioned_at) }));
   }
 
   // Jobs holding an unexpired claim by the database clock: a worker is running

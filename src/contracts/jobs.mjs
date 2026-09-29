@@ -80,6 +80,11 @@ export function sameLease(left, right) {
   return Boolean(left && right && left.value === right.value);
 }
 
+// Operator-stop codes that halt the whole run, not just the page: a challenge
+// (403 or a challenge page) means the site is refusing the crawler, so no
+// further request is made until an operator has reviewed the stop.
+export const HALTING_STOP_CODES = Object.freeze(['challenge']);
+
 // The persistence adapters' default operator authorizer: nobody may record a
 // disposition until the process supplies one (src/config/operators.mjs, #48).
 export const DENY_ALL_OPERATORS = Object.freeze(() => false);

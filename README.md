@@ -39,7 +39,7 @@ Start with an empty disposable PostgreSQL database and explicit `PGHOST`, `PGDAT
 
 CI (`.github/workflows/ci.yml`) runs on every push to `master` and every pull request. It runs `npm run check` and `smoke:foundation` on Node 20.18.1 and 22, then runs local mode and the unit suite with the `pg` driver removed, and runs `smoke:migrations`, `migrate` and `test:postgres` against a throwaway `postgres:16` service container. The real Sports Reference captures are not in the repository, so their tests skip in CI.
 
-The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, `4` means configuration is valid but the worker cannot crawl (a configured `pageType@version` has no production parser), and `5` means `npm run reconcile` ran and its report names failures.
+The fixture API completes its deterministic ingestion pass before it binds the listening socket, so readiness means the fixture projections are queryable. Runtime exit codes are stable: `1` is an unexpected startup failure (including an unreachable or unmigrated database), `2` is an invalid mode, `3` is rejected configuration, `4` means configuration is valid but the worker cannot crawl (a configured `pageType@version` has no production parser), `5` means `npm run reconcile` ran and its report names failures, and `6` means the crawl halted on a challenge response that awaits operator review (see `JOB_LIFECYCLE.md`).
 
 ### Durable persistence
 
@@ -58,6 +58,7 @@ The fetcher and orchestrator report crawl operations to an injected `events` sin
 | `throttle.paused` | fetcher, each pacing sleep | `throttlePauses`, `throttleWaitMs` |
 | `page.discovered` | orchestrator, after discovery | `discoveredChildren`, `duplicateDiscoveries` |
 | `job.settled` | orchestrator, one per processed job | `parsed`, `retryWaits`, `operatorStops`, `challengeStops`, `permanentFailures`, `parseFailures`, `parseWarnings`, `mergeConflicts` |
+| `run.halted` | orchestrator, when a challenge halts the run or an unreviewed challenge blocks it | `runHalts` |
 | `reconciliation.completed` | composition root `reconcile()`, and `npm run reconcile` | `reconciliationFailures` |
 | `crawl.summary` | every 100 settled jobs and at the end of a run | all counters, settled jobs by page type, and job-state counts |
 

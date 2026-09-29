@@ -105,6 +105,29 @@ export function definePersistenceConformance(test, { label, createStores }) {
     assert.deepEqual(await buildManifestReport(stores.persistence), await buildManifestReport(expected));
   });
 
+  test(`${label}: a challenge stop blocks the crawl until an operator reviews it`, async () => {
+    const stores = await createStores();
+    stores.persistence.authorizeOperator = (operatorId) => operatorId === 'ops';
+    const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: stores });
+    await app.ready;
+    const stop = async (code) => {
+      const claimed = await stores.persistence.claimNextJob(new Date(), 'conformance-worker');
+      await stores.persistence.transitionJob(claimed.key, 'operator_stop', claimed.lease, { lastError: `${code} stop`, code });
+      return claimed.key;
+    };
+    const review = (key, kind) => stores.persistence.recordOperatorDisposition(key, { kind, operatorId: 'ops', reason: kind,
+      at: new Date(Date.now() - 60_000).toISOString() });
+    const key = await stop('challenge');
+    assert.deepEqual((await stores.persistence.unreviewedChallenges()).map((entry) => [entry.jobKey, entry.code]), [[key, 'challenge']]);
+    await review(key, 'hold');
+    assert.deepEqual(await stores.persistence.unreviewedChallenges(), [], 'a hold reviews the stop');
+    await review(key, 'release_retry');
+    assert.equal(await stop('challenge'), key, 'the released page is retried');
+    assert.equal((await stores.persistence.unreviewedChallenges()).length, 1, 'the hold before the release does not review the new stop');
+    await review(key, 'release_permanent');
+    assert.deepEqual(await stores.persistence.unreviewedChallenges(), []);
+  });
+
   test(`${label}: counts the jobs a worker holds a live claim on`, async () => {
     const stores = await createStores();
     const app = createFixtureApplication({ fixtureEntries: foundationCorpus(), sharedState: stores });
