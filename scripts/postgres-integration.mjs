@@ -275,11 +275,14 @@ test('real PostgreSQL persistence and process restart', async () => {
 
   await reset();
   await (async () => {
-    const slow = new PostgresPersistence({ pool, claimTimeoutMs: 250 });
+    // The response outlasts the claim timeout several times over, so the claim
+    // must be renewed while it is in flight. Renewals come every 200 ms; the
+    // 600 ms timeout leaves room for a slow database round trip on a busy runner.
+    const slow = new PostgresPersistence({ pool, claimTimeoutMs: 600 });
     const raw = createRawStore('filesystem', join(localRoot, 'raw-slow'));
     const transport = { calls: [], async request({ url }) {
       this.calls.push(url);
-      await delay(700);
+      await delay(1500);
       return { status: 200, headers: {}, body: Buffer.from('<script id="fixture-document" type="application/json">{"schools":[]}</script>') };
     } };
     const app = createFixtureApplication({ sharedState: { persistence: slow, rawStore: raw, transport } });
