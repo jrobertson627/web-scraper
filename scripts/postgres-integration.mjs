@@ -437,6 +437,8 @@ test('worker mode runs the production worker end to end on PostgreSQL with the c
     mode: 'worker', stdout: (line) => output.push(line), stderr: () => {},
     env: { ...process.env, PERSISTENCE: 'postgres', PROVIDER_ID: authorization.providerId, PROVIDER_HOST: authorization.scope.allowedHosts[0],
       USER_AGENT: 'web-scraper-test (+ops@example.com)', RAW_STORE_ROOT: join(localRoot, 'raw-cli-worker'),
+      // The fixture index has a handful of schools, far below the real index's floor (#115).
+      MIN_ELIGIBLE_SCHOOLS: '0',
       AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(record('data-contract')) },
     crawlLog: createCrawlLog({ write: (line) => lines.push(JSON.parse(line)) }),
     startWorker: async (context) => {
