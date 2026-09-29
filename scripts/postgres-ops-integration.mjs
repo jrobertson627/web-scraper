@@ -13,12 +13,19 @@ import { createSourceUrl, canonicalizeSourceUrl, sourceKey } from '../src/contra
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
 import { foundationCorpus } from '../fixtures/foundation-corpus.mjs';
 import { summarizeCrawlStatus } from '../src/application/crawl-status.mjs';
+import { assertDisposableDatabase } from './disposable-guard.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
   throw new Error('PostgreSQL integration tests require an explicitly disposable PG* database');
 }
 
 const { Pool } = pg;
+// The confirmation above is not enough on its own (#121): refuse a hosted or populated database.
+{
+  const guard = new pg.Client();
+  await guard.connect();
+  try { await assertDisposableDatabase(async (sql) => (await guard.query(sql)).rows, process.env, { mark: true }); } finally { await guard.end(); }
+}
 // .tmp/ is gitignored, so it does not exist on a fresh checkout such as CI.
 mkdirSync(join(process.cwd(), '.tmp'), { recursive: true });
 const localRoot = mkdtempSync(join(process.cwd(), '.tmp', 'postgres-ops-test-'));

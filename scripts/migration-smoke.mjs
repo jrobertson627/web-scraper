@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertDisposableDatabase } from './disposable-guard.mjs';
 
 const directory = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const files = readdirSync(directory).filter((name) => /^\d{3}_.+\.sql$/.test(name)).sort();
@@ -26,6 +27,13 @@ function psql(args) {
   if (result.error) fail(`psql is unavailable: ${result.error.code ?? result.error.message}`);
   if (result.status !== 0) fail(`psql exited ${result.status}; verify the disposable connection and SQL migrations`);
   return result.stdout.trim();
+}
+
+// The confirmation above is not enough on its own (#121): refuse a hosted or populated database.
+try {
+  await assertDisposableDatabase((sql) => JSON.parse(psql(['-Atc', `SELECT coalesce(json_agg(t), '[]'::json) FROM (${sql}) t`])), process.env);
+} catch (error) {
+  fail(error.message, 2);
 }
 
 for (let pass = 1; pass <= 2; pass += 1) {
