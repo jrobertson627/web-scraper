@@ -76,6 +76,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `CRAWL_STAGE` | optional; `manifest` fetches only the index and history pages for the #44 dry run (see `OPERATIONS_RUNBOOK.md`); unset for a full crawl | no |
 | `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
 | `OPERATOR_PIN` | only for the operator trigger service; at least 8 characters (see [Operator trigger](#operator-trigger-55)) | yes |
+| `MIN_ELIGIBLE_SCHOOLS` | optional; the fewest eligible schools a school index may yield before it fails (default 300). Leave unset for a real crawl (see `OPERATIONS_RUNBOOK.md`) | no |
 | `NODE_VERSION` | `22` | no |
 
 `PROVIDER_ID`, `PROVIDER_HOST`, `AUTHORIZATION_JSON` and `DATA_CONTRACT_JSON` are set by `start:worker:personal` from the checked-in records. If a future deployment uses `start:worker` directly, supply them as dashboard values; they are configuration, not secrets, but they are never echoed into logs either.

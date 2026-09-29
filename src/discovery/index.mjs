@@ -2,6 +2,8 @@ import {
   assertPageType,
   canonicalizeSourceUrl,
   isAllowedSourceUrl,
+  EXPECTED_ELIGIBLE_SCHOOLS,
+  REQUIRED_ELIGIBILITY_PREDICATE,
   isEligibleSchool,
   serializeCanonicalPath,
   sourceKey,
@@ -20,7 +22,10 @@ import { FULL_CRAWL_SCOPE } from '../contracts/crawl-scope.mjs';
 // for the named schools, and a history page queues and records coverage only
 // for the sample's years.
 export class Discovery {
-  constructor({ providerId, allowedHosts, targetEndingYears, sourceAdapter, scope = FULL_CRAWL_SCOPE }) {
+  // minEligibleSchools: a school index that yields fewer eligible schools fails
+  // instead of queueing nothing (#115); 0 disables the check.
+  constructor({ providerId, allowedHosts, targetEndingYears, sourceAdapter, scope = FULL_CRAWL_SCOPE, minEligibleSchools = 0 }) {
+    this.minEligibleSchools = minEligibleSchools;
     this.providerId = providerId;
     this.allowedHosts = allowedHosts;
     this.targetEndingYears = targetEndingYears;
@@ -92,6 +97,10 @@ export class Discovery {
     };
 
     if (pageType === 'school_index') {
+      const eligibleCount = (page.schools ?? []).filter((school) => isEligibleSchool(school)).length;
+      if (eligibleCount < this.minEligibleSchools) {
+        throw new Error(`the school index yields only ${eligibleCount} eligible school${eligibleCount === 1 ? '' : 's'}; expected at least ${this.minEligibleSchools} (about ${EXPECTED_ELIGIBLE_SCHOOLS}). The eligibility rule (${REQUIRED_ELIGIBILITY_PREDICATE}) may no longer match the site, for example after it added a new season`);
+      }
       // The sample's schools as identities, resolved like the index rows' links.
       const sample = this.scope.kind === 'sample' ? new Set(this.scope.schools.map((path) => {
         try {

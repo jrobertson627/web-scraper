@@ -13,7 +13,7 @@ import { runWorkerLoop } from './worker-loop.mjs';
 import { WorkerStartRefused, startProductionWorker } from './production-worker.mjs';
 import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
-import { PAGE_TYPES } from '../contracts/source.mjs';
+import { MIN_ELIGIBLE_SCHOOLS, PAGE_TYPES } from '../contracts/source.mjs';
 import { REPROCESS_STATES } from '../contracts/jobs.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { FileRawStore } from '../persistence/index.mjs';
@@ -78,6 +78,16 @@ function parseParserVersions(value) {
   return { ...Object.fromEntries(PAGE_TYPES.map((pageType) => [pageType, '1'])), ...overrides };
 }
 
+// The fewest eligible schools a school index may yield (#115). MIN_ELIGIBLE_SCHOOLS
+// lowers it for a store that is not the real index (a local experiment); leave it
+// unset for a real crawl.
+function configuredMinEligibleSchools(env) {
+  const value = env.MIN_ELIGIBLE_SCHOOLS;
+  if (value === undefined || value === '') return MIN_ELIGIBLE_SCHOOLS;
+  if (!/^\d{1,5}$/.test(value)) throw new Error('invalid MIN_ELIGIBLE_SCHOOLS. Expected a whole number from 0 through 99999, or leave it unset. Example: MIN_ELIGIBLE_SCHOOLS=300');
+  return Number(value);
+}
+
 // CRAWL_SAMPLE restricts the crawl to a sample (#78), as JSON, for example
 // {"schools":["/cbb/schools/duke/men/"],"endingYears":[2024]}. Configuration
 // validation checks it against the full scope.
@@ -95,6 +105,7 @@ function workerConfiguration(env) {
     rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
     eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+    minEligibleSchools: configuredMinEligibleSchools(env),
     authorization: parseAuthorization(env.AUTHORIZATION_JSON),
     dataContract: parseDataContract(env.DATA_CONTRACT_JSON),
     parserVersions: parseParserVersions(env.PARSER_VERSIONS),
@@ -452,8 +463,10 @@ export async function runCli({
     // no transport. Exit 0 when every check passes and nothing is quarantined,
     // 5 when the report names failures.
     let settings;
+    let minEligibleSchools;
     try {
       settings = persistenceSettings(env);
+      minEligibleSchools = configuredMinEligibleSchools(env);
       if (settings.kind !== 'postgres') throw new Error('reconcile reads the durable store, but PERSISTENCE is memory. Example: PERSISTENCE=postgres');
       if (args.some((arg) => arg !== '--require-coverage')) throw new Error('reconcile takes only --require-coverage. Example: npm run reconcile');
     } catch (error) {
@@ -468,7 +481,7 @@ export async function runCli({
       return { exitCode: EXIT_CODES.runtimeFailure };
     }
     try {
-      const report = await buildReconciliationReport(persistence, { requireCoverage: args.includes('--require-coverage') });
+      const report = await buildReconciliationReport(persistence, { requireCoverage: args.includes('--require-coverage'), minEligibleSchools });
       crawlLog.emit('reconciliation.completed', { passed: report.passed,
         failedChecks: report.checks.filter((check) => !check.passed).length, quarantined: report.quarantined.length });
       stdout(JSON.stringify({ mode, ...report }, null, 2));

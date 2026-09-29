@@ -56,7 +56,9 @@ function recordKeyOf(job) { return job.pageType === 'box_score' ? serializeCanon
 // one (Sports Reference never prints an explicit null, and a sample may have
 // no canceled game), so without it those two checks report what is missing
 // but do not fail.
-export async function buildReconciliationReport(reads, { requireCoverage = false, batchSize = 50 } = {}) {
+// minEligibleSchools makes the eligible_school_count check fail an index that
+// yields fewer eligible schools than that (#115), whatever its stored decisions say.
+export async function buildReconciliationReport(reads, { requireCoverage = false, batchSize = 50, minEligibleSchools = 0 } = {}) {
   assertBoundaryPort('persistenceReconciliation', reads);
   // A sample (#78) is checked against its own years, and the report says so.
   const scope = await reads.crawlScope();
@@ -93,6 +95,8 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
     .map((entry) => [entry.key, entry.observation]));
   const eligibleRecords = [];
   for (const page of indexPages.values()) {
+    const eligibleCount = (page.data.schools ?? []).filter((school) => school.to === 2026).length;
+    if (eligibleCount < minEligibleSchools) eligibleRecords.push({ key: page.jobKey, eligibleSchools: eligibleCount, minimum: minEligibleSchools });
     for (const [rowIndex, school] of (page.data.schools ?? []).entries()) {
       const observation = schoolObservations.get(`school:${page.jobKey}:${rowIndex}`);
       const expected = school.to === 2026;
