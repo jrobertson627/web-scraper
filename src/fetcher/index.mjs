@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createSourceUrl, isAllowedSourceUrl } from '../contracts/source.mjs';
 import { createFetchResult } from '../contracts/boundaries.mjs';
-import { chargedRetry, rateLimitedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
+import { chargedRetry, notFoundRetry, rateLimitedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { HttpTransport } from './http-transport.mjs';
 
 function header(headers, name) {
@@ -191,6 +191,9 @@ export class Fetcher {
         return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: `operator review required for challenge response${marker ? ` (${marker})` : ''}` });
       }
       if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`);
+      // The crawler follows only links the site published, so a 404 or 410 on one may be
+      // temporary. Retry on a long backoff; give up only once the budget is spent (#130).
+      if (response.status === 404 || response.status === 410) return createFetchResult(notFoundRetry(this.policy, job, response.status, this.clock()));
       if (response.status < 200 || response.status >= 300) return createFetchResult({ kind: 'permanently_failed', reason: `upstream ${response.status}` });
       const body = Buffer.from(response.body ?? '');
       if (body.length > this.policy.maxResponseBytes) return createFetchResult({ kind: 'operator_stop', code: 'response_too_large', reason: 'response body exceeds the configured byte limit' });

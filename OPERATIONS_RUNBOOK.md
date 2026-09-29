@@ -62,7 +62,7 @@ A scope can only widen. A worker started with a narrower scope than the store ho
 - The crawl log (stderr, one JSON object per line). A `crawl.summary` line every 100 settled jobs carries the counters. Watch:
   - `runHalts` and `challengeStops`: the crawl halted on a challenge ([Challenges](#a-challenge-403-or-captcha));
   - `operatorStops`: pages stopped for review, for example after five 429s;
-  - `retryWaits` and `permanentFailures`: some are normal (a missing page is a 404);
+  - `retryWaits` and `permanentFailures`: some are normal (a page the site links to but does not serve is retried after 15 and 30 minutes on a 404 or 410, then given up on);
   - `parseFailures`: a layout change ([Parse failures](#a-parse-failure-layout-change)).
 - `npm run review:personal -- list` for anything stopped.
 
