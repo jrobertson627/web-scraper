@@ -18,6 +18,7 @@ npm run start:local   # deterministic fixture/local mode; exits after the fixtur
 npm run start:worker  # validates authorization/configuration, then crawls with PERSISTENCE=postgres
 npm run start:worker:personal  # loads the private, self-attested M1 records; set USER_AGENT and RAW_STORE_ROOT first
 npm run reprocess -- --page-type box_score   # re-parse stored raw snapshots with PARSER_VERSIONS; no requests
+npm run review -- list  # pages stopped for review and open issues; show/hold/release/accept/dismiss (JOB_LIFECYCLE.md)
 npm run start:api     # read-only fixture API on HOST:PORT (default 127.0.0.1:3000)
 npm run status        # crawl progress by page type, request pace, projected time remaining (--json for JSON)
 npm test

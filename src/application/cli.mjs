@@ -1,6 +1,8 @@
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
-import { createFixtureApplication, createReprocessApplication } from './composition-root.mjs';
+import { createFixtureApplication, createReprocessApplication, createReviewApplication } from './composition-root.mjs';
+import { JOB_DISPOSITIONS, formatReviewList } from './review.mjs';
+import { operatorAllowlist, operatorAuthorizer } from '../config/operators.mjs';
 import { ApplicationLifecycle } from './lifecycle.mjs';
 import { runWorkerLoop } from './worker-loop.mjs';
 import { WorkerStartRefused, startProductionWorker } from './production-worker.mjs';
@@ -102,6 +104,40 @@ export function parseReprocessArgs(args) {
   return selection;
 }
 
+const REVIEW_USAGE = 'Example: npm run review -- list, npm run review -- show <job key | issue id>, '
+  + 'npm run review -- release-retry <job key> --operator <id> --reason "<why>"';
+const REVIEW_ACTIONS = new Set([...Object.keys(JOB_DISPOSITIONS), 'accept', 'dismiss']);
+
+// review <list|show|hold|release-retry|release-permanent|accept|dismiss> ...
+export function parseReviewArgs(args) {
+  const [command, ...rest] = args;
+  const review = { command };
+  if (command === 'list') {
+    for (let index = 0; index < rest.length; index += 1) {
+      const flag = rest[index];
+      if (flag === '--json') review.json = true;
+      else if (flag === '--jobs') review.issues = false;
+      else if (flag === '--issues') review.jobs = false;
+      else if (flag === '--state' && rest[index + 1]) { review.states = [...(review.states ?? []), ...rest[index + 1].split(',')]; index += 1; }
+      else if (flag === '--limit' && /^\d+$/.test(rest[index + 1] ?? '')) { review.limit = Number(rest[index + 1]); index += 1; }
+      else throw new Error(`review list argument ${flag} is invalid. Expected --jobs, --issues, --state <state>, --limit <n> or --json`);
+    }
+    return review;
+  }
+  if (command !== 'show' && !REVIEW_ACTIONS.has(command)) throw new Error(`review command ${command ?? '(none)'} is invalid. ${REVIEW_USAGE}`);
+  review.target = rest[0];
+  if (!review.target || review.target.startsWith('--')) throw new Error(`review ${command} needs a job key or issue id. ${REVIEW_USAGE}`);
+  for (let index = 1; index < rest.length; index += 2) {
+    const field = { '--operator': 'operatorId', '--reason': 'reason' }[rest[index]];
+    if (command === 'show' || !field || rest[index + 1] === undefined) throw new Error(`review ${command} argument ${rest[index]} is invalid. ${REVIEW_USAGE}`);
+    review[field] = rest[index + 1];
+  }
+  if (command !== 'show' && (!review.operatorId || !review.reason?.trim())) {
+    throw new Error(`review ${command} needs --operator <id> and --reason "<why>"; every disposition is recorded. ${REVIEW_USAGE}`);
+  }
+  return review;
+}
+
 function configuredPort(env) {
   const port = Number(env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -173,6 +209,8 @@ export async function runCli({
   startWorker = startProductionWorker,
   // Assembles offline reprocessing; see createReprocessApplication.
   createReprocess = createReprocessApplication,
+  // Assembles operator review; see createReviewApplication.
+  createReviewer = createReviewApplication,
 } = {}) {
   if (mode === 'local') {
     const app = createFixtureApplication({ events: crawlLog });
@@ -287,6 +325,53 @@ export async function runCli({
     } finally { await persistence.close(); }
   }
 
+  if (mode === 'review') {
+    // Operator review (#48): database-backed, read-mostly; actions are recorded
+    // dispositions by an OPERATOR_IDS reviewer. No transport is built.
+    let settings;
+    let review;
+    let config;
+    try {
+      settings = persistenceSettings(env);
+      review = parseReviewArgs(args);
+      if (settings.kind !== 'postgres') throw new Error('review reads the durable store, but PERSISTENCE is memory. Example: PERSISTENCE=postgres');
+      if (REVIEW_ACTIONS.has(review.command) && !operatorAllowlist(env.OPERATOR_IDS).includes(review.operatorId)) {
+        throw new Error(`OPERATOR_IDS does not list operator ${review.operatorId}. Only a listed reviewer may record a disposition. Example: OPERATOR_IDS=${review.operatorId}`);
+      }
+      // Only accept re-derives a page, which needs the worker configuration.
+      if (review.command === 'accept') config = workerConfiguration(env);
+    } catch (error) {
+      stderr(`review configuration rejected: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.configurationRejected };
+    }
+    let persistence;
+    try {
+      persistence = await openPostgres({ ...settings, authorizeOperator: operatorAuthorizer(env.OPERATOR_IDS) });
+    } catch (error) {
+      stderr(`review persistence unavailable: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.runtimeFailure };
+    }
+    try {
+      const app = createReviewer({ persistence, config });
+      const by = { operatorId: review.operatorId, reason: review.reason };
+      let result;
+      if (review.command === 'list') {
+        result = await app.list({ jobs: review.jobs ?? true, issues: review.issues ?? true, states: review.states, limit: review.limit });
+        stdout(review.json ? JSON.stringify(result, null, 2) : formatReviewList(result));
+      } else {
+        if (review.command === 'show') result = await app.show(review.target);
+        else if (review.command === 'accept') result = await app.accept(review.target, by);
+        else if (review.command === 'dismiss') result = await app.dismiss(review.target, by);
+        else result = await app.dispose(review.target, review.command, by);
+        stdout(JSON.stringify(result, null, 2));
+      }
+      return { exitCode: EXIT_CODES.success, result };
+    } catch (error) {
+      stderr(`review ${review.command} failed: ${safeMessage(error)}`);
+      return { exitCode: EXIT_CODES.runtimeFailure };
+    } finally { await persistence.close(); }
+  }
+
   if (mode === 'worker') {
     let config;
     let settings;
@@ -318,7 +403,7 @@ export async function runCli({
     } finally { await worker.close?.(); }
   }
 
-  stderr(`invalid runtime mode: ${mode}. Expected local, worker, reprocess, api, or status. Example: npm run start:local`);
+  stderr(`invalid runtime mode: ${mode}. Expected local, worker, reprocess, review, api, or status. Example: npm run start:local`);
   return { exitCode: EXIT_CODES.invalidMode };
 }
 

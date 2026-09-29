@@ -92,7 +92,7 @@ test('canonical job identity is provider and page scoped', () => {
 
 test('retry and operator-stop states release claims and validate dispositions', () => {
   const now = new Date('2026-01-01T00:00:00.000Z');
-  const persistence = new InMemoryPersistence(() => now);
+  const persistence = new InMemoryPersistence(() => now, { authorizeOperator: (operatorId) => operatorId === 'ops-1' });
   persistence.addJob(makeJob());
   const first = persistence.claimNextJob(now, 'worker-1');
   persistence.transitionJob(first.key, 'retry_wait', first.lease, { nextAllowedAt: now.toISOString() });
@@ -101,6 +101,7 @@ test('retry and operator-stop states release claims and validate dispositions', 
   persistence.transitionJob(retry.key, 'operator_stop', retry.lease);
   assert.equal(persistence.getJob(retry.key).claim, null);
   assert.throws(() => persistence.recordOperatorDisposition(retry.key, { kind: 'bogus' }), /invalid operator disposition/);
+  assert.throws(() => persistence.recordOperatorDisposition(retry.key, { kind: 'release_permanent', operatorId: 'anyone', reason: 'x' }), /not authorized/);
   persistence.recordOperatorDisposition(retry.key, { kind: 'release_permanent', operatorId: 'ops-1', reason: 'challenge reviewed' });
   assert.equal(persistence.getJob(retry.key).state, 'permanently_failed');
 });

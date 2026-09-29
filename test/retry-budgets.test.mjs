@@ -20,7 +20,7 @@ function job(path) {
 function harness(responses, policy = {}) {
   let milliseconds = Date.parse('2026-01-01T00:00:00.000Z');
   const clock = () => new Date(milliseconds);
-  const persistence = new InMemoryPersistence(clock, { claimTimeoutMs: 30_000 });
+  const persistence = new InMemoryPersistence(clock, { claimTimeoutMs: 30_000, authorizeOperator: (operatorId) => operatorId === 'ops' });
   const rawStore = new MemoryRawStore();
   const transport = { calls: 0, async request() { return responses[Math.min(this.calls++, responses.length - 1)]; } };
   const fetcher = new Fetcher({ transport, rawStore, persistence, clock, sleep: async (ms) => { milliseconds += ms; },

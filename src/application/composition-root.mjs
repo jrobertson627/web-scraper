@@ -19,6 +19,7 @@ import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { SportsReferenceSourceAdapter } from './sports-reference-source-adapter.mjs';
 import { buildFixtureReconciliationReport } from './reconciliation.mjs';
 import { reprocessStoredPages } from './reprocess.mjs';
+import { acceptIssue, disposeJob, dismissIssue, listForReview, showReviewItem } from './review.mjs';
 import { NO_CRAWL_EVENTS, jobStateCounts } from './crawl-log.mjs';
 import { MAPPED_RETAINED_FIELDS } from '../contracts/retained-fields.mjs';
 import {
@@ -154,6 +155,9 @@ export function createFixtureApplication({
     orchestrator,
     runWorkerOnce,
     previewDryRun,
+    // Operator review (#48) over the fixture store; the persistence must be
+    // given an operator authorizer (sharedState.persistence) for actions.
+    review: reviewOperations({ persistence, rawStore, parsers, discovery, normalizer, clock }),
     // Offline reprocessing of the stored snapshots (#43). Tests pass an upgraded
     // parser registry and versions; no transport is involved.
     reprocess: ({ parsers: registry = parsers, parserVersions = config.parserVersions, ...selection } = {}) => reprocessStoredPages({
@@ -313,4 +317,47 @@ export function createReprocessApplication({
       ...(pageTypes ? { pageTypes } : {}), ...(states ? { states } : {}), ...(jobKeys ? { jobKeys } : {}),
     }),
   };
+}
+
+// Operator review (#48): listing, inspecting and recording dispositions. accept
+// derives the reviewed page again, so it needs the parsers, raw store,
+// discovery and normalizer; without them only the other operations work.
+function reviewOperations({ persistence, rawStore, parsers, discovery, normalizer, clock }) {
+  return Object.freeze({
+    list: (options = {}) => listForReview({ persistence, ...options }),
+    show: (id) => showReviewItem({ persistence, id }),
+    dispose: (jobKey, action, { operatorId, reason }) => disposeJob({ persistence, jobKey, action, operatorId, reason, clock }),
+    dismiss: (issueId, { operatorId, reason }) => dismissIssue({ persistence, issueId, operatorId, reason, clock }),
+    accept: (issueId, { operatorId, reason }) => {
+      if (!parsers) throw new Error('accept needs the worker configuration: AUTHORIZATION_JSON, DATA_CONTRACT_JSON, RAW_STORE_ROOT and USER_AGENT, as for the worker');
+      return acceptIssue({ persistence, rawStore, parsers, discovery, normalizer, clock, issueId, operatorId, reason });
+    },
+  });
+}
+
+// Production assembly for `cli.mjs review`. The persistence carries the
+// operator authorizer (OPERATOR_IDS). With a worker configuration it can also
+// accept quarantined revisions, which passes the worker's configuration gate
+// because it commits provider-derived records; it never builds a transport.
+export function createReviewApplication({
+  persistence,
+  config: configInput,
+  sourceAdapter = new SportsReferenceSourceAdapter(),
+  rawStore,
+  parsers = createProductionParserRegistry(),
+  clock = systemClock,
+} = {}) {
+  const refuse = (reason) => new Error(`review assembly refused: ${reason}`);
+  if (!(persistence instanceof PostgresPersistence)) throw refuse('persistence must be PostgresPersistence');
+  if (!configInput) return reviewOperations({ persistence, clock });
+  const config = validateConfiguration(configInput, { clock });
+  if (config.mode !== 'worker') throw refuse(`configuration mode is ${config.mode}, expected worker`);
+  const adapter = assertSourceAdapter(sourceAdapter);
+  if (adapter.providerId() !== config.providerId) throw refuse(`source adapter provider ${adapter.providerId()} does not match configured provider ${config.providerId}`);
+  const store = rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
+  if (!(store instanceof FileRawStore)) throw refuse('raw store must be the filesystem raw store');
+  if (!(parsers instanceof ParserRegistry)) throw refuse('parsers must be a ParserRegistry');
+  const discovery = new Discovery({ providerId: config.providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, sourceAdapter: adapter });
+  const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
+  return reviewOperations({ persistence, rawStore: store, parsers, discovery, normalizer, clock });
 }

@@ -15,7 +15,8 @@ import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, ORPHANED_REQUEST_REASON, REPROCESS_STATES, positiveInteger,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, ORPHANED_REQUEST_REASON, REPROCESS_STATES,
+  REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { MAX_REQUEST_TIMEOUT_MS } from '../contracts/request-policy.mjs';
@@ -51,6 +52,23 @@ function assertChecksum(checksum) {
 function assertRawReference({ checksum, objectPath }) {
   assertChecksum(checksum);
   if (typeof objectPath !== 'string' || !objectPath) throw new Error('raw object path is missing. Expected the immutable store reference.');
+}
+
+export function assertReviewStates(states) {
+  if (!Array.isArray(states) || !states.length || states.some((state) => !REVIEW_JOB_STATES.includes(state))) {
+    throw new Error(`review states are invalid. Expected some of ${REVIEW_JOB_STATES.join(', ')}. Example: parse_failed`);
+  }
+}
+
+// The fields of a job the review list shows; both adapters add the latest parse
+// run, snapshot and dispositions.
+export function reviewJobSummary(job) {
+  return {
+    key: job.key, pageType: job.pageType, state: job.state, url: job.sourceUrl.absoluteUrl,
+    parentKey: job.parentKey ?? null, attempts: job.attempts, updatedAt: job.updatedAt,
+    reason: job.failures?.at(-1)?.reason ?? job.lastError ?? null,
+    history: (job.history ?? []).map((event) => ({ ...event })),
+  };
 }
 
 export function assertReprocessSelection(pageTypes, states) {
@@ -106,6 +124,11 @@ function memoryPage(entries, request, shape) {
   const after = decodePageCursor(cursor, shape);
   const ordered = entries.filter((entry) => !after || compareKeys(entry.key, after) > 0).sort((a, b) => compareKeys(a.key, b.key));
   return createReadPage(ordered.slice(0, limit + 1), limit, (entry) => entry.key, (entry) => entry.item());
+}
+
+function memoryIssue(issue) {
+  return deepFreeze({ id: issue.id, issueType: issue.issueType, recordKey: issue.recordKey, status: issue.status,
+    openedAt: issue.openedAt ?? null, details: issue.details });
 }
 
 function gameModel(page) {
@@ -297,8 +320,10 @@ export function createRawStore(kind, root) {
 }
 
 export class InMemoryPersistence {
+  // authorizeOperator decides who may record an operator disposition. The
+  // default denies everyone; see src/config/operators.mjs.
   constructor(clock = () => new Date(), {
-    authorizeOperator = (operatorId) => Boolean(operatorId),
+    authorizeOperator = DENY_ALL_OPERATORS,
     claimTimeoutMs = 30_000,
     maxClaimRecoveries = DEFAULT_MAX_CLAIM_RECOVERIES,
     // At least the workers' request policy timeout; the default is the
@@ -320,6 +345,8 @@ export class InMemoryPersistence {
     this.unavailableCoverage = new Map();
     this.reconciliationIssues = [];
     this.operatorDispositions = [];
+    this.reconciliationDispositions = [];
+    this.nextIssueId = 1;
     this.rawObjectRepairs = new Map();
     this.inFlight = new Map();
     this.requestHistory = [];
@@ -631,7 +658,9 @@ export class InMemoryPersistence {
     return Object.freeze({ key: staged.key, conflict: staged.conflict, superseded: staged.superseded });
   }
 
-  #stagePage(page, provenance) {
+  // accept (operator review, #48) commits a differing page as the accepted
+  // record, as a supersede does.
+  #stagePage(page, provenance, { accept = false } = {}) {
     const key = page.identity ?? page.jobKey;
     const record = Object.freeze({ ...page, provenance });
     const previous = this.pages.get(key);
@@ -639,7 +668,7 @@ export class InMemoryPersistence {
     // Same rule as PostgreSQL's writeNormalizedPage: a parser change over the
     // same raw body replaces the accepted record; any other difference is a
     // conflict held for review (PARSER_NORMALIZATION.md).
-    const superseded = differs && this.#parserChangeOnly(previous.provenance, provenance);
+    const superseded = differs && (accept || this.#parserChangeOnly(previous.provenance, provenance));
     const conflict = differs && !superseded;
     const pages = new Map(this.pages);
     const observations = new Map(this.observations);
@@ -659,6 +688,8 @@ export class InMemoryPersistence {
       && jsonEqual(issue.details.previous.data, previous.data) && jsonEqual(issue.details.current.data, record.data));
     if (conflict && !alreadyOpen) {
       reconciliationIssues.push(createReconciliationIssue({
+        id: `issue-${this.nextIssueId++}`,
+        openedAt: this.clock().toISOString(),
         issueType: 'conflicting_page_reprocess',
         recordKey: key,
         details: {
@@ -712,6 +743,99 @@ export class InMemoryPersistence {
     const job = this.#requireLease(key, lease);
     if (this.inFlight.has(key)) throw new Error(`cannot transition job ${key} while its host request is still active`);
     this.#applyTransition(job, nextState, details);
+  }
+
+  // Operator review (#48); same contracts as the PostgreSQL adapter's methods.
+  reviewJobs({ states = REVIEW_JOB_STATES, limit, cursor } = {}) {
+    assertReviewStates(states);
+    const entries = [...this.jobs.values()].filter((job) => states.includes(job.state))
+      .map((job) => ({ key: [job.key], item: () => this.#reviewItem(job) }));
+    return memoryPage(entries, { limit, cursor }, ['string']);
+  }
+
+  reviewJob(key) {
+    const job = this.jobs.get(key);
+    return job ? this.#reviewItem(job) : null;
+  }
+
+  #reviewItem(job) {
+    const run = this.parseRuns.findLast((entry) => entry.jobKey === job.key);
+    const fetch = this.lastSuccessfulFetch(job.key);
+    return deepFreeze({
+      ...reviewJobSummary(job),
+      lastParseRun: run ? { id: run.id, parserName: run.parserName, parserVersion: run.parserVersion, status: run.status,
+        warnings: run.warnings, failureDetails: run.failureDetails, parsedAt: run.parsedAt } : null,
+      snapshot: fetch ? { sourceFetchId: fetch.id, status: fetch.status, checksum: fetch.checksum, objectPath: fetch.objectPath,
+        fetchedAt: fetch.fetchedAt, cacheHit: fetch.cacheHit } : null,
+      dispositions: this.operatorDispositions.filter((entry) => entry.jobKey === job.key)
+        .map(({ kind, operatorId, reason, at }) => ({ kind, operatorId, reason, at })),
+    });
+  }
+
+  reviewIssues({ status = 'open', issueTypes, limit, cursor } = {}) {
+    const entries = this.reconciliationIssues.filter((issue) => issue.id && issue.status === status && (!issueTypes || issueTypes.includes(issue.issueType)))
+      .map((issue) => ({ key: [Number(issue.id.slice('issue-'.length))], item: () => memoryIssue(issue) }));
+    return memoryPage(entries, { limit, cursor }, ['integer']);
+  }
+
+  getIssue(issueId) {
+    const issue = this.reconciliationIssues.find((entry) => entry.id === issueId);
+    if (!issue) return null;
+    let quarantinedRevision = null;
+    let acceptedRevision = null;
+    if (issue.issueType === 'conflicting_page_reprocess') {
+      const current = issue.details.current.provenance;
+      quarantinedRevision = { id: null, sourceFetchId: current.sourceFetchId, parserName: current.parserName, parserVersion: current.parserVersion,
+        jobKey: this.sourceFetches.find((fetch) => fetch.id === current.sourceFetchId)?.jobKey ?? null };
+      const accepted = this.pages.get(issue.recordKey)?.provenance;
+      acceptedRevision = accepted ? { id: null, sourceFetchId: accepted.sourceFetchId, parserName: accepted.parserName, parserVersion: accepted.parserVersion } : null;
+    }
+    return deepFreeze({ ...memoryIssue(issue), quarantinedRevision, acceptedRevision,
+      dispositions: this.reconciliationDispositions.filter((entry) => entry.issueId === issueId)
+        .map(({ kind, operatorId, reason, at, revisionId }) => ({ kind, operatorId, reason, at, revisionId })) });
+  }
+
+  getSourceFetch(sourceFetchId) {
+    const fetch = this.sourceFetches.find((entry) => entry.id === sourceFetchId);
+    return fetch ? deepFreeze({ id: fetch.id, jobKey: fetch.jobKey, status: fetch.status, checksum: fetch.checksum,
+      objectPath: fetch.objectPath, fetchedAt: fetch.fetchedAt, cacheHit: fetch.cacheHit }) : null;
+  }
+
+  acceptRevision({ issueId, page, provenance, operatorId, reason, at = this.clock() }) {
+    const disposition = createReviewDisposition('accept', operatorId, reason, at);
+    if (!this.authorizeOperator(disposition.operatorId, disposition)) throw new Error(`operator ${disposition.operatorId} is not authorized to review quarantined records`);
+    const issue = this.#openIssue(issueId, 'conflicting_page_reprocess');
+    if (page.identity !== issue.recordKey) throw new Error('the page is not the record this issue holds');
+    if (!jsonEqual(page.data, issue.details.current.data)) throw new Error('the page does not match the revision this issue holds');
+    if (!jsonEqual(this.pages.get(issue.recordKey)?.data, issue.details.previous.data)) {
+      throw new Error('the accepted record changed since this issue opened; dismiss it and review the current record');
+    }
+    const job = this.jobs.get(page.jobKey);
+    if (!job || !REPROCESS_STATES.includes(job.state) || job.claim) throw new Error(`accepting a revision requires its job to be parsed. Current state: ${job?.state ?? 'missing'}`);
+    const staged = this.#stagePage(page, provenance, { accept: true });
+    staged.reconciliationIssues = staged.reconciliationIssues.map((entry) => (entry === issue ? Object.freeze({ ...entry, status: 'accepted' }) : entry));
+    this.#installPage(staged);
+    const record = Object.freeze({ issueId, key: staged.key, revisionId: null, ...disposition });
+    this.reconciliationDispositions.push(record);
+    return record;
+  }
+
+  dismissIssue({ issueId, operatorId, reason, at = this.clock() }) {
+    const disposition = createReviewDisposition('dismiss', operatorId, reason, at);
+    if (!this.authorizeOperator(disposition.operatorId, disposition)) throw new Error(`operator ${disposition.operatorId} is not authorized to review quarantined records`);
+    const issue = this.#openIssue(issueId);
+    this.reconciliationIssues = this.reconciliationIssues.map((entry) => (entry === issue ? Object.freeze({ ...entry, status: 'resolved' }) : entry));
+    const record = Object.freeze({ issueId, revisionId: null, ...disposition });
+    this.reconciliationDispositions.push(record);
+    return record;
+  }
+
+  #openIssue(issueId, issueType) {
+    const issue = this.reconciliationIssues.find((entry) => entry.id === issueId);
+    if (!issue) throw new Error(`issue ${issueId} does not exist`);
+    if (issue.status !== 'open') throw new Error(`issue ${issueId} is already ${issue.status}`);
+    if (issueType && issue.issueType !== issueType) throw new Error(`only a ${issueType} issue can be accepted; dismiss a ${issue.issueType} issue instead`);
+    return issue;
   }
 
   recordOperatorDisposition(key, disposition) {

@@ -17,6 +17,9 @@ export const BOUNDARY_PORT_METHODS = Object.freeze({
   persistenceReads: Object.freeze(['listSchools', 'listSeasons', 'listGames', 'getGame', 'health']),
   // What offline reprocessing (application/reprocess.mjs) needs; see PARSER_NORMALIZATION.md.
   persistenceReprocess: Object.freeze(['listJobsForReprocess', 'getJob', 'lastSuccessfulFetch', 'commitReprocess']),
+  // What operator review (application/review.mjs) needs; see JOB_LIFECYCLE.md.
+  persistenceReview: Object.freeze(['reviewJobs', 'reviewJob', 'reviewIssues', 'getIssue', 'getJob', 'getSourceFetch',
+    'recordOperatorDisposition', 'acceptRevision', 'dismissIssue']),
 });
 
 export function deepFreeze(value) {

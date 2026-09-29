@@ -10,7 +10,40 @@ A worker that dies mid-request never releases its request, and one-request-per-h
 
 Child work is claimable only after its recorded parent reaches `parsed`. Replaying a page after a crash is idempotent because job, page, observation, and coverage identities are stable.
 
-Challenge responses enter `operator_stop` and are never retryable by time alone. A configured operator-authorizer must approve a durable `hold`, `release_retry`, or `release_permanent` disposition. Holds preserve the stop; releases record the reviewer and reason before changing state.
+Challenge responses enter `operator_stop` and are never retryable by time alone. A configured operator-authorizer must approve a durable `hold`, `release_retry`, or `release_permanent` disposition. Holds preserve the stop; releases record the reviewer and reason before changing state. Both persistence adapters deny every operator by default; see [Operator review](#operator-review).
+
+## Operator review
+
+`npm run review` (or `npm run review:personal`) is how an operator finds, inspects and acts on what the crawl stopped for, without touching the database (#48). It reads `PERSISTENCE=postgres` and builds no transport.
+
+```sh
+npm run review -- list                      # jobs to review and open issues (--jobs, --issues, --state, --limit, --json)
+npm run review -- show <job key | issue id> # everything recorded about one item, with next steps
+npm run review -- hold|release-retry|release-permanent <job key> --operator <id> --reason "<why>"
+npm run review -- accept|dismiss <issue id> --operator <id> --reason "<why>"
+```
+
+- **Jobs** in `parse_failed` or `operator_stop` are listed with their page type, URL and reason. `show` adds the latest parse run (parser version, warnings, failure details), the stored raw snapshot (checksum, object path, fetch time), the state history, and earlier dispositions.
+  - An `operator_stop` job is held or released here.
+  - A `parse_failed` job is fixed with a new parser version and `npm run reprocess -- --job <key>`, which re-parses the stored snapshot without a request (`PARSER_NORMALIZATION.md`).
+- **Open reconciliation issues** are listed with the fields that differ.
+  - A `conflicting_page_reprocess` issue holds a quarantined revision whose raw body differs from the accepted record's. `accept` makes that revision the accepted record; `dismiss` keeps the accepted one.
+  - Any other issue (for example `conflicting_game_log_fact`) can only be dismissed.
+
+**Authorization.** A disposition needs `--operator <id>` and `--reason`, and the id must be in `OPERATOR_IDS`, a comma-separated allowlist of reviewers. Without `OPERATOR_IDS` nobody may act. The persistence adapters enforce the same allowlist, and default to denying everyone when none is given. The allowlist names reviewers; it does not authenticate them. Anyone who can run the command already holds the database credentials, so the credentials are the real gate, and the allowlist makes every recorded "who" a named reviewer.
+
+**Records.** Every disposition is recorded with who, when and why:
+- `operator_dispositions` (hold and the two releases);
+- `reconciliation_dispositions` (accept, with the revision that became accepted, and dismiss).
+
+An issue moves from `open` to `accepted` or `resolved`.
+
+**Accepting a revision** derives the page again from that revision's own stored snapshot, with the parser version that produced it, and requires it to normalize to exactly the data under review. It then commits the page as the accepted record, closes the issue and records the disposition, all in one transaction. Because the page is derived again, its observations and child links are committed as well; a current-season game log that gained box-score links queues them. The new rows replace the old record's rows, as a superseding revision's do. Accept is refused in three cases:
+- the accepted record changed since the issue opened (dismiss the stale issue and review the current one);
+- the snapshot no longer normalizes to the reviewed data (the parser or the data contract changed since);
+- the job is not settled.
+
+`accept` also needs the worker configuration (authorization, data contract, `RAW_STORE_ROOT`, `USER_AGENT`), as reprocessing does.
 
 ## Retry budgets
 
