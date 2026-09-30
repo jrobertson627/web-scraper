@@ -330,6 +330,42 @@ test('a permanently_failed page is requeued with a fresh budget, recorded, and s
   await reset(pool);
 });
 
+// #154: a season rollover refresh puts parsed pages back in the queue.
+test('a refresh requeues parsed index and history pages together, recorded, and only those', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 30_000, authorizeOperator: (id) => id === 'ops' });
+  const parsed = async (source) => {
+    await persistence.addJob(source);
+    const claimed = await persistence.claimNextJob(new Date(), 'worker');
+    await persistence.transitionJob(claimed.key, 'fetched', claimed.lease, {});
+    await persistence.transitionJob(claimed.key, 'parsed', claimed.lease, {});
+    return claimed.key;
+  };
+  const history = job('/school/refresh/men/', 'school_history');
+  const box = job('/box/refresh.html');
+  const historyKey = await parsed(history);
+  const boxKey = await parsed(box);
+  const at = new Date(Date.now() - 60_000);
+  await assert.rejects(persistence.requestRefresh({ keys: [historyKey, boxKey], operatorId: 'ops', reason: 'new season', at }), /refresh needs a parsed school_index or school_history job/);
+  await assert.rejects(persistence.requestRefresh({ keys: [historyKey], operatorId: 'intruder', reason: 'new season', at }), /not authorized/);
+  assert.deepEqual((await pool.query('SELECT state, refresh_requested_at FROM crawl_jobs ORDER BY id')).rows.map((row) => [row.state, row.refresh_requested_at]),
+    [['parsed', null], ['parsed', null]], 'a refused request changes nothing');
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM operator_dispositions')).rows[0].n, 0);
+
+  assert.deepEqual(await persistence.requestRefresh({ keys: [historyKey], operatorId: 'ops', reason: 'new season', at }), { requested: 1 });
+  const [row] = (await pool.query(`SELECT state, failure_attempts, refresh_requested_at IS NOT NULL AS requested FROM crawl_jobs WHERE page_type = 'school_history'`)).rows;
+  assert.deepEqual(row, { state: 'retry_wait', failure_attempts: 0, requested: true });
+  assert.deepEqual((await pool.query('SELECT disposition, operator_id, reason FROM operator_dispositions')).rows,
+    [{ disposition: 'refresh', operator_id: 'ops', reason: 'new season' }]);
+  assert.equal((await persistence.getJob(historyKey)).refreshRequestedAt !== undefined, true);
+  await assert.rejects(persistence.requestRefresh({ keys: [historyKey], operatorId: 'ops', reason: 'again', at }), /retry_wait/);
+  const claimed = await persistence.claimNextJob(new Date(), 'worker');
+  assert.equal(claimed.key, historyKey, 'the refreshed page is claimable at once');
+  await reset(pool);
+});
+
 // #124: the final URL of a fetch that followed redirects.
 test('a fetch records the URL it ended at, and it reads back from every fetch read', async (t) => {
   const pool = new Pool({ max: 2 });

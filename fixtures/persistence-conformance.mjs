@@ -4,7 +4,7 @@ import { BOUNDARY_PORT_METHODS, assertBoundaryPort } from '../src/contracts/boun
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
 import { buildManifestReport } from '../src/application/manifest.mjs';
 import { CRAWL_STAGES } from '../src/contracts/crawl-scope.mjs';
-import { foundationCorpus } from './foundation-corpus.mjs';
+import { foundationCorpus, rolledFoundationCorpus } from './foundation-corpus.mjs';
 
 // One behavior suite for both persistence adapters (#46). Each scenario crawls
 // the same fixture corpus into the adapter under test and must give the same
@@ -31,6 +31,28 @@ async function reference(faults) {
 // Values that differ by adapter or run, not by behavior: generated ids and times.
 function comparable(value) {
   return JSON.parse(JSON.stringify(value, (key, entry) => (['observedAt', 'id', 'sourceFetchIds', 'objectPath'].includes(key) ? undefined : entry)));
+}
+
+// A store crawled in October 2026, refreshed by an operator, and crawled again in
+// November under the season that started then (#154). The fake clock is the
+// fetcher's; the refresh is due a minute ago by the store's own clock.
+async function rollover(stores) {
+  let now = Date.parse('2026-10-15T00:00:00Z');
+  const shared = { ...stores, clock: () => new Date(now), sleep: async (milliseconds) => { now += milliseconds; } };
+  const build = (entries) => createFixtureApplication({ fixtureEntries: entries, sharedState: shared, pinSeason: null });
+  await build(foundationCorpus()).runWorkerOnce();
+  const keys = [];
+  for (let cursor; ;) {
+    const page = await stores.persistence.listJobsForReprocess({ pageTypes: ['school_index', 'school_history'], states: ['parsed'], limit: 100, cursor });
+    keys.push(...page.items.map((job) => job.key));
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  const requested = await stores.persistence.requestRefresh({ keys, operatorId: 'ops', reason: 'the 2026-27 season started', at: new Date(Date.now() - 60_000) });
+  now = Date.parse('2026-11-02T00:00:00Z');
+  const app = build(rolledFoundationCorpus());
+  await app.runWorkerOnce();
+  return { app, keys, requested };
 }
 
 export function definePersistenceConformance(test, { label, createStores }) {
@@ -126,6 +148,48 @@ export function definePersistenceConformance(test, { label, createStores }) {
     assert.equal((await stores.persistence.unreviewedChallenges()).length, 1, 'the hold before the release does not review the new stop');
     await review(key, 'release_permanent');
     assert.deepEqual(await stores.persistence.unreviewedChallenges(), []);
+  });
+
+  test(`${label}: a season rollover refresh replaces the changed pages, discovers the new season and reconciles as the reference does`, async () => {
+    const stores = await createStores();
+    stores.persistence.authorizeOperator = (operatorId) => operatorId === 'ops';
+    const { app, keys, requested } = await rollover(stores);
+    assert.equal(keys.length, 3);
+    assert.deepEqual(requested, { requested: 3 });
+    const memory = { persistence: new InMemoryPersistence(), rawStore: new MemoryRawStore() };
+    memory.persistence.authorizeOperator = (operatorId) => operatorId === 'ops';
+    const expected = { ...memory, ...(await rollover(memory)) };
+    const { persistence } = stores;
+    assert.deepEqual((await persistence.openIssues()).map(comparable), [], 'the changed pages replaced the accepted records');
+    assert.deepEqual(await persistence.jobCounts(), expected.persistence.jobCounts());
+    assert.ok((await persistence.listJobs()).every((job) => job.state === 'parsed' && job.refreshRequestedAt === undefined), 'every page is parsed and every refresh request met');
+    assert.deepEqual(await persistence.crawlScope(), expected.persistence.crawlScope());
+    assert.deepEqual([...(await persistence.crawlScope()).endingYears], [2022, 2023, 2024, 2025, 2026, 2027], 'the years already crawled stay in the scope');
+    const byKey = (list) => [...list].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    assert.deepEqual(byKey(await persistence.coverageGaps()), byKey(expected.persistence.coverageGaps()));
+    assert.equal((await persistence.coverageGaps()).some((gap) => gap.endingYear === 2027 && gap.schoolSourcePath.endsWith('/school/a')), false, 'A links 2027, so it is not unavailable');
+    const report = await app.reconcile();
+    assert.deepEqual(report, await expected.app.reconcile());
+    assert.equal(report.passed, true);
+  });
+
+  test(`${label}: a refresh takes only parsed index and history pages, all or none`, async () => {
+    const stores = await createStores();
+    stores.persistence.authorizeOperator = (operatorId) => operatorId === 'ops';
+    await crawl(stores, false);
+    const all = await stores.persistence.listJobs();
+    const season = all.find((job) => job.pageType === 'season');
+    const history = all.find((job) => job.pageType === 'school_history');
+    const request = (keys, operatorId = 'ops') => stores.persistence.requestRefresh({ keys, operatorId, reason: 'r', at: new Date(Date.now() - 60_000) });
+    await assert.rejects(async () => request([history.key, season.key]), /refresh needs a parsed school_index or school_history job/);
+    await assert.rejects(async () => request([history.key], 'intruder'), /not authorized/);
+    assert.equal((await stores.persistence.getJob(history.key)).state, 'parsed', 'a refused request changed nothing');
+    assert.deepEqual(await request([history.key, history.key]), { requested: 1 });
+    const waiting = await stores.persistence.getJob(history.key);
+    assert.equal(waiting.state, 'retry_wait');
+    assert.ok(waiting.refreshRequestedAt);
+    await assert.rejects(async () => request([history.key]), /retry_wait/);
+    await assert.rejects(async () => stores.persistence.recordOperatorDisposition(history.key, { kind: 'refresh', operatorId: 'ops', reason: 'r' }), /recorded with requestRefresh/);
   });
 
   test(`${label}: counts the jobs a worker holds a live claim on`, async () => {

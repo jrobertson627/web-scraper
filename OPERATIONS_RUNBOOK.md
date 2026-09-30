@@ -12,6 +12,7 @@ Every command below runs in the crawl host's shell (the Render service shell), w
 | `npm run start:operator:personal` | serves the PIN-protected phone page that starts, checks and stops a crawl ([Operator trigger](DEPLOYMENT.md#operator-trigger-55)) | only while a run is active |
 | `npm run status` | progress by page type, request pace, projected time left, and the crawl scope | no |
 | `npm run review:personal -- list` | pages stopped for review and open reconciliation issues; `show`, `hold`, `release-retry`, `release-permanent`, `accept`, `dismiss` | no |
+| `npm run review:personal -- refresh-season --operator <id> --reason "<why>" [--dry-run] [--force]` | puts the school index and histories back in the queue after the season rolled over ([When a new season starts](#when-a-new-season-starts)); the next worker run makes the requests | no (the worker then does) |
 | `npm run reprocess:personal -- ...` | re-parses stored raw pages with the configured parser versions | no |
 | `npm run manifest` | the manifest dry-run report: eligible schools, linked and unavailable seasons, unique URLs, projected requests, hours and storage | no |
 | `npm run reconcile` | the reconciliation report (exit 5 when it names failures) | no |
@@ -181,6 +182,18 @@ A parser version is a code change reviewed like any other. A new version never o
    The summary counts pages accepted, superseded (changed by v2), conflicts, parse failures, and parse failures fixed. Up to 20 example job keys are listed for each problem. Parse failures here leave the v1 record in place.
 4. Run `npm run reconcile` and compare it with the last report.
 5. **Rollback:** set `PARSER_VERSIONS` back to `{"box_score":"1"}` and run the same `reprocess` command. The v1 records supersede the v2 ones.
+
+## When a new season starts
+
+The season rolls over on 1 November (UTC). A store that already holds the school index stays on the season it was fetched under, so the new season is not discovered until you ask for it. The refresh makes no request itself. It puts the parsed school index and every parsed school history back in the queue, and the worker then fetches them again under the new season. That is about 360 histories and the index, at the normal pace.
+
+1. Wait until the site lists the new season. The index shows schools with `To` one higher, and a school's history links the new year. If it does not yet, a refresh reads the old pages and finds nothing new; run it again later with `--force`.
+2. Look first: `npm run review:personal -- refresh-season --operator <you> --reason "2026-27 started" --dry-run`. It prints the season stored and the season now, how many pages would be fetched again, and the years the scope would gain.
+3. Run it without `--dry-run`. It refuses to act when the store is already on the current season (use `--force` to read the pages anyway) or when the season now is earlier than the stored one. A second run while one is waiting changes nothing.
+4. Start the worker. It reads the index first, then each history, replaces what changed without opening conflict issues, and queues the new season's pages; the rest of the crawl continues as usual. The earlier fetches and raw bodies stay on record.
+5. Watch `npm run status`, then `npm run reconcile` when the crawl is done.
+
+If the index then ends `parse_failed` with too few eligible schools, the site still lists the old season: set `CURRENT_SEASON_ENDING_YEAR` to it (see [The school index yields too few schools](#the-school-index-yields-too-few-schools)) and reprocess the index, which also meets the refresh request. Pages that were `parse_failed` or `permanently_failed` are not refreshed; fix them first with the usual review commands. Only the index and histories are refreshed: finished seasons' pages do not change, and reading a season in progress again is not something this does.
 
 ## Reconcile
 

@@ -9,6 +9,7 @@ import {
   createJobStateEvent,
   createLeaseToken,
   createOperatorDisposition,
+  REFRESH_PAGE_TYPES,
   sameLease,
 } from '../contracts/jobs.mjs';
 import {
@@ -778,11 +779,13 @@ export class InMemoryPersistence {
     }
     if (!page) return Object.freeze({ parseRunId: this.#appendParseRun(parseRun), committed: false });
     if (page.jobKey !== jobKey || provenance?.sourceFetchId !== parseRun.sourceFetchId) throw new Error('reprocessed page does not match its parse run');
-    const staged = this.#stagePage(page, provenance);
+    // A page whose refresh an operator asked for replaces the accepted record (#154).
+    const staged = this.#stagePage(page, provenance, { accept: Boolean(job.refreshRequestedAt) });
     const transitioned = job.state === 'parse_failed' && !staged.conflict;
     if (transitioned) {
       const next = cloneJob(staged.jobs.get(jobKey));
       this.#applyTransition(next, 'parsed', { reprocessed: true, parserVersion: parseRun.parserVersion });
+      delete next.refreshRequestedAt;
       staged.jobs.set(jobKey, next);
     }
     const parseRunId = this.#appendParseRun(parseRun);
@@ -801,9 +804,12 @@ export class InMemoryPersistence {
   commitPageAndTransition(page, provenance, lease) {
     this.#requireLease(page.jobKey, lease);
     if (this.inFlight.has(page.jobKey)) throw new Error(`cannot commit page ${page.jobKey} while its host request is still active`);
-    const staged = this.#stagePage(page, provenance);
+    // A page whose refresh an operator asked for replaces the accepted record
+    // instead of being held as a conflict, and the request is met once it is (#154).
+    const staged = this.#stagePage(page, provenance, { accept: Boolean(this.jobs.get(page.jobKey)?.refreshRequestedAt) });
     const job = cloneJob(staged.jobs.get(page.jobKey));
     this.#applyTransition(job, 'parsed', {});
+    delete job.refreshRequestedAt;
     staged.jobs.set(page.jobKey, job);
     this.#installPage(staged);
     return Object.freeze({ key: staged.key, conflict: staged.conflict, superseded: staged.superseded });
@@ -858,6 +864,13 @@ export class InMemoryPersistence {
       if (!conflict) observations.set(observationKey, storedObservation);
     }
     if (!conflict) {
+      // A year the history now links is no longer unavailable (#154).
+      if (page.kind === 'school_history') {
+        const schoolSourcePath = this.jobs.get(page.jobKey)?.schoolSourcePath;
+        for (const season of page.data.seasons ?? []) {
+          if (season.url && Number.isInteger(season.endingYear)) unavailableCoverage.delete(`${schoolSourcePath}:${season.endingYear}`);
+        }
+      }
       for (const unavailable of page.unavailableCoverage ?? []) {
         const coverageKey = `${unavailable.schoolSourcePath}:${unavailable.endingYear}`;
         unavailableCoverage.set(coverageKey, Object.freeze({ ...unavailable, provenance }));
@@ -1051,7 +1064,38 @@ export class InMemoryPersistence {
     return issue;
   }
 
+  // Puts parsed school index and history pages back in the queue for their
+  // season rollover refresh (#154), all or none: each gets one recorded refresh
+  // disposition, a fresh budget of every kind, and a refresh request that lets
+  // its next parse replace the accepted record. Same contract as
+  // PostgresPersistence#requestRefresh.
+  requestRefresh({ keys, operatorId, reason, at = this.clock() }) {
+    const validated = createOperatorDisposition('refresh', operatorId, reason, new Date(at));
+    if (!this.authorizeOperator(validated.operatorId, validated)) {
+      throw new Error(`operator ${validated.operatorId} is not authorized to review operator-stop work`);
+    }
+    const unique = [...new Set(keys)];
+    for (const key of unique) {
+      const job = this.jobs.get(key);
+      if (!job || job.state !== 'parsed' || !REFRESH_PAGE_TYPES.includes(job.pageType)) {
+        throw new Error(`refresh needs a parsed ${REFRESH_PAGE_TYPES.join(' or ')} job. ${key} is ${job ? `${job.pageType} in state ${job.state}` : 'missing'}`);
+      }
+    }
+    for (const key of unique) {
+      const job = this.jobs.get(key);
+      this.operatorDispositions.push(Object.freeze({ jobKey: key, ...validated }));
+      job.history.push(Object.freeze({ type: 'operator_disposition', state: job.state, at: validated.at, operatorId: validated.operatorId, disposition: validated.kind, reason: validated.reason }));
+      job.failureAttempts = 0;
+      job.rateLimitAttempts = 0;
+      job.claimRecoveries = 0;
+      job.refreshRequestedAt = validated.at;
+      this.#applyTransition(job, 'retry_wait', { nextAllowedAt: validated.at, lastError: `refresh requested: ${validated.reason}` });
+    }
+    return Object.freeze({ requested: unique.length });
+  }
+
   recordOperatorDisposition(key, disposition) {
+    if (disposition.kind === 'refresh') throw new Error('a refresh is recorded with requestRefresh, for a set of parsed pages');
     const job = this.jobs.get(key);
     const needed = disposition.kind === 'requeue_failed' ? 'permanently_failed' : 'operator_stop';
     if (!job || job.state !== needed) throw new Error(`operator disposition ${disposition.kind} requires ${needed}. Current state: ${job?.state ?? 'missing'}`);

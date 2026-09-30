@@ -133,7 +133,7 @@ test('the full scope follows the window, and a rolled window only widens the sto
   assert.equal(scopeCovers(rolled, FULL_CRAWL_SCOPE), true, 'a full scope covers any other');
   const next = nextCrawlScope(FULL_CRAWL_SCOPE, rolled);
   assert.deepEqual([next.changed, next.widened], [true, true]);
-  assert.deepEqual([...next.scope.endingYears], [2023, 2024, 2025, 2026, 2027]);
+  assert.deepEqual([...next.scope.endingYears], [2022, 2023, 2024, 2025, 2026, 2027], 'the years already crawled stay in the recorded scope (#154)');
   // A recorded scope is read back as recorded, not as the legacy one.
   assert.deepEqual([...createCrawlScope({ kind: 'full', endingYears: [2023, 2024, 2025, 2026, 2027] }).endingYears], [2023, 2024, 2025, 2026, 2027]);
   // A sample must lie within the window of its season.

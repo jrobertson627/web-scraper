@@ -1,5 +1,6 @@
 import { validateConfiguration } from '../config/configuration.mjs';
 import { createSourceUrl, sourceKey } from '../contracts/source.mjs';
+import { refreshSeason } from './season-refresh.mjs';
 import { ELIGIBILITY_RULE, resolveSeasonEndingYear, targetEndingYearsFor } from '../contracts/season.mjs';
 import { createCrawlScope } from '../contracts/crawl-scope.mjs';
 import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
@@ -36,6 +37,8 @@ import {
 export function createFixtureApplication({
   sourceAdapter = new FixtureSourceAdapter(), fixtureEntries, sharedState, events = NO_CRAWL_EVENTS,
   retainedFields = MAPPED_RETAINED_FIELDS, crawlScope,
+  // The season the fixture crawl is pinned to; null derives it from the clock, as a worker does.
+  pinSeason = 2026,
 } = {}) {
   if (sharedState?.transport instanceof HttpTransport) {
     throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
@@ -68,7 +71,7 @@ export function createFixtureApplication({
   const config = validateConfiguration({
     mode: 'local', providerId, allowedHosts: [host], rawStore: 'memory',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-fixture (+local@example.com)' },
-    eligibilityPredicate: ELIGIBILITY_RULE, currentSeasonEndingYear: 2026,
+    eligibilityPredicate: ELIGIBILITY_RULE, ...(pinSeason === null ? {} : { currentSeasonEndingYear: pinSeason }),
     publication: 'private', crawlScope,
   }, { clock });
   const rawStore = sharedState?.rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
@@ -199,12 +202,16 @@ function prepareCrawl({ persistence, config, rootJob, rediscover, events, discov
     events.emit('crawl.scope', { kind: recorded.scope.kind, schools: recorded.scope.schools?.length ?? null,
       endingYears: recorded.scope.endingYears, widened: recorded.widened });
     const queue = () => Promise.resolve(persistence.addJob(rootJob)).then(() => recorded);
-    return recorded.widened ? rediscover().then(queue) : queue();
+    // While the index is waiting to be fetched again (#154) the stored one is the
+    // old season's: reading it under the new season would find no eligible school.
+    // The refresh fetches it and every history again, which discovers their children.
+    return recorded.widened && !recorded.refreshPending ? rediscover().then(queue) : queue();
   };
   const record = (season) => {
     const scope = adoptSeason({ discovery, config, events, season });
     const recorded = persistence.recordCrawlScope(scope);
-    return typeof recorded?.then === 'function' ? recorded.then(finish) : finish(recorded);
+    const done = (value) => finish({ ...value, refreshPending: season.source === 'refresh_pending' });
+    return typeof recorded?.then === 'function' ? recorded.then(done) : done(recorded);
   };
   try {
     const season = resolveCrawlSeason({ persistence, rootJob, config, clock });
@@ -215,14 +222,18 @@ function prepareCrawl({ persistence, config, rootJob, rediscover, events, discov
 }
 
 // The season a crawl runs under (contracts/season.mjs): the configured year when
-// pinned, else the season at the school index's fetch time, else now. Sync with a
+// pinned, else the season at the school index's fetch time, else now. While an
+// operator's refresh of the index is waiting to be fetched (#154) it is the season
+// now, since the fetch that will replace the stored one happens now. Sync with a
 // pinned year or the in-memory store; a promise otherwise.
 function resolveCrawlSeason({ persistence, rootJob, config, clock }) {
   const explicit = config.seasonYearPinned ? config.currentSeasonEndingYear : undefined;
-  const resolve = (fetched) => resolveSeasonEndingYear({ explicit, indexFetchedAt: fetched?.fetchedAt, now: clock() });
-  if (explicit !== undefined) return resolve(null);
+  const resolve = (fetched, root) => resolveSeasonEndingYear({ explicit, indexFetchedAt: fetched?.fetchedAt, now: clock(), refreshPending: Boolean(root?.refreshRequestedAt) });
+  if (explicit !== undefined) return resolve(null, null);
   const fetched = persistence.lastSuccessfulFetch(rootJob.key);
-  return typeof fetched?.then === 'function' ? fetched.then(resolve) : resolve(fetched);
+  const root = persistence.getJob(rootJob.key);
+  return typeof fetched?.then === 'function' || typeof root?.then === 'function'
+    ? Promise.all([fetched, root]).then(([f, r]) => resolve(f, r)) : resolve(fetched, root);
 }
 
 // Gives discovery the resolved season and returns the scope over its target years.
@@ -406,7 +417,7 @@ export function createReprocessApplication({
 // Operator review (#48): listing, inspecting and recording dispositions. accept
 // derives the reviewed page again, so it needs the parsers, raw store,
 // discovery and normalizer; without them only the other operations work.
-function reviewOperations({ persistence, rawStore, parsers, discovery, normalizer, clock, season }) {
+function reviewOperations({ persistence, rawStore, parsers, discovery, normalizer, clock, season, seasonRefresh }) {
   return Object.freeze({
     list: (options = {}) => listForReview({ persistence, ...options }),
     show: (id) => showReviewItem({ persistence, id }),
@@ -414,6 +425,11 @@ function reviewOperations({ persistence, rawStore, parsers, discovery, normalize
     disposeMatching: (action, { states, code, dryRun }, { operatorId, reason }) => disposeMatching({ persistence, action, states, code, dryRun, operatorId, reason, clock }),
     dismiss: (issueId, { operatorId, reason }) => dismissIssue({ persistence, issueId, operatorId, reason, clock }),
     releaseHalt: (haltId, { operatorId, reason }) => releaseHalt({ persistence, haltId, operatorId, reason }),
+    // The season rollover refresh (#154); needs the worker configuration for the index's key and any pinned season.
+    refreshSeason: (options) => {
+      if (!seasonRefresh) throw new Error('refresh-season needs the worker configuration: AUTHORIZATION_JSON, DATA_CONTRACT_JSON, RAW_STORE_ROOT and USER_AGENT, as for the worker');
+      return seasonRefresh(options);
+    },
     accept: async (issueId, { operatorId, reason }) => {
       if (!parsers) throw new Error('accept needs the worker configuration: AUTHORIZATION_JSON, DATA_CONTRACT_JSON, RAW_STORE_ROOT and USER_AGENT, as for the worker');
       await assertRawStoreMatchesDatabase({ persistence, rawStore });
@@ -449,5 +465,7 @@ export function createReviewApplication({
   const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
   const rootJob = { key: rootJobKey(adapter) };
   const season = async () => adoptSeason({ discovery, config, events: NO_CRAWL_EVENTS, season: await resolveCrawlSeason({ persistence, rootJob, config, clock }) });
-  return reviewOperations({ persistence, rawStore: store, parsers, discovery, normalizer, clock, season });
+  const seasonRefresh = (options) => refreshSeason({ persistence, rootKey: rootJob.key, clock,
+    pinnedYear: config.seasonYearPinned ? config.currentSeasonEndingYear : undefined, ...options });
+  return reviewOperations({ persistence, rawStore: store, parsers, discovery, normalizer, clock, season, seasonRefresh });
 }

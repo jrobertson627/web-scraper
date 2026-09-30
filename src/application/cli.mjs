@@ -174,7 +174,8 @@ function stagePageTypes(config) {
 
 const REVIEW_USAGE = 'Example: npm run review -- list, npm run review -- show <job key | issue id>, '
   + 'npm run review -- release-retry <job key> --operator <id> --reason "<why>"';
-const REVIEW_ACTIONS = new Set([...Object.keys(JOB_DISPOSITIONS), 'accept', 'dismiss', 'release-halt']);
+const REVIEW_ACTIONS = new Set([...Object.keys(JOB_DISPOSITIONS), 'accept', 'dismiss', 'release-halt', 'refresh-season']);
+const REFRESH_USAGE = 'Example: npm run review -- refresh-season --operator <id> --reason "<why>" [--dry-run] [--force]';
 
 // review <list|show|hold|release-retry|release-permanent|accept|dismiss> ...
 // A job action with no target and --state and --code instead is a bulk one
@@ -195,6 +196,7 @@ export function parseReviewArgs(args) {
     return review;
   }
   if (command !== 'show' && !REVIEW_ACTIONS.has(command)) throw new Error(`review command ${command ?? '(none)'} is invalid. ${REVIEW_USAGE}`);
+  if (command === 'refresh-season') return parseRefreshArgs(review, rest);
   if (Object.hasOwn(JOB_DISPOSITIONS, command) && rest[0]?.startsWith('--')) return parseBulkReviewArgs(review, rest);
   review.target = rest[0];
   if (!review.target || review.target.startsWith('--')) throw new Error(`review ${command} needs a job key or issue id. ${REVIEW_USAGE}`);
@@ -205,6 +207,26 @@ export function parseReviewArgs(args) {
   }
   if (command !== 'show' && (!review.operatorId || !review.reason?.trim())) {
     throw new Error(`review ${command} needs --operator <id> and --reason "<why>"; every disposition is recorded. ${REVIEW_USAGE}`);
+  }
+  return review;
+}
+
+// refresh-season (#154) takes no target: it acts on the school index and histories.
+function parseRefreshArgs(review, rest) {
+  review.dryRun = false;
+  review.force = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    if (flag === '--dry-run') { review.dryRun = true; continue; }
+    if (flag === '--force') { review.force = true; continue; }
+    const field = { '--operator': 'operatorId', '--reason': 'reason' }[flag];
+    const value = rest[index + 1];
+    if (!field || value === undefined || value.startsWith('--')) throw new Error(`review refresh-season argument ${flag} is invalid. ${REFRESH_USAGE}`);
+    review[field] = value;
+    index += 1;
+  }
+  if (!review.operatorId || !review.reason?.trim()) {
+    throw new Error(`review refresh-season needs --operator <id> and --reason "<why>"; the refresh is recorded. ${REFRESH_USAGE}`);
   }
   return review;
 }
@@ -577,8 +599,8 @@ export async function runCli({
       if (REVIEW_ACTIONS.has(review.command) && !operatorAllowlist(env.OPERATOR_IDS).includes(review.operatorId)) {
         throw new Error(`OPERATOR_IDS does not list operator ${review.operatorId}. Only a listed reviewer may record a disposition. Example: OPERATOR_IDS=${review.operatorId}`);
       }
-      // Only accept re-derives a page, which needs the worker configuration.
-      if (review.command === 'accept') config = workerConfiguration(env);
+      // Accept re-derives a page and refresh-season needs the index's key and any pinned season: the worker configuration.
+      if (review.command === 'accept' || review.command === 'refresh-season') config = workerConfiguration(env);
     } catch (error) {
       stderr(`review configuration rejected: ${safeMessage(error)}`);
       return { exitCode: EXIT_CODES.configurationRejected };
@@ -603,6 +625,7 @@ export async function runCli({
         else if (review.command === 'accept') result = await app.accept(review.target, by);
         else if (review.command === 'dismiss') result = await app.dismiss(review.target, by);
         else if (review.command === 'release-halt') result = await app.releaseHalt(review.target, by);
+        else if (review.command === 'refresh-season') result = await app.refreshSeason({ ...by, dryRun: review.dryRun, force: review.force });
         else result = await app.dispose(review.target, review.command, by);
         stdout(JSON.stringify(result, null, 2));
       }

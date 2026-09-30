@@ -46,9 +46,15 @@ export function targetEndingYearsFor(seasonEndingYear) {
 // wins: it is the operator saying what the site's index is. Otherwise it is the
 // season at the time the school index was fetched, so a restart after the
 // rollover date still reads that index the way it was read at first; before the
-// index has been fetched, the season now. Returns { seasonEndingYear, source }.
-export function resolveSeasonEndingYear({ explicit, indexFetchedAt, now }) {
+// index has been fetched, the season now.
+//
+// refreshPending says an operator has asked for the index to be fetched again
+// (#154). The stored fetch is then the old season's, and the fetch that will
+// replace it happens now, so the season is the one now, not the stored one.
+// Returns { seasonEndingYear, source }.
+export function resolveSeasonEndingYear({ explicit, indexFetchedAt, now, refreshPending = false }) {
   if (explicit !== undefined && explicit !== null) return { seasonEndingYear: assertSeasonEndingYear(explicit), source: 'configured' };
+  if (refreshPending) return { seasonEndingYear: seasonEndingYearAt(now), source: 'refresh_pending' };
   if (indexFetchedAt) return { seasonEndingYear: seasonEndingYearAt(new Date(indexFetchedAt)), source: 'index_fetch' };
   return { seasonEndingYear: seasonEndingYearAt(now), source: 'clock' };
 }

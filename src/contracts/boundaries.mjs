@@ -19,7 +19,7 @@ export const BOUNDARY_PORT_METHODS = Object.freeze({
   persistenceReprocess: Object.freeze(['listJobsForReprocess', 'getJob', 'lastSuccessfulFetch', 'commitReprocess']),
   // What operator review (application/review.mjs) needs; see JOB_LIFECYCLE.md.
   persistenceReview: Object.freeze(['reviewJobs', 'reviewJob', 'reviewIssues', 'getIssue', 'getJob', 'getSourceFetch',
-    'recordOperatorDisposition', 'acceptRevision', 'dismissIssue']),
+    'recordOperatorDisposition', 'requestRefresh', 'acceptRevision', 'dismissIssue']),
   // What the reconciliation report (application/reconciliation.mjs) reads, so
   // it runs against either adapter (#46).
   persistenceReconciliation: Object.freeze(['reconciliationJobs', 'acceptedPages', 'acceptedObservations', 'coverageGaps',
