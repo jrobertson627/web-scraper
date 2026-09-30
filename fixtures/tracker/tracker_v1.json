@@ -1,0 +1,804 @@
+{
+  "crawl_scope": [
+    {
+      "name": "kind",
+      "type": "text"
+    },
+    {
+      "name": "schools",
+      "type": "jsonb"
+    },
+    {
+      "name": "ending_years",
+      "type": "integer[]"
+    },
+    {
+      "name": "recorded_at",
+      "type": "timestamp with time zone"
+    }
+  ],
+  "game_log_row_stats": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "source_row_index",
+      "type": "integer"
+    },
+    {
+      "name": "side",
+      "type": "text"
+    },
+    {
+      "name": "minutes",
+      "type": "numeric"
+    },
+    {
+      "name": "fg",
+      "type": "integer"
+    },
+    {
+      "name": "fga",
+      "type": "integer"
+    },
+    {
+      "name": "fg3",
+      "type": "integer"
+    },
+    {
+      "name": "fg3a",
+      "type": "integer"
+    },
+    {
+      "name": "ft",
+      "type": "integer"
+    },
+    {
+      "name": "fta",
+      "type": "integer"
+    },
+    {
+      "name": "orb",
+      "type": "integer"
+    },
+    {
+      "name": "drb",
+      "type": "integer"
+    },
+    {
+      "name": "trb",
+      "type": "integer"
+    },
+    {
+      "name": "ast",
+      "type": "integer"
+    },
+    {
+      "name": "stl",
+      "type": "integer"
+    },
+    {
+      "name": "blk",
+      "type": "integer"
+    },
+    {
+      "name": "tov",
+      "type": "integer"
+    },
+    {
+      "name": "pf",
+      "type": "integer"
+    },
+    {
+      "name": "pts",
+      "type": "integer"
+    },
+    {
+      "name": "value_states",
+      "type": "jsonb"
+    }
+  ],
+  "game_log_rows": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "source_row_index",
+      "type": "integer"
+    },
+    {
+      "name": "game_number",
+      "type": "integer"
+    },
+    {
+      "name": "game_date",
+      "type": "date"
+    },
+    {
+      "name": "location",
+      "type": "text"
+    },
+    {
+      "name": "opponent_name",
+      "type": "text"
+    },
+    {
+      "name": "opponent_school_path",
+      "type": "text"
+    },
+    {
+      "name": "game_type",
+      "type": "text"
+    },
+    {
+      "name": "result",
+      "type": "text"
+    },
+    {
+      "name": "game_status",
+      "type": "text"
+    },
+    {
+      "name": "overtimes",
+      "type": "integer"
+    },
+    {
+      "name": "team_score",
+      "type": "integer"
+    },
+    {
+      "name": "opponent_score",
+      "type": "integer"
+    },
+    {
+      "name": "game_path",
+      "type": "text"
+    }
+  ],
+  "game_teams": [
+    {
+      "name": "game_path",
+      "type": "text"
+    },
+    {
+      "name": "side",
+      "type": "text"
+    },
+    {
+      "name": "team_path",
+      "type": "text"
+    },
+    {
+      "name": "team_name",
+      "type": "text"
+    },
+    {
+      "name": "final_score",
+      "type": "integer"
+    },
+    {
+      "name": "line_score",
+      "type": "jsonb"
+    }
+  ],
+  "games": [
+    {
+      "name": "game_path",
+      "type": "text"
+    },
+    {
+      "name": "source_url",
+      "type": "text"
+    },
+    {
+      "name": "game_date",
+      "type": "date"
+    },
+    {
+      "name": "game_status",
+      "type": "text"
+    },
+    {
+      "name": "game_type",
+      "type": "text"
+    },
+    {
+      "name": "neutral_site",
+      "type": "boolean"
+    },
+    {
+      "name": "venue",
+      "type": "text"
+    },
+    {
+      "name": "attendance",
+      "type": "integer"
+    },
+    {
+      "name": "overtimes",
+      "type": "integer"
+    },
+    {
+      "name": "description",
+      "type": "text"
+    },
+    {
+      "name": "line_scores",
+      "type": "jsonb"
+    }
+  ],
+  "player_game_stats": [
+    {
+      "name": "game_path",
+      "type": "text"
+    },
+    {
+      "name": "side",
+      "type": "text"
+    },
+    {
+      "name": "source_row_index",
+      "type": "integer"
+    },
+    {
+      "name": "player_path",
+      "type": "text"
+    },
+    {
+      "name": "player_name",
+      "type": "text"
+    },
+    {
+      "name": "starter",
+      "type": "boolean"
+    },
+    {
+      "name": "minutes",
+      "type": "numeric"
+    },
+    {
+      "name": "fg",
+      "type": "integer"
+    },
+    {
+      "name": "fga",
+      "type": "integer"
+    },
+    {
+      "name": "fg3",
+      "type": "integer"
+    },
+    {
+      "name": "fg3a",
+      "type": "integer"
+    },
+    {
+      "name": "ft",
+      "type": "integer"
+    },
+    {
+      "name": "fta",
+      "type": "integer"
+    },
+    {
+      "name": "orb",
+      "type": "integer"
+    },
+    {
+      "name": "drb",
+      "type": "integer"
+    },
+    {
+      "name": "trb",
+      "type": "integer"
+    },
+    {
+      "name": "ast",
+      "type": "integer"
+    },
+    {
+      "name": "stl",
+      "type": "integer"
+    },
+    {
+      "name": "blk",
+      "type": "integer"
+    },
+    {
+      "name": "tov",
+      "type": "integer"
+    },
+    {
+      "name": "pf",
+      "type": "integer"
+    },
+    {
+      "name": "pts",
+      "type": "integer"
+    },
+    {
+      "name": "advanced",
+      "type": "jsonb"
+    },
+    {
+      "name": "value_states",
+      "type": "jsonb"
+    }
+  ],
+  "schools": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "display_name",
+      "type": "text"
+    },
+    {
+      "name": "city",
+      "type": "text"
+    },
+    {
+      "name": "state",
+      "type": "text"
+    },
+    {
+      "name": "from_year",
+      "type": "integer"
+    },
+    {
+      "name": "to_year",
+      "type": "integer"
+    },
+    {
+      "name": "eligible",
+      "type": "boolean"
+    },
+    {
+      "name": "source_url",
+      "type": "text"
+    },
+    {
+      "name": "aggregate_fields",
+      "type": "jsonb"
+    }
+  ],
+  "season_completeness": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "season_parsed",
+      "type": "boolean"
+    },
+    {
+      "name": "game_log_parsed",
+      "type": "boolean"
+    },
+    {
+      "name": "box_scores_linked",
+      "type": "bigint"
+    },
+    {
+      "name": "box_scores_parsed",
+      "type": "bigint"
+    },
+    {
+      "name": "box_scores_failed",
+      "type": "bigint"
+    },
+    {
+      "name": "box_scores_pending",
+      "type": "bigint"
+    },
+    {
+      "name": "state",
+      "type": "text"
+    }
+  ],
+  "season_player_stats": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "source_row_index",
+      "type": "integer"
+    },
+    {
+      "name": "player_path",
+      "type": "text"
+    },
+    {
+      "name": "player_name",
+      "type": "text"
+    },
+    {
+      "name": "games",
+      "type": "integer"
+    },
+    {
+      "name": "games_started",
+      "type": "integer"
+    },
+    {
+      "name": "minutes",
+      "type": "numeric"
+    },
+    {
+      "name": "fg",
+      "type": "integer"
+    },
+    {
+      "name": "fga",
+      "type": "integer"
+    },
+    {
+      "name": "fg3",
+      "type": "integer"
+    },
+    {
+      "name": "fg3a",
+      "type": "integer"
+    },
+    {
+      "name": "ft",
+      "type": "integer"
+    },
+    {
+      "name": "fta",
+      "type": "integer"
+    },
+    {
+      "name": "orb",
+      "type": "integer"
+    },
+    {
+      "name": "drb",
+      "type": "integer"
+    },
+    {
+      "name": "trb",
+      "type": "integer"
+    },
+    {
+      "name": "ast",
+      "type": "integer"
+    },
+    {
+      "name": "stl",
+      "type": "integer"
+    },
+    {
+      "name": "blk",
+      "type": "integer"
+    },
+    {
+      "name": "tov",
+      "type": "integer"
+    },
+    {
+      "name": "pf",
+      "type": "integer"
+    },
+    {
+      "name": "pts",
+      "type": "integer"
+    },
+    {
+      "name": "advanced",
+      "type": "jsonb"
+    },
+    {
+      "name": "value_states",
+      "type": "jsonb"
+    }
+  ],
+  "season_rosters": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "source_row_index",
+      "type": "integer"
+    },
+    {
+      "name": "player_path",
+      "type": "text"
+    },
+    {
+      "name": "player_name",
+      "type": "text"
+    },
+    {
+      "name": "jersey_number",
+      "type": "text"
+    },
+    {
+      "name": "class",
+      "type": "text"
+    },
+    {
+      "name": "position",
+      "type": "text"
+    },
+    {
+      "name": "height_in",
+      "type": "integer"
+    },
+    {
+      "name": "weight",
+      "type": "integer"
+    },
+    {
+      "name": "value_states",
+      "type": "jsonb"
+    }
+  ],
+  "season_team_stats": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "side",
+      "type": "text"
+    },
+    {
+      "name": "games",
+      "type": "integer"
+    },
+    {
+      "name": "minutes",
+      "type": "numeric"
+    },
+    {
+      "name": "fg",
+      "type": "integer"
+    },
+    {
+      "name": "fga",
+      "type": "integer"
+    },
+    {
+      "name": "fg3",
+      "type": "integer"
+    },
+    {
+      "name": "fg3a",
+      "type": "integer"
+    },
+    {
+      "name": "ft",
+      "type": "integer"
+    },
+    {
+      "name": "fta",
+      "type": "integer"
+    },
+    {
+      "name": "orb",
+      "type": "integer"
+    },
+    {
+      "name": "drb",
+      "type": "integer"
+    },
+    {
+      "name": "trb",
+      "type": "integer"
+    },
+    {
+      "name": "ast",
+      "type": "integer"
+    },
+    {
+      "name": "stl",
+      "type": "integer"
+    },
+    {
+      "name": "blk",
+      "type": "integer"
+    },
+    {
+      "name": "tov",
+      "type": "integer"
+    },
+    {
+      "name": "pf",
+      "type": "integer"
+    },
+    {
+      "name": "pts",
+      "type": "integer"
+    },
+    {
+      "name": "value_states",
+      "type": "jsonb"
+    }
+  ],
+  "seasons": [
+    {
+      "name": "school_path",
+      "type": "text"
+    },
+    {
+      "name": "ending_year",
+      "type": "integer"
+    },
+    {
+      "name": "coverage_status",
+      "type": "text"
+    },
+    {
+      "name": "wins",
+      "type": "integer"
+    },
+    {
+      "name": "losses",
+      "type": "integer"
+    },
+    {
+      "name": "conf_wins",
+      "type": "integer"
+    },
+    {
+      "name": "conf_losses",
+      "type": "integer"
+    },
+    {
+      "name": "srs",
+      "type": "numeric"
+    },
+    {
+      "name": "sos",
+      "type": "numeric"
+    },
+    {
+      "name": "off_rtg",
+      "type": "numeric"
+    },
+    {
+      "name": "def_rtg",
+      "type": "numeric"
+    },
+    {
+      "name": "conference_name",
+      "type": "text"
+    },
+    {
+      "name": "conference_path",
+      "type": "text"
+    },
+    {
+      "name": "coach_name",
+      "type": "text"
+    },
+    {
+      "name": "coach_path",
+      "type": "text"
+    },
+    {
+      "name": "ncaa_seed",
+      "type": "integer"
+    },
+    {
+      "name": "ncaa_region",
+      "type": "text"
+    },
+    {
+      "name": "ncaa_games",
+      "type": "jsonb"
+    }
+  ],
+  "team_game_stats": [
+    {
+      "name": "game_path",
+      "type": "text"
+    },
+    {
+      "name": "side",
+      "type": "text"
+    },
+    {
+      "name": "minutes",
+      "type": "numeric"
+    },
+    {
+      "name": "fg",
+      "type": "integer"
+    },
+    {
+      "name": "fga",
+      "type": "integer"
+    },
+    {
+      "name": "fg3",
+      "type": "integer"
+    },
+    {
+      "name": "fg3a",
+      "type": "integer"
+    },
+    {
+      "name": "ft",
+      "type": "integer"
+    },
+    {
+      "name": "fta",
+      "type": "integer"
+    },
+    {
+      "name": "orb",
+      "type": "integer"
+    },
+    {
+      "name": "drb",
+      "type": "integer"
+    },
+    {
+      "name": "trb",
+      "type": "integer"
+    },
+    {
+      "name": "ast",
+      "type": "integer"
+    },
+    {
+      "name": "stl",
+      "type": "integer"
+    },
+    {
+      "name": "blk",
+      "type": "integer"
+    },
+    {
+      "name": "tov",
+      "type": "integer"
+    },
+    {
+      "name": "pf",
+      "type": "integer"
+    },
+    {
+      "name": "pts",
+      "type": "integer"
+    },
+    {
+      "name": "advanced",
+      "type": "jsonb"
+    },
+    {
+      "name": "value_states",
+      "type": "jsonb"
+    }
+  ]
+}

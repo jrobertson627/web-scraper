@@ -43,15 +43,13 @@ The tracker is a consumer of the database, not of this service. The scraper's sc
 - Use the database's **internal** connection values for the worker (same region, private network, no public exposure). Keep the **external** connection string for manual, out-of-band access only, and restrict it with the database's IP allow list.
 - The worker reads `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` and `PGSSLMODE`, not a URL. Copy each value from the database's internal connection details into the worker's environment. Leave `PGSSLMODE` unset for the internal host; external connections need `PGSSLMODE=require`.
 - The full data set will outgrow the current instance; the #78 sample fits. Upgrade the plan before the full backfill.
-- Give march-madness-tracker its own read-only role rather than the scraper's owner credentials. For example, run as the owner:
+- Give march-madness-tracker its own read-only role rather than the scraper's owner credentials, and let it read the **versioned views**, not the tables (`TRACKER_INTERFACE.md`, #119). Create the role as the owner, with its password set in the Render dashboard and never committed:
 
   ```sql
   CREATE ROLE tracker_readonly LOGIN PASSWORD '<set in the Render dashboard, never committed>';
-  GRANT CONNECT ON DATABASE <database> TO tracker_readonly;
-  GRANT USAGE ON SCHEMA public TO tracker_readonly;
-  GRANT SELECT ON ALL TABLES IN SCHEMA public TO tracker_readonly;
-  ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO tracker_readonly;
   ```
+
+  then, after `npm run migrate` has created the `tracker_v<n>` schemas, run `npm run grant:tracker` (as the owner, with the `PG*` settings). It gives the role `USAGE` on the versioned schemas and `SELECT` on their views, revokes everything in `public`, and refuses a superuser or a role that can create roles or databases. `--role <name>` grants a different role and `--dry-run` prints the statements. Run it again whenever a new version of the interface is added. The views run with their owner's privileges, so the role needs no table access, and cannot see fetches, raw objects, provenance, authorization records or halts.
 
 ### Raw store
 
@@ -128,7 +126,7 @@ The tracker does not need the API, so none is deployed. If one is wanted later, 
 2. Apply `render.yaml` from the Render dashboard (New, then Blueprint). Render prompts for each `sync: false` value; enter the internal `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `USER_AGENT`. Set the service's region to the database's region.
 3. The first deploy runs `npm ci`, then `npm run migrate`, then starts the worker. Check the deploy log for `migrate passed` and for the worker's configuration line.
 4. Check progress with the Render shell on the worker: `npm run status` (the service already has `PERSISTENCE=postgres` and the PG* values). It prints progress by page type, request pace, and projected time remaining. `npm run review:personal -- list` in the same shell lists pages stopped for review; see "Operator review" in `JOB_LIFECYCLE.md`.
-5. Create the tracker's read-only role (above) and give march-madness-tracker those credentials through its own service's secrets.
+5. Create the tracker's read-only role (above), run `npm run grant:tracker`, and give march-madness-tracker those credentials through its own service's secrets.
 
 ## The #78 sample, then the full backfill
 
@@ -141,5 +139,5 @@ The tracker does not need the API, so none is deployed. If one is wanted later, 
 - `npm run status` on the worker shows jobs moving from `pending` to `parsed`, and the pace at or below the request-policy ceiling (600 requests an hour at the 6-second interval).
 - The worker's stderr is a stream of JSON crawl-log lines with periodic `crawl.summary` lines.
 - Search the service logs for the database password and user agent value; neither should appear.
-- The tracker can read the #78 sample tables with the read-only role and cannot write to them.
+- The tracker can read the #78 sample through the `tracker_v1` views with the read-only role, cannot write to them, and cannot read anything in `public`. `crawl_scope` says it is a sample, and `season_completeness` says which seasons are done.
 - `npm run reconcile` on the worker's shell prints the reconciliation report for what has been loaded (exit 0 when it passes, 5 when it names failures).
