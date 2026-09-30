@@ -9,9 +9,9 @@ Rough clock time once provisioned: sample about 10 minutes, manifest about 40 mi
 ## 0. Before anything
 
 - [ ] `master` is the code you mean to deploy, and its CI is green (Node 20.18.1, Node 22, PostgreSQL 16, local mode, parser evidence).
-- [ ] **Decide the date against 1 November.** The season rolls over on 1 November UTC. The crawl fixes its season when the school index is fetched, so a backfill that starts before 1 November and runs past it stays on 2026 (targets 2022 to 2026). That is fine. If the site lists 2026-27 early, or the index fails with too few eligible schools, see step 6. After the site lists the new season, `npm run review:personal -- refresh-season` brings a loaded store up to it.
+- [ ] **Go-live is before 1 November** (the season rolls over on 1 November UTC). The crawl fixes its season when the school index is fetched, so a backfill that starts before then and runs past it stays on 2026 (targets 2022 to 2026). That is what you want. Get the index fetched (step 6) before the site lists 2026-27; if the site lists it early, or the index fails with too few eligible schools, see step 6. After the site lists the new season, `npm run review:personal -- refresh-season` brings the loaded store up to it (step 9).
 - [ ] **Your local `.env` points at the old Render database.** When the new instance exists, replace its `PG*` values or blank them so no local command can reach the wrong database. Never run `npm run test:postgres` or `npm run smoke:migrations` with it: they truncate tables. Use CI, or a local Docker Postgres with `PG_TEST_CONFIRM=disposable`.
-- [ ] **Optional, needs the live site:** capture a canceled or rescheduled game for the parser fixtures (#38, `OPERATIONS_RUNBOOK.md` "Recapture fixtures"). Without it the parser may quarantine those games on the real run and add to the review load. A parser change then needs the real-capture evidence line in its PR (`npm run parsers:verify`).
+- [ ] Nothing to capture for #38: Sports Reference does not record canceled or rescheduled games, so there is no such page to freeze (`fixtures/sports-reference/README.md`). A parser change needs the real-capture evidence line in its PR (`npm run parsers:verify`).
 
 ## 1. Provision PostgreSQL
 
