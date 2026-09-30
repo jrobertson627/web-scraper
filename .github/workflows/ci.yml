@@ -78,3 +78,24 @@ jobs:
       - run: npm run smoke:migrations
       - run: npm run migrate
       - run: npm run test:postgres
+
+  # A change to the parsers must carry evidence that the real-capture tests passed
+  # locally (#123): the captures cannot be in this public repository, so the tests
+  # that read them skip above. See scripts/parser-evidence.mjs.
+  parser-evidence:
+    name: Parser changes carry real-capture evidence
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The description reaches the script as an environment variable, never in a command.
+      - run: node scripts/check-parser-evidence.mjs
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}

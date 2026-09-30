@@ -169,7 +169,7 @@ A `conflicting_game_log_fact` issue (a game log disagrees with its box score) ca
 
 A parser version is a code change reviewed like any other. A new version never overwrites data by accident: a re-parse of the same stored page with a different parser version replaces the record, but a changed page is held for review (`PARSER_NORMALIZATION.md`).
 
-1. Add the new version, for example `BoxScoreParserV2` returning version `'2'`, next to the old one in `PRODUCTION_PARSERS` (`src/parsers/index.mjs`), with tests against the real captures. Merge and deploy. Keeping v1 registered allows a rollback.
+1. Add the new version, for example `BoxScoreParserV2` returning version `'2'`, next to the old one in `PRODUCTION_PARSERS` (`src/parsers/index.mjs`), with tests against the real captures. Before you open the pull request, run `npm run parsers:verify` on the machine that holds the captures: it runs every test that reads them (refusing to count a skipped one) and prints a `Real-capture verification: passed (captures ..., parsers ..., N tests, date)` line. Paste that line into the pull request description. CI cannot run those tests, because the captures are not in this public repository, so its `Parser changes carry real-capture evidence` job instead checks that the line names the committed capture set and this change's exact parser code; if the parsers change again after you ran it, the line goes stale and you run it again. Merge and deploy. Keeping v1 registered allows a rollback.
 2. Set `PARSER_VERSIONS={"box_score":"2"}` on the service. From now on the worker parses box scores with v2, including pages queued before.
 3. Re-parse what is stored, with no requests:
 
