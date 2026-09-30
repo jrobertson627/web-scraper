@@ -56,6 +56,7 @@ The tracker is a consumer of the database, not of this service. The scraper's sc
 ### Raw store
 
 - `RAW_STORE_ROOT=/var/data/raw` on the worker's persistent disk. Raw objects are the immutable evidence behind every parse and are needed for 304 reuse and repair (`RAW_STORAGE.md`); on ephemeral storage they would be lost on every deploy, and a later 304 would stop for operator review.
+- The database records which raw store its objects live in (`raw_store_identity`, from the first worker), and objects are recorded by a reference that does not name the path (`RAW_STORAGE.md`). So a worker run from any other machine against this database refuses to start, and the raw store can be moved to a new root or a bigger disk by copying it, `.raw-store-id` included.
 - 1 GB covers the #78 sample (about 75 requests, 15–20 MB). For the full backfill, resize the disk to at least 10 GB or move the raw store to object storage; object-store credentials would then be secrets like the database password.
 
 ## Environment variables

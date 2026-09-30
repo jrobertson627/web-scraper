@@ -22,6 +22,8 @@ The adapter's pool logs an idle client's `'error'` (by error code only) instead 
 
 `013_crawl_scopes` records the scope each crawl ran under (#78): `kind` is `sample` or `full`, and a sample also has `schools` (site paths) and `ending_years`. The latest row is the store's current scope; a store with none was crawled under the full scope. Readers such as march-madness-tracker should check it before treating the data as complete.
 
+`014_raw_store_identity` (#117) rewrites every recorded `source_fetches.raw_object_path` and `raw_object_repair.object_path` from the worker's absolute path to the root-independent `raw:<xx>/<checksum>` reference, and adds `raw_store_identity`, a single row holding the id of the raw store the database's objects live in. It is what makes a raw store movable and stops a worker with a different store from starting.
+
 ## Migration rules
 
 `npm run migrate` (`scripts/migrate.mjs`, logic in `src/persistence/migrator.mjs`) is how every database, including production, is brought up to date, and the database is added to over time, so the files are append-only history (#120).

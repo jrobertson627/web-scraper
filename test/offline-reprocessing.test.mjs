@@ -256,6 +256,8 @@ function reprocessEnv(overrides = {}) {
 
 // Reads answer from memory; the pool is never queried.
 class EmptyPostgres extends PostgresPersistence {
+  async rawStoreId() { return null; }
+  async claimRawStoreId(storeId) { return storeId; }
   constructor() { super({ pool: { end: async () => {} } }); this.closed = 0; this.selections = []; }
   async listJobsForReprocess(selection) { this.selections.push(selection); return { items: [], nextCursor: null }; }
   async close() { this.closed += 1; }

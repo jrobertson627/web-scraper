@@ -12,6 +12,7 @@ import { ParserRegistry } from '../parsers/public.mjs';
 import { FixtureParser, createProductionParserRegistry, missingProductionParsers } from '../parsers/index.mjs';
 import { Normalizer } from '../domain/public.mjs';
 import { createRawStore } from '../persistence/public.mjs';
+import { assertRawStoreMatchesDatabase } from '../persistence/raw-store-identity.mjs';
 import { FileRawStore, InMemoryPersistence } from '../persistence/index.mjs';
 import { PostgresPersistence } from '../persistence/postgres.mjs';
 import { createQueryService, createApiServer } from '../api/public.mjs';
@@ -300,6 +301,8 @@ export async function createWorkerApplication({
   if (!(parsers instanceof ParserRegistry)) throw refuse('parsers must be a ParserRegistry');
   const missing = missingProductionParsers(parsers, config.parserVersions);
   if (missing.length) throw refuse(`no production parser is registered for ${missing.join(', ')}`);
+  // The first worker records which raw store this database's objects live in; any other refuses (#117).
+  await assertRawStoreMatchesDatabase({ persistence, rawStore: store, claim: true });
 
   const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, seasonEndingYear: config.currentSeasonEndingYear, sourceAdapter: adapter, scope: config.crawlScope, minEligibleSchools: config.minEligibleSchools });
   const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts, events });
@@ -386,6 +389,7 @@ export function createReprocessApplication({
     rawStore: store,
     parsers,
     reprocess: async ({ pageTypes, states, jobKeys } = {}) => {
+      await assertRawStoreMatchesDatabase({ persistence, rawStore: store });
       adoptSeason({ discovery, config, events, season: await resolveCrawlSeason({ persistence, rootJob, config, clock }) });
       return reprocessStoredPages({
         persistence, rawStore: store, parsers, discovery, normalizer, clock, parserVersions: config.parserVersions, events,
@@ -406,6 +410,7 @@ function reviewOperations({ persistence, rawStore, parsers, discovery, normalize
     dismiss: (issueId, { operatorId, reason }) => dismissIssue({ persistence, issueId, operatorId, reason, clock }),
     accept: async (issueId, { operatorId, reason }) => {
       if (!parsers) throw new Error('accept needs the worker configuration: AUTHORIZATION_JSON, DATA_CONTRACT_JSON, RAW_STORE_ROOT and USER_AGENT, as for the worker');
+      await assertRawStoreMatchesDatabase({ persistence, rawStore });
       await season?.();
       return acceptIssue({ persistence, rawStore, parsers, discovery, normalizer, clock, issueId, operatorId, reason });
     },

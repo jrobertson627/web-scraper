@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync } from 'node:fs';
-import { link, lstat, mkdir, open, readFile, readdir, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { platform } from 'node:os';
 import {
@@ -43,6 +43,27 @@ function jsonEqual(left, right) {
 
 const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
 
+// A raw object is recorded by a reference that does not depend on where a store
+// keeps it: `raw:<first two hex digits>/<checksum>` (#117). The store resolves it
+// to a location when it reads, so moving the store to another root or to object
+// storage leaves every recorded reference valid. Before #117 the reference was
+// the absolute path the worker wrote (`file:///var/data/raw/xx/<checksum>`);
+// normalizeObjectReference reads those as the same object.
+const OBJECT_KEY_PATTERN = /^raw:[a-f0-9]{2}\/[a-f0-9]{64}$/;
+
+export function rawObjectKey(checksum) {
+  return `raw:${assertChecksum(checksum).slice(0, 2)}/${checksum}`;
+}
+
+// The reference for a recorded value: a key stays as it is, a legacy file:// or
+// memory:// path becomes the key of the object it names, anything else is left
+// alone so it is reported as a mismatch rather than guessed at.
+export function normalizeObjectReference(reference) {
+  if (typeof reference !== 'string' || OBJECT_KEY_PATTERN.test(reference)) return reference;
+  const legacy = /^(?:file|memory):\/\/(?:.*[\\/])?([a-f0-9]{64})$/.exec(reference);
+  return legacy ? rawObjectKey(legacy[1]) : reference;
+}
+
 function assertChecksum(checksum) {
   if (typeof checksum !== 'string' || !CHECKSUM_PATTERN.test(checksum)) {
     throw new Error('raw checksum is invalid. Expected a lowercase SHA-256 hex digest.');
@@ -74,10 +95,10 @@ export async function inventoryRawObjects({ rawStore, fetches, observedAt }) {
   const healthy = [];
   const pending = [];
   for (const [checksum, referencing] of references) {
-    const expectedPaths = [...new Set(referencing.map((fetch) => fetch.objectPath).filter(Boolean))];
+    const expectedPaths = [...new Set(referencing.map((fetch) => normalizeObjectReference(fetch.objectPath)).filter(Boolean))];
     const expectedObjectPath = expectedPaths.length === 1 ? expectedPaths[0] : undefined;
     const verification = await rawStore.verify(checksum, expectedObjectPath);
-    if (verification.ok && expectedPaths.length === 1 && referencing.every((fetch) => fetch.objectPath === expectedObjectPath)) {
+    if (verification.ok && expectedPaths.length === 1 && referencing.every((fetch) => normalizeObjectReference(fetch.objectPath) === expectedObjectPath)) {
       healthy.push(Object.freeze({ checksum, objectPath: verification.objectPath, sourceFetchIds: referencing.map((fetch) => fetch.id) }));
       continue;
     }
@@ -167,7 +188,7 @@ export function assertFetchVerification(metadata, verification) {
   }
   if (!verification || !metadata.checksum) return;
   if (!verification.ok) throw new Error(`raw fetch metadata rejected before durable record: ${verification.reason}`);
-  if (verification.checksum !== metadata.checksum || verification.objectPath !== metadata.objectPath) {
+  if (verification.checksum !== metadata.checksum || verification.objectPath !== normalizeObjectReference(metadata.objectPath)) {
     throw new Error('raw fetch metadata rejected before durable record: verification is for a different raw object');
   }
 }
@@ -217,6 +238,9 @@ function gameModel(page) {
   return { ...page.data, gameKey: page.identity, provenance: page.provenance };
 }
 
+const RAW_STORE_ID_FILE = '.raw-store-id';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 function sha256(body) { return createHash('sha256').update(body).digest('hex'); }
 
 // A raw store's verification of one object: { ok: true, checksum, objectPath,
@@ -226,7 +250,7 @@ function sha256(body) { return createHash('sha256').update(body).digest('hex'); 
 function checkedObject(checksum, objectPath, body, expectedObjectPath) {
   const actualChecksum = sha256(body);
   if (actualChecksum !== checksum) return Object.freeze({ ok: false, reason: 'raw object checksum mismatch', checksum, actualChecksum, objectPath });
-  if (expectedObjectPath && objectPath !== expectedObjectPath) {
+  if (expectedObjectPath && objectPath !== normalizeObjectReference(expectedObjectPath)) {
     return Object.freeze({ ok: false, reason: 'raw object path mismatch', checksum, objectPath, expectedObjectPath });
   }
   return Object.freeze({ ok: true, checksum, objectPath, size: body.length, body });
@@ -238,14 +262,18 @@ function withoutBody({ body, ...verification }) { return Object.freeze(verificat
 // filesystem store's return promises. Callers await either.
 export class MemoryRawStore {
   #objects = new Map();
+  #storeId = randomUUID();
+
+  // Identifies this store, as the filesystem store's marker file does.
+  storeId() { return this.#storeId; }
 
   put(bytes) {
     const body = Buffer.from(bytes);
     const checksum = sha256(body);
     const existing = this.#objects.get(checksum);
     if (existing && !existing.body.equals(body)) throw new Error(`raw checksum collision: ${checksum}`);
-    if (!existing) this.#objects.set(checksum, { checksum, body, objectPath: `memory://${checksum}` });
-    return Object.freeze({ ok: true, checksum, objectPath: `memory://${checksum}`, size: body.length });
+    if (!existing) this.#objects.set(checksum, { checksum, body, objectPath: rawObjectKey(checksum) });
+    return Object.freeze({ ok: true, checksum, objectPath: rawObjectKey(checksum), size: body.length });
   }
 
   read(checksum, expectedObjectPath) {
@@ -308,7 +336,26 @@ export class FileRawStore {
       existing = await this.#read(path);
     }
     if (!existing || !existing.equals(body)) throw new Error(`raw checksum collision or incomplete write: ${checksum}`);
-    return Object.freeze({ ok: true, checksum, objectPath: `file://${path}`, size: body.length });
+    return Object.freeze({ ok: true, checksum, objectPath: rawObjectKey(checksum), size: body.length });
+  }
+
+  // Identifies this store: a UUID kept in a marker file at its root, created the
+  // first time it is asked for. A database records the id of the store it was
+  // crawled with, so a worker pointed at another store refuses to start (#117).
+  // Copying the store's directory, marker included, to a new root or machine keeps
+  // its identity.
+  async storeId() {
+    const path = join(this.root, RAW_STORE_ID_FILE);
+    const read = async () => {
+      const text = (await readFile(path, 'utf8')).trim();
+      if (!UUID_PATTERN.test(text)) throw new Error(`raw store id file ${RAW_STORE_ID_FILE} is malformed. Expected a UUID`);
+      return text;
+    };
+    try { return await read(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try {
+      await writeFile(path, `${randomUUID()}\n`, { flag: 'wx' });
+    } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    return read();
   }
 
   async read(checksum, expectedObjectPath) {
@@ -318,7 +365,7 @@ export class FileRawStore {
       return Object.freeze({ ok: false, reason: `unsafe raw object: ${error.message}`, checksum });
     }
     if (!body) return Object.freeze({ ok: false, reason: 'missing raw object', checksum });
-    return checkedObject(checksum, `file://${this.#path(checksum)}`, body, expectedObjectPath);
+    return checkedObject(checksum, rawObjectKey(checksum), body, expectedObjectPath);
   }
 
   async get(checksum) {
@@ -336,7 +383,7 @@ export class FileRawStore {
       if (!file.isFile() || !/^[a-f0-9]{64}$/.test(file.name) || !file.name.startsWith(directoryName)) continue;
       const path = join(directoryPath, file.name);
       const stats = await lstatIfPresent(path);
-      if (stats?.isFile()) entries.push({ checksum: file.name, objectPath: `file://${path}`, size: stats.size });
+      if (stats?.isFile()) entries.push({ checksum: file.name, objectPath: rawObjectKey(file.name), size: stats.size });
     }
     return entries;
   }
@@ -348,7 +395,8 @@ export class FileRawStore {
       if (!file.isFile() || !match || !match[1].startsWith(directoryName)) continue;
       const path = join(directoryPath, file.name);
       const stats = await lstatIfPresent(path);
-      if (stats) entries.push(Object.freeze({ checksum: match[1], objectPath: `file://${path}`, modifiedAt: stats.mtime.toISOString() }));
+      // Relative to the store's root, since an interrupted write has no object key.
+      if (stats) entries.push(Object.freeze({ checksum: match[1], objectPath: `raw:${directoryName}/${file.name}`, modifiedAt: stats.mtime.toISOString() }));
     }
     return entries.sort((left, right) => left.objectPath.localeCompare(right.objectPath));
   }
@@ -787,6 +835,16 @@ export class InMemoryPersistence {
     const job = this.#requireLease(key, lease);
     if (this.inFlight.has(key)) throw new Error(`cannot transition job ${key} while its host request is still active`);
     this.#applyTransition(job, nextState, details);
+  }
+
+  // The id of the raw store this database's objects live in (#117), or null until
+  // a worker records it. claimRawStoreId records it if none is recorded and
+  // returns the id that is; same contract as the PostgreSQL adapter's.
+  rawStoreId() { return this.recordedRawStoreId ?? null; }
+
+  claimRawStoreId(storeId) {
+    this.recordedRawStoreId ??= storeId;
+    return this.recordedRawStoreId;
   }
 
   // The scope this store is crawled under (#78): the latest recorded, or the

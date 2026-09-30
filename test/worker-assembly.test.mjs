@@ -46,7 +46,7 @@ function realParts(overrides = {}) {
   return {
     config: workerConfig(),
     transport: new HttpTransport({ resolve: async () => { throw new Error('tests make no network requests'); } }),
-    persistence: new PostgresPersistence({ pool: { end: async () => {} } }),
+    persistence: Object.assign(new PostgresPersistence({ pool: { end: async () => {} } }), { rawStoreId: async () => null, claimRawStoreId: async (storeId) => storeId }),
     parsers: createProductionParserRegistry(PAGE_TYPES.map((pageType) => new StubParser(pageType))),
     ...overrides,
   };
@@ -115,4 +115,21 @@ test('the default registry has every production parser and a partial one names w
 test('the fixture application refuses the real transport', () => {
   assert.throws(() => createFixtureApplication({ sharedState: { transport: new HttpTransport() } }), /refused the real HttpTransport/);
   assert.throws(() => createFixtureApplication({ sharedState: { transport: new HttpTransport(), ...fakeTime() } }), /refused the real HttpTransport/);
+});
+
+// #117: the first worker records which raw store the database's objects live in.
+test('worker assembly records its raw store on first use and refuses any other', async () => {
+  let recorded = null;
+  const persistence = Object.assign(new PostgresPersistence({ pool: { end: async () => {} } }), {
+    rawStoreId: async () => recorded,
+    claimRawStoreId: async (storeId) => { recorded ??= storeId; return recorded; },
+  });
+  const assemble = (root) => createWorkerApplication(realParts({ persistence, config: workerConfig({ rawStoreRoot: root }) }));
+  const production = mkdtempSync(join(tmpdir(), 'worker-raw-production-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'worker-raw-elsewhere-'));
+  await assemble(production);
+  assert.match(recorded, /^[0-9a-f-]{36}$/, 'the first worker recorded its store');
+  await assemble(production);
+  await assert.rejects(assemble(elsewhere), (error) => /not the one this database was crawled with/.test(error.message) && error.exit === 'configurationRejected');
+  assert.equal(recorded, (await assemble(production), recorded), 'the recorded id did not change');
 });

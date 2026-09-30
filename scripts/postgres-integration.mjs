@@ -272,7 +272,7 @@ test('real PostgreSQL persistence and process restart', async () => {
     const initial = await reviewed.repairRawObjects({ rawStore: raw });
     assert.equal(initial.healthy.length, 1);
     assert.equal(initial.orphans.some((entry) => entry.checksum === orphan.checksum), true);
-    unlinkSync(body.objectPath.slice('file://'.length));
+    unlinkSync(join(localRoot, 'raw-repair', body.checksum.slice(0, 2), body.checksum));
     const damaged = await reviewed.repairRawObjects({ rawStore: raw });
     assert.equal(damaged.pending.length, 1);
     assert.equal(damaged.pending[0].sourceFetchIds[0], fetchId);
@@ -813,7 +813,7 @@ test('operator review lists quarantined work and records accepted and dismissed 
   assert.deepEqual(list.jobs.map((job) => [job.state, job.key, job.parser]), [['parse_failed', 'fixture-provider:fixture.example/box/shift.html:box_score', 'box_score@1']]);
   const shift = await app.review.show(list.jobs[0].key);
   assert.equal(shift.lastParseRun.failureDetails.error, 'fixture layout changed; column meaning is uncertain');
-  assert.match(shift.snapshot.objectPath, /^file:\/\//);
+  assert.match(shift.snapshot.objectPath, /^raw:[a-f0-9]{2}\/[a-f0-9]{64}$/);
   assert.deepEqual(shift.history.map((event) => event.to), ['fetching', 'fetched', 'parse_failed']);
 
   // A later fetch of box one returned a corrected page; reprocessing holds it as a conflict.

@@ -4,9 +4,16 @@ Raw bodies are content-addressed by lowercase SHA-256 checksum. `MemoryRawStore`
 
 The fetcher finalizes and verifies the raw object before it records a successful `source_fetch`. A missing body, checksum mismatch, or object-path mismatch therefore cannot produce a fetched or parsed job. A `304` response reuses the previously verified immutable body while recording new conditional-fetch metadata; it never overwrites the body.
 
+## Object references and store identity (#117)
+
+A raw object is recorded by a reference that does not say where it is kept: `raw:<first two hex digits of the checksum>/<checksum>` (`rawObjectKey`). Each store resolves the reference to a location when it reads, so the recorded value is the same whichever machine or directory wrote the object. Before #117 the reference was the worker's absolute path (`file:///var/data/raw/xx/<checksum>`); `normalizeObjectReference` still reads such a value as the same object, and migration 014 rewrites recorded ones.
+
+- **Moving a store is a copy.** Copy the directory, including its `.raw-store-id` file, to the new root, point `RAW_STORE_ROOT` at it, and every recorded page stays readable and reprocessable. Moving to object storage means a store that maps the same reference to an object name.
+- **A database knows its store.** `raw_store_identity` holds the id of the raw store the database's objects live in; a `FileRawStore` keeps its id (a UUID) in `<root>/.raw-store-id`, created the first time it is asked. The first worker records its store's id. After that a worker, `reprocess`, `review accept` or `repair:raw` whose store has a different id refuses to start (exit `3`) and names both ids: a worker run from another machine, or pointed at an empty directory, would otherwise write bodies where the production worker never finds them. If the same store came back from a backup without its marker, write the database's id, as the message prints it, into `<root>/.raw-store-id`.
+
 ## Store port and hashing once
 
-A raw store implements `put(bytes)`, `read(checksum, expectedObjectPath?)`, `get(checksum)`, `verify(checksum, expectedObjectPath?)`, `entries()` and `temporaryEntries()` (filesystem only). `FileRawStore` uses asynchronous filesystem I/O and returns promises, so a 16 MiB write or read does not block the event loop, including the worker's lease-renewal timer. `MemoryRawStore` does no I/O and returns values directly. Callers await both.
+A raw store implements `put(bytes)`, `read(checksum, expectedObjectPath?)`, `get(checksum)`, `verify(checksum, expectedObjectPath?)`, `entries()`, `storeId()` and `temporaryEntries()` (filesystem only). `temporaryEntries()` lists an interrupted write as `raw:<xx>/<file>.tmp`, relative to the store's root. `FileRawStore` uses asynchronous filesystem I/O and returns promises, so a 16 MiB write or read does not block the event loop, including the worker's lease-renewal timer. `MemoryRawStore` does no I/O and returns values directly. Callers await both.
 
 Each fetch hashes its body once (#91):
 

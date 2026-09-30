@@ -34,6 +34,8 @@ function workerEnv(overrides = {}) {
 
 // Job methods answer from memory; the pool is never queried.
 class InMemoryPostgres extends PostgresPersistence {
+  async rawStoreId() { return null; }
+  async claimRawStoreId(storeId) { return storeId; }
   constructor(options) {
     super({ pool: { end: async () => {} }, ...options });
     this.added = [];
