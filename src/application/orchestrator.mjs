@@ -38,18 +38,39 @@ export class IngestionOrchestrator {
   async #haltBeforeStart() {
     const pending = await this.persistence.unreviewedChallenges();
     if (!pending.length) return null;
-    return this.#halt({ jobKey: pending[0].jobKey, pageType: pending[0].pageType, awaitingReview: pending.length });
+    return this.#halt({ jobKey: pending[0].jobKey, pageType: pending[0].pageType, code: pending[0].code, awaitingReview: pending.length });
   }
 
-  #halt({ jobKey, pageType, awaitingReview = 1 }) {
-    const halt = Object.freeze({ reason: 'challenge', jobKey, pageType, awaitingReview });
+  #halt({ jobKey, pageType, code = 'challenge', awaitingReview = 1 }) {
+    const halt = Object.freeze({ reason: code, jobKey, pageType, awaitingReview });
     this.events.emit('run.halted', halt);
     return halt;
   }
 
   #haltAfter(event) {
     return event?.kind === 'operator_stop' && HALTING_STOP_CODES.includes(event.code)
-      ? this.#halt({ jobKey: event.jobKey, pageType: event.pageType }) : null;
+      ? this.#halt({ jobKey: event.jobKey, pageType: event.pageType, code: event.code }) : null;
+  }
+
+  // The longest wait before a request to the host may start (a pause after a 429,
+  // or another request holding it), or null (#113, #118). The worker waits it out
+  // instead of claiming a job only to settle it as host-busy and claim the next.
+  async #hostWait() {
+    if (typeof this.persistence.hostGate !== 'function') return null;
+    let longest = null;
+    for (const host of this.fetcher?.allowedHosts ?? []) {
+      const gate = await this.persistence.hostGate(host);
+      if (gate.waitMs > 0 && (!longest || gate.waitMs > longest.waitMs)) longest = { host, ...gate };
+    }
+    return longest;
+  }
+
+  // One log line per wait, not one per sleep.
+  #announceWait(wait) {
+    const key = wait ? `${wait.host}:${wait.reason}` : null;
+    if (key === this.lastWait) return;
+    this.lastWait = key;
+    if (wait) this.events.emit('host.waiting', { host: wait.host, reason: wait.reason, waitMs: wait.waitMs });
   }
 
   // Processes every job that is claimable now, then returns. Returns job
@@ -61,6 +82,7 @@ export class IngestionOrchestrator {
     const events = [];
     let halt = await this.#haltBeforeStart();
     while (!halt) {
+      if (await this.#hostWait()) break;
       const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
       if (!job) break;
       const event = await this.#process(job);
@@ -84,6 +106,15 @@ export class IngestionOrchestrator {
     const outcomes = {};
     let halt = await this.#haltBeforeStart();
     while (!halt && !signal?.aborted) {
+      const wait = await this.#hostWait();
+      if (wait) {
+        const held = await this.persistence.workOutlook({ pageTypes });
+        if (!held.remaining) break;
+        this.#announceWait(wait);
+        await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, wait.waitMs)), signal);
+        continue;
+      }
+      this.#announceWait(null);
       const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
       if (job) {
         const event = await this.#process(job, signal);
@@ -100,7 +131,7 @@ export class IngestionOrchestrator {
       await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, outlook.wakeInMs ?? maxIdleMs)), signal);
     }
     // stopped: the run ended with work left, for a signal or a challenge halt.
-    const stopReason = halt ? 'challenge' : signal?.aborted ? 'signal' : null;
+    const stopReason = halt ? halt.reason : signal?.aborted ? 'signal' : null;
     return { processed, stopped: Boolean(stopReason), stopReason, ...(halt ? { halt } : {}), outcomes, counts: await this.persistence.jobCounts() };
   }
 

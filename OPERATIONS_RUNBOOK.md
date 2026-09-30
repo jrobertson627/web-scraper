@@ -75,16 +75,18 @@ A scope can only widen. A worker started with a narrower scope than the store ho
 
 ## Rate limiting (429)
 
-A 429 with a valid `Retry-After` puts that page in `retry_wait` until the time the provider asked for, never sooner. The worker keeps crawling other pages at the normal pace. After five 429s for one page, or a `Retry-After` longer than 24 hours or missing, the page stops for review as `operator_stop`.
+A 429 with a valid `Retry-After` pauses **the whole host** until the time the provider asked for (at least one request interval), never sooner: the page goes to `retry_wait`, and no request to the host starts before then, whichever job is claimed next. The pause is recorded in the database (`host_request_schedule.paused_until`), so a restarted worker keeps waiting. While it lasts the worker sleeps and logs one `host.waiting` line (`reason: paused`); it claims nothing, so no job history is written for the wait.
 
-If 429s become frequent (`retryWaits` climbing in the summaries), the provider is asking us to slow down. **Pause the crawl** for several hours, or a day. On resume:
+**A 429 is a halt when the provider gives no way to tell when to go on.** A 429 with no valid `Retry-After` (`invalid_retry_after`), one longer than the policy's `maxRetryAfterMs` (`retry_after_too_long`, 24 hours by default), and a page that reaches five 429s (`rate_limit_cap`) all stop the page as `operator_stop` **and halt the run**, like a challenge: the worker exits `6` and no request is made, including after a restart, until every such stop has been reviewed ([A challenge](#a-challenge-403-or-captcha) has the steps).
+
+After a block, release the stopped pages in one command instead of page by page. It names exactly what it releases, records one disposition for each, and `--dry-run` lists them first:
 
 ```sh
-npm run review:personal -- list --state operator_stop
-npm run review:personal -- release-retry <job key> --operator <you> --reason "429s stopped; resuming after a day's pause"
+npm run review:personal -- release-retry --state operator_stop --code rate_limit_cap --operator <you> --reason "429s stopped; resuming after a day's pause" --dry-run
+npm run review:personal -- release-retry --state operator_stop --code rate_limit_cap --operator <you> --reason "429s stopped; resuming after a day's pause"
 ```
 
-A release gives the page a fresh 429 budget.
+`--code` is one of `rate_limit_cap`, `invalid_retry_after`, `retry_after_too_long`, `challenge`, and so on (`npm run review -- list --json` shows each stop's `code`). The single-page form, `release-retry <job key>`, still works. A release gives the page a fresh 429 budget. If 429s become frequent, pause the crawl for several hours, or a day, before releasing.
 
 ## A challenge (403 or CAPTCHA)
 

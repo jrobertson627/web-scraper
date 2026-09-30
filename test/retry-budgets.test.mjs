@@ -40,6 +40,9 @@ function harness(responses, policy = {}) {
         const current = persistence.getJob(target.key);
         if (TERMINAL.has(current.state)) return events;
         if (current.state === 'retry_wait') milliseconds = Math.max(milliseconds, Date.parse(current.nextAllowedAt));
+        // A 429 also paused the whole host until its Retry-After (#113).
+        const pausedUntil = persistence.getRequestSchedule('allowed.example').pausedUntil;
+        if (pausedUntil) milliseconds = Math.max(milliseconds, pausedUntil.getTime());
       }
       throw new Error('job did not settle');
     },
@@ -95,11 +98,14 @@ test('host-busy retries do not reduce the attempts left for transport and 5xx er
   run.persistence.acquireRequest(blocker.key, held.lease, 'allowed.example');
   run.advance(1_000);
   for (let busy = 0; busy < 5; busy += 1) {
-    const { events } = await run.orchestrator.runOnce('worker');
-    assert.equal(events[0].reason, 'host request already owned');
+    // The worker waits for the host instead of claiming and settling a job (#118),
+    // so a busy host writes no job history and spends no attempts.
+    const { events, processed } = await run.orchestrator.runOnce('worker');
+    assert.deepEqual([events, processed], [[], 0]);
     run.advance(1_000);
   }
   assert.equal(run.persistence.getJob(run.target.key).failureAttempts, 0);
+  assert.equal(run.persistence.getJob(run.target.key).attempts, 1, 'no claim was spent on a busy host');
   assert.equal(run.transport.calls, 0);
   run.persistence.releaseRequest(blocker.key, held.lease);
 
@@ -108,5 +114,5 @@ test('host-busy retries do not reduce the attempts left for transport and 5xx er
   assert.equal(failed.state, 'permanently_failed');
   assert.equal(run.transport.calls, 3);
   assert.equal(failed.failureAttempts, 2);
-  assert.ok(failed.attempts >= 8);
+  assert.equal(failed.attempts, 4, 'the first claim plus three real attempts');
 });

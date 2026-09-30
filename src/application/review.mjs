@@ -120,6 +120,35 @@ export async function disposeJob({ persistence, jobKey, action, operatorId, reas
   return Object.freeze({ jobKey, disposition: kind, operatorId, reason, state: (await persistence.getJob(jobKey))?.state ?? null });
 }
 
+// The same action on every job in the given states whose latest stop carries
+// `code`, with one recorded disposition per job (#113). dryRun only lists them.
+// The matching jobs are collected first, then disposed one at a time, so a
+// failure part-way leaves a clear count of what was done.
+export async function disposeMatching({ persistence, action, states, code, dryRun = false, operatorId, reason, clock, pageSize = 200 }) {
+  const kind = JOB_DISPOSITIONS[action];
+  if (!kind) throw new Error(`job action ${action} is invalid. Expected ${Object.keys(JOB_DISPOSITIONS).join(', ')}`);
+  if (!states?.length || !code) throw new Error('a bulk disposition needs states and a code');
+  assertBoundaryPort('persistenceReview', persistence);
+  const matched = [];
+  for (let cursor; ;) {
+    const page = await persistence.reviewJobs({ states, limit: pageSize, cursor });
+    for (const job of page.items) if (job.code === code) matched.push(job.key);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  const result = { action, disposition: kind, states, code, dryRun, matched: matched.length, disposed: 0, sample: matched.slice(0, 10) };
+  if (dryRun) return Object.freeze(result);
+  for (const jobKey of matched) {
+    try {
+      await persistence.recordOperatorDisposition(jobKey, { kind, operatorId, reason, at: clock().toISOString() });
+    } catch (error) {
+      throw new Error(`stopped after ${result.disposed} of ${matched.length} jobs at ${jobKey}: ${error.message}`, { cause: error });
+    }
+    result.disposed += 1;
+  }
+  return Object.freeze(result);
+}
+
 export async function dismissIssue({ persistence, issueId, operatorId, reason, clock }) {
   if (!isIssueId(issueId)) throw new Error(`issue id ${issueId} is invalid. Expected an id from the review list. Example: issue-12`);
   return persistence.dismissIssue({ issueId, operatorId, reason, at: clock() });

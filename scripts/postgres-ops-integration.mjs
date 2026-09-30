@@ -231,3 +231,50 @@ test('migration 014 rewrites a recorded absolute path to the root-independent re
   assert.equal((await persistence.lastSuccessfulFetch(source.key)).objectPath, key);
   await reset(pool);
 });
+
+// #113, #118: a host pause and the host gate, judged by the database clock.
+test('a paused or busy host is reported by the gate, a pause is never shortened, and an orphaned request is released by the gate', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 30_000 });
+  const host = 'fixture.example';
+  assert.deepEqual(await persistence.hostGate(host), { waitMs: 0, reason: null });
+
+  await persistence.pauseHost(host, new Date(Date.now() + 90_000));
+  const paused = await persistence.hostGate(host);
+  assert.equal(paused.reason, 'paused');
+  assert.ok(paused.waitMs > 60_000 && paused.waitMs <= 90_000, `waitMs ${paused.waitMs}`);
+  const before = (await persistence.getRequestSchedule(host)).pausedUntil;
+  await persistence.pauseHost(host, new Date(Date.now() + 5_000));
+  assert.equal((await persistence.getRequestSchedule(host)).pausedUntil.getTime(), before.getTime(), 'an earlier pause does not shorten a later one');
+  await persistence.recordRequestStart(host, new Date());
+  assert.equal((await persistence.getRequestSchedule(host)).pausedUntil.getTime(), before.getTime(), 'a request start keeps the pause');
+  await pool.query(`UPDATE host_request_schedule SET paused_until = clock_timestamp() - interval '1 second'`);
+  assert.deepEqual(await persistence.hostGate(host), { waitMs: 0, reason: null });
+
+  const source = job('/box/gate.html');
+  await persistence.addJob(source);
+  const claimed = await persistence.claimNextJob(new Date(), 'worker');
+  await persistence.acquireRequest(claimed.key, claimed.lease, host);
+  assert.deepEqual(await persistence.hostGate(host), { waitMs: 5_000, reason: 'in_flight' });
+  // The worker died: its request and its claim are long past the request deadline.
+  await pool.query(`UPDATE in_flight_requests SET started_at = clock_timestamp() - interval '1 hour'`);
+  await pool.query(`UPDATE crawl_jobs SET claim_expires_at = clock_timestamp() - interval '1 hour'`);
+  assert.deepEqual(await persistence.hostGate(host), { waitMs: 0, reason: null }, 'the gate released the orphan');
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM in_flight_requests WHERE released_at IS NULL')).rows[0].n, 0);
+  await reset(pool);
+});
+
+test('a review job summary carries the code of its latest stop', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 30_000 });
+  await persistence.addJob(job('/box/coded.html'));
+  const claimed = await persistence.claimNextJob(new Date(), 'worker');
+  await persistence.transitionJob(claimed.key, 'operator_stop', claimed.lease, { lastError: 'rate limited 5 times', code: 'rate_limit_cap' });
+  const page = await persistence.reviewJobs({ states: ['operator_stop'] });
+  assert.deepEqual(page.items.map((item) => [item.key, item.code]), [[claimed.key, 'rate_limit_cap']]);
+  await reset(pool);
+});
