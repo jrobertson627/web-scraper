@@ -39,11 +39,25 @@ export const DEFAULT_ORPHAN_GRACE_MS = 10_000;
 export const ORPHANED_REQUEST_REASON = 'owner lease expired past request deadline';
 
 // PostgreSQL errors that say nothing about the page: serialization failures
-// (40001), deadlocks (40P01), connection exceptions (class 08) and an
-// administrator shutdown (57P01), plus a socket dropped under the driver.
-// A page commit that fails this way is retried rather than recorded as
-// parse_failed.
-const TRANSIENT_STORE_CODES = new Set(['40001', '40P01', '57P01', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+// (40001), deadlocks (40P01), connection exceptions (class 08), an
+// administrator shutdown (57P01), a statement timeout (57014), too many
+// connections (53300) and a server that cannot accept connections yet (57P03),
+// plus a socket dropped under the driver. A page commit that fails this way is
+// retried rather than recorded as parse_failed, and the run loop retries the
+// same errors from claiming a job before it gives up (#122).
+const TRANSIENT_STORE_CODES = new Set(['40001', '40P01', '57P01', '57014', '53300', '57P03', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+
+// Out of disk (53100) or out of memory (53200) on the database server. Retrying
+// does not help until someone acts, so it is systemic, not a page failure: the
+// run halts (#114, #122).
+const SYSTEMIC_STORE_CODES = new Set(['53100', '53200']);
+
+export function isSystemicStoreError(error, seen = new Set()) {
+  if (!error || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  if (SYSTEMIC_STORE_CODES.has(typeof error.code === 'string' ? error.code : '')) return true;
+  return isSystemicStoreError(error.cause, seen) || (error.errors ?? []).some((inner) => isSystemicStoreError(inner, seen));
+}
 
 export function isTransientStoreError(error, seen = new Set()) {
   if (!error || typeof error !== 'object' || seen.has(error)) return false;

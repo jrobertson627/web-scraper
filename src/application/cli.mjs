@@ -626,9 +626,13 @@ export async function runCli({
       crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
       stdout(JSON.stringify({ mode, ...result }));
       if (result.halt) {
-        const cause = result.halt.reason === 'challenge' ? 'a challenge response' : `a ${result.halt.reason} stop`;
-        stderr(`worker halted: ${cause} on ${result.halt.jobKey} awaits operator review; no request is made until every halting stop is reviewed. `
-          + 'Pause the service, then: npm run review -- list --state operator_stop (see OPERATIONS_RUNBOOK.md)');
+        if (result.halt.jobKey) {
+          const cause = result.halt.reason === 'challenge' ? 'a challenge response' : `a ${result.halt.reason} stop`;
+          stderr(`worker halted: ${cause} on ${result.halt.jobKey} awaits operator review; no request is made until every halting stop is reviewed. `
+            + 'Pause the service, then: npm run review -- list --state operator_stop (see OPERATIONS_RUNBOOK.md)');
+        } else {
+          stderr(`worker halted: ${result.halt.reason}: ${result.halt.detail ?? 'the run cannot continue'} (see OPERATIONS_RUNBOOK.md)`);
+        }
         return { exitCode: EXIT_CODES.haltedForReview, result };
       }
       return { exitCode: EXIT_CODES.success, result };

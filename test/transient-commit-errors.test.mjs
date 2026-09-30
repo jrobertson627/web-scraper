@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isTransientStoreError } from '../src/contracts/jobs.mjs';
+import { isSystemicStoreError, isTransientStoreError } from '../src/contracts/jobs.mjs';
 import { InMemoryPersistence } from '../src/persistence/index.mjs';
 import { createFixtureApplication } from '../src/application/composition-root.mjs';
 
@@ -24,10 +24,15 @@ function crawl(error, pageType = 'school_history') {
 }
 
 test('PostgreSQL serialization, deadlock, connection and shutdown errors are transient; structural errors are not', () => {
-  for (const code of ['40001', '40P01', '08000', '08003', '08006', '57P01', 'ECONNRESET']) assert.equal(isTransientStoreError(databaseError(code)), true, code);
+  // 57014 statement timeout, 53300 too many connections and 57P03 cannot connect now are transient too (#122).
+  for (const code of ['40001', '40P01', '08000', '08003', '08006', '57P01', '57014', '53300', '57P03', 'ECONNRESET']) assert.equal(isTransientStoreError(databaseError(code)), true, code);
   assert.equal(isTransientStoreError(new Error('Connection terminated unexpectedly')), true);
   assert.equal(isTransientStoreError(new Error('wrapped', { cause: databaseError('40P01') })), true);
-  for (const code of ['23505', '23514', '42P01', '57014', undefined]) assert.equal(isTransientStoreError(databaseError(code)), false, String(code));
+  for (const code of ['23505', '23514', '42P01', '53100', '53200', undefined]) assert.equal(isTransientStoreError(databaseError(code)), false, String(code));
+  // Out of disk (53100) or memory (53200) is systemic: waiting does not help.
+  for (const code of ['53100', '53200']) assert.equal(isSystemicStoreError(databaseError(code)), true, code);
+  assert.equal(isSystemicStoreError(new Error('wrapped', { cause: databaseError('53100') })), true);
+  for (const code of ['40001', '57014', '23505', undefined]) assert.equal(isSystemicStoreError(databaseError(code)), false, String(code));
   assert.equal(isTransientStoreError(new Error('school history has no stored school identity')), false);
 });
 
@@ -35,6 +40,8 @@ for (const [label, error] of [
   ['deadlock', databaseError('40P01', 'deadlock detected')],
   ['connection reset', databaseError('08006', 'connection failure during commit')],
   ['dropped socket', new Error('Connection terminated unexpectedly')],
+  ['statement timeout', databaseError('57014', 'canceling statement due to statement timeout')],
+  ['too many connections', databaseError('53300', 'sorry, too many clients already')],
 ]) {
   test(`a ${label} during commit leaves the job retryable and it completes on retry, not parse_failed`, async () => {
     const { app, persistence, advance } = crawl(error);
