@@ -299,7 +299,7 @@ export class IngestionOrchestrator {
         body = stored.body;
       }
       await this.persistence.transitionJob(job.key, 'fetched', job.lease, { sourceFetchId: result.sourceFetchId });
-      const snapshot = snapshotFor(job, body);
+      const snapshot = snapshotFor(job, body, { finalUrl: result.finalUrl });
       phase = 'parse';
       const { parsed, run } = parseSnapshot({
         parsers: this.parsers, job, snapshot, parserVersion: parserVersionFor(job, this.parserVersions),

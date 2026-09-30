@@ -75,7 +75,7 @@ async function reprocessJob({ job, persistence, rawStore, parsers, discovery, no
   if (!fetch) return { kind: 'skipped', reason: 'no stored snapshot' };
   const stored = await rawStore.read(fetch.checksum, fetch.objectPath);
   if (!stored.ok) return { kind: 'skipped', reason: `stored snapshot failed verification: ${stored.reason}` };
-  const snapshot = snapshotFor(job, stored.body);
+  const snapshot = snapshotFor(job, stored.body, { finalUrl: fetch.finalUrl });
   const { parsed, run } = parseSnapshot({
     parsers, job, snapshot, parserVersion: parserVersionFor(job, parserVersions), sourceFetchId: fetch.id, clock,
   });

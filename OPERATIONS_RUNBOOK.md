@@ -151,6 +151,10 @@ npm run review:personal -- show <job key | issue id>
 
 If the index job ends `parse_failed` with `the school index yields only N eligible schools; expected at least 300 (about 360)`, the season the crawl assumed (named in the message) is not the season the site's index lists. The usual cause is that Sports Reference added the next season before, or has not yet by, the calendar rollover on 1 November, so every active school's `To` differs by one. Nothing was queued, and nothing is wrong with the stored page. Do not lower the floor to get past it: set `CURRENT_SEASON_ENDING_YEAR` to the season the index lists (`2027` for 2026-27) on the worker, then reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`). Unset it again once the index and the calendar agree. `npm run reconcile` applies the same floor to a stored index and reports it under `eligible_school_count`. `MIN_ELIGIBLE_SCHOOLS` lowers the floor for a store that is not the real index, such as a local experiment; leave it unset for a real crawl.
 
+### A redirect to a different page
+
+A page that stops with code `redirected_identity` was redirected to a page that is not the one queued, for example after the site renamed a school's address. `npm run review -- show <job key>` names both URLs, and the body that was served is stored. Nothing was parsed under the old identity. The page linking to it (the school index, or a history page) publishes the new address, so the new page is queued when that parent is next read. To give up on the old address: `release-permanent <job key> --operator <you> --reason "renamed to ..."`. `release-retry` fetches it again and stops again while the redirect stands.
+
 ### A conflicting record
 
 An open `conflicting_page_reprocess` issue means a stored page's content changed from the accepted record (the source corrected something). `show <issue id>` lists the fields that differ. Then either:

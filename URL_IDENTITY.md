@@ -26,6 +26,8 @@ A school's identity is its men's history path. Opponent and scorebox links point
 
 Discovery follows only links the page publishes. It never builds a URL from a year range, a date or a display name. With a source adapter (worker mode), each child link must classify as the expected page type; a mismatched or refused link becomes a `rejected_url` observation and no job.
 
+**Redirects (#124).** The Fetcher follows up to `maxRedirects` redirects, checking each target against the allowlist. The URL a fetch ends at is recorded on the source fetch (`source_fetches.final_url`, when it differs from the queued URL), and the page's relative links are resolved against it, since that is where the body was served from. If the final URL canonicalizes to a **different page** than the job names (a school renamed, an unrelated page), the body is kept with both URLs on record, but the page is not parsed under the old identity: the job stops as `operator_stop` with code `redirected_identity`, and its reason names both URLs. This is a page-level stop; it does not halt the run. A redirect that ends at the same canonical page (query order, for example) is parsed normally.
+
 1. School index: every row is observed with its eligibility; a history job is queued only for schools whose `To` is the current season's ending year.
 2. School history: linked seasons in the target window (the five ending years up to the current season, 2022-2026 for the 2025-26 season) are queued. A target season the page does not link is recorded as unavailable coverage (`not_linked`, or `link_rejected` when its link was refused), not as a failure.
 3. Season: the published game-log link is queued; a season without one produces a warning.

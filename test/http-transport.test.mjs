@@ -69,39 +69,52 @@ test('real transport enforces HTTPS, public DNS, manual redirects, and per-hop o
     if (request.url === '/start') { response.writeHead(302, { location: `https://other.test:${origin.port}/final` }); response.end(); }
     else if (request.url === '/off-host') { response.writeHead(302, { location: 'https://blocked.test/secret' }); response.end(); }
     else if (request.url === '/cycle') { response.writeHead(302, { location: '/cycle' }); response.end(); }
+    else if (request.url === '/same?b=1&a=2') { response.writeHead(302, { location: '/same?a=2&b=1' }); response.end(); }
     else { response.writeHead(200); response.end('hello'); }
   });
   try {
     const run = setup(origin, { path: '/start' });
     const job = run.claim();
     const result = await run.fetcher.fetch(job, job.lease);
-    assert.equal(result.kind, 'fetched');
-    assert.equal(run.rawStore.get(result.checksum).body.toString(), 'hello');
+    // The redirect ends at a different page (#124): the body is kept, with both URLs on record, but not parsed as this page.
+    assert.deepEqual([result.kind, result.code], ['operator_stop', 'redirected_identity']);
+    assert.match(result.reason, new RegExp(`redirected from https://scraper\.test:${origin.port}/start to https://other\.test:${origin.port}/final, a different page`));
+    const kept = run.persistence.lastSuccessfulFetch(job.key);
+    assert.equal(kept.finalUrl, `https://other.test:${origin.port}/final`);
+    assert.equal(run.rawStore.get(kept.checksum).body.toString(), 'hello');
     assert.deepEqual(origin.requests.map((item) => item.host), [`scraper.test:${origin.port}`, `other.test:${origin.port}`]);
     assert.equal(origin.requests.every((item) => item.method === 'GET'), true);
     assert.deepEqual(run.persistence.requestHistory.map((item) => item.host), [`scraper.test:${origin.port}`, `other.test:${origin.port}`]);
 
+    // A redirect to the same canonical page (query order) is parsed, with the final URL recorded.
+    const same = setup(origin, { path: '/same?b=1&a=2' });
+    const sameJob = same.claim();
+    const sameResult = await same.fetcher.fetch(sameJob, sameJob.lease);
+    assert.deepEqual([sameResult.kind, sameResult.finalUrl], ['fetched', `https://scraper.test:${origin.port}/same?a=2&b=1`]);
+    assert.equal(same.persistence.lastSuccessfulFetch(sameJob.key).finalUrl, sameResult.finalUrl);
+    assert.equal(origin.requests.length, 4);
+
     const offHost = setup(origin, { path: '/off-host' });
     const offHostJob = offHost.claim();
     assert.equal((await offHost.fetcher.fetch(offHostJob, offHostJob.lease)).kind, 'operator_stop');
-    assert.equal(origin.requests.length, 3);
+    assert.equal(origin.requests.length, 5);
     const cycle = setup(origin, { path: '/cycle', policy: { maxRedirects: 1 } });
     const cycleJob = cycle.claim();
     assert.equal((await cycle.fetcher.fetch(cycleJob, cycleJob.lease)).kind, 'operator_stop');
-    assert.equal(origin.requests.length, 5);
+    assert.equal(origin.requests.length, 7);
 
     const denied = setup(origin, { transport: new HttpTransport({ resolve: async () => [{ address: '127.0.0.1', family: 4 }], ca }) });
     const deniedJob = denied.claim();
     const deniedResult = await denied.fetcher.fetch(deniedJob, deniedJob.lease);
     assert.equal(deniedResult.kind, 'operator_stop');
     assert.equal(deniedResult.code, 'dns_rejected');
-    assert.equal(origin.requests.length, 5);
+    assert.equal(origin.requests.length, 7);
     const mixed = setup(origin, { transport: new HttpTransport({
       resolve: async () => [{ address: '8.8.8.8', family: 4 }, { address: '127.0.0.1', family: 4 }], ca,
     }) });
     const mixedJob = mixed.claim();
     assert.equal((await mixed.fetcher.fetch(mixedJob, mixedJob.lease)).code, 'dns_rejected');
-    assert.equal(origin.requests.length, 5);
+    assert.equal(origin.requests.length, 7);
     await assert.rejects(
       new HttpTransport().request({ method: 'GET', url: 'http://scraper.test/', timeoutMs: 1_000, maxResponseBytes: 1024 }),
       { code: 'invalid_request' },

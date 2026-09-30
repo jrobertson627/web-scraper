@@ -6,14 +6,19 @@ import { createSourceUrl } from '../contracts/source.mjs';
 // (orchestrator.mjs) and offline reprocessing (reprocess.mjs). None of them
 // touches transport or persistence.
 
-export function snapshotFor(job, body) {
+// finalUrl is where the fetch ended after redirects (#124), when that is not the
+// queued URL. The page's own identity stays the job's, but its relative links
+// are resolved against where the body was actually served from.
+export function snapshotFor(job, body, { finalUrl } = {}) {
+  const baseUrl = finalUrl ?? job.sourceUrl.absoluteUrl;
   return createSnapshot({
     jobKey: job.key,
     parentKey: job.parentKey,
     schoolSourcePath: job.schoolSourcePath,
     sourceUrl: job.sourceUrl,
+    baseUrl,
     body,
-    sourceUrlFrom: (target, baseUrl = job.sourceUrl.absoluteUrl) => createSourceUrl(job.sourceUrl.providerId, target, baseUrl),
+    sourceUrlFrom: (target, base = baseUrl) => createSourceUrl(job.sourceUrl.providerId, target, base),
   });
 }
 
