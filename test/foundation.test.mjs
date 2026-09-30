@@ -11,7 +11,7 @@ import { FixtureTransport, Fetcher } from '../src/fetcher/index.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
 
 const validPolicy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'test (+ops@example.com)' };
-const validScope = { eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+const validScope = { eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
 
 function makeJob(providerId = 'p', absoluteUrl = 'https://allowed.example/page') {
   const sourceUrl = createSourceUrl(providerId, absoluteUrl);

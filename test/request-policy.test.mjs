@@ -6,7 +6,7 @@ import { Fetcher, FixtureTransport } from '../src/fetcher/index.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
 
 const policy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' };
-const scope = { eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+const scope = { eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
 const config = { mode: 'local', providerId: 'provider', allowedHosts: ['allowed.example'], rawStore: 'memory', publication: 'private', policy, ...scope };
 
 function fixture({ response, policyOverrides = {}, sourceUrl: source = createSourceUrl('provider', 'https://allowed.example/page') } = {}) {

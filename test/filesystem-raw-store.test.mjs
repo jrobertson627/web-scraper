@@ -13,7 +13,7 @@ import { validateConfiguration } from '../src/config/configuration.mjs';
 import { IngestionOrchestrator } from '../src/application/orchestrator.mjs';
 
 const policy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' };
-const scope = { eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+const scope = { eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
 
 async function withRawDirectory(callback) {
   const root = mkdtempSync(join(tmpdir(), 'web-scraper-m3-'));
