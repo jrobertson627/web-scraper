@@ -6,6 +6,7 @@ import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
 import { assertBoundaryPort, createJob } from '../contracts/boundaries.mjs';
 import { Fetcher } from '../fetcher/public.mjs';
 import { FixtureTransport } from '../fetcher/index.mjs';
+import { RobotsGuard } from '../fetcher/robots.mjs';
 import { HttpTransport } from '../fetcher/http-transport.mjs';
 import { Discovery } from '../discovery/public.mjs';
 import { ParserRegistry } from '../parsers/public.mjs';
@@ -305,7 +306,9 @@ export async function createWorkerApplication({
   await assertRawStoreMatchesDatabase({ persistence, rawStore: store, claim: true });
 
   const discovery = new Discovery({ providerId, allowedHosts: config.allowedHosts, targetEndingYears: config.targetEndingYears, seasonEndingYear: config.currentSeasonEndingYear, sourceAdapter: adapter, scope: config.crawlScope, minEligibleSchools: config.minEligibleSchools });
-  const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts, events });
+  // The provider's robots.txt is rechecked while the crawl runs (#131), when its adapter can say what it does not honour.
+  const robots = typeof adapter.robotsProblems === 'function' ? new RobotsGuard({ evaluate: (text) => adapter.robotsProblems(text) }) : undefined;
+  const fetcher = new Fetcher({ transport, rawStore: store, persistence, clock, sleep, policy: config.policy, allowedHosts: config.allowedHosts, events, robots });
   // Only the data contract's retained fields are stored (#89).
   const normalizer = new Normalizer({ retainedFields: config.dataContract.retainedFields });
   const indexPath = adapter.canonicalize(indexUrl);

@@ -73,6 +73,10 @@ test('worker assembly wires the Sports Reference adapter, real time, and the sch
   assert.equal(app.orchestrator.fetcher.transport, parts.transport);
   assert.equal(app.orchestrator.fetcher.sleep, realSleep);
   assert.deepEqual([...app.orchestrator.fetcher.allowedHosts], ['www.sports-reference.com']);
+  // robots.txt is rechecked while the crawl runs (#131).
+  assert.equal(app.orchestrator.fetcher.robots.constructor.name, 'RobotsGuard');
+  assert.deepEqual(app.orchestrator.fetcher.robots.evaluate('User-agent: *\nDisallow: /cbb/req/\n'), []);
+  assert.equal(app.orchestrator.fetcher.robots.intervalMs, 24 * 60 * 60 * 1000);
   assert.deepEqual(app.orchestrator.normalizer.retainedFields, dataContract.retainedFields, 'only the data contract retained fields are stored');
 });
 

@@ -388,7 +388,13 @@ test('real PostgreSQL persistence and process restart', async () => {
     // index lists no eligible school, so the run makes exactly one request.
     class LocalHttpTransport extends HttpTransport {
       calls = [];
-      async request({ url }) { this.calls.push(url); return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') }; }
+      robots = [];
+      async request({ url }) {
+        // The worker rechecks the provider's robots.txt before its first request (#131).
+        if (url.endsWith('/robots.txt')) { this.robots.push(url); return { status: 200, headers: {}, body: Buffer.from('User-agent: *\nDisallow: /cbb/req/\n') }; }
+        this.calls.push(url);
+        return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') };
+      }
     }
     const indexParser = { pageType: () => 'school_index', version: () => '1', parse: () => createParseResult({ kind: 'valid',
       document: schoolIndexDocument([{ name: 'Former School', path: '/cbb/schools/former/men/', historyUrl: 'https://www.sports-reference.com/cbb/schools/former/men/', to: 2020 }]) }) };
@@ -409,6 +415,7 @@ test('real PostgreSQL persistence and process restart', async () => {
     });
     const result = await worker.runWorkerOnce('assembly-worker');
     assert.deepEqual(transport.calls, ['https://www.sports-reference.com/cbb/schools/']);
+    assert.equal(transport.robots.length, 1, 'robots.txt was checked once');
     assert.equal(result.processed, 1);
     // runOnce reports job counts by state, not the jobs themselves.
     assert.deepEqual(result.counts, { parsed: 1 });
@@ -427,7 +434,13 @@ test('worker mode runs the production worker end to end on PostgreSQL with the c
   await reset();
   class LocalHttpTransport extends HttpTransport {
     calls = [];
-    async request({ url }) { this.calls.push(url); return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') }; }
+    robots = [];
+    async request({ url }) {
+      // The worker rechecks the provider's robots.txt before its first request (#131).
+      if (url.endsWith('/robots.txt')) { this.robots.push(url); return { status: 200, headers: {}, body: Buffer.from('User-agent: *\nDisallow: /cbb/req/\n') }; }
+      this.calls.push(url);
+      return { status: 200, headers: {}, body: Buffer.from('<html>school index</html>') };
+    }
   }
   const indexParser = { pageType: () => 'school_index', version: () => '1', parse: () => createParseResult({ kind: 'valid',
     document: schoolIndexDocument([{ name: 'Former School', path: '/cbb/schools/former/men/', historyUrl: 'https://www.sports-reference.com/cbb/schools/former/men/', to: 2020 }]) }) };
@@ -456,6 +469,7 @@ test('worker mode runs the production worker end to end on PostgreSQL with the c
   });
   assert.equal(result.exitCode, EXIT_CODES.success);
   assert.deepEqual(transport.calls, ['https://www.sports-reference.com/cbb/schools/']);
+  assert.deepEqual(transport.robots, ['https://www.sports-reference.com/robots.txt'], 'robots.txt was checked once, before the index');
   assert.equal(worker.app.persistence.requestDeadlineMs, 30_000 + 10_000, 'policy requestTimeoutMs plus the orphan grace');
   assert.deepEqual(JSON.parse(output.at(-1)).counts, { parsed: 1 });
   const jobs = await pool.query('SELECT page_type, state FROM crawl_jobs');
