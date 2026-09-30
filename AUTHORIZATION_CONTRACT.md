@@ -25,3 +25,11 @@ Sports Reference's [Terms of Use, section 5](https://www.sports-reference.com/te
 - Keep the read surface bound to local/private access for one operator. Do not publish the API, UI, database, raw snapshots, or exports under this contract.
 
 M7 API projections and M9 UI work should use this section for attribution and source-link behavior. Public redistribution requires a separate scope decision and qualifying authorization/data contract.
+
+## The tracker's use of the data (#119)
+
+The fail-closed publication rules above (the `publish` use, `publicationStatus`, and the API gate) apply to this repository's own API. march-madness-tracker does not use that API: it reads the database directly (`DEPLOYMENT.md`), so nothing in this repository can stop Sports Reference data being served from it. The decision, recorded here so it is a decision and not an accident:
+
+- **The tracker's display of the data is private use.** It shows Sports Reference data only to its operator, behind the operator's own authentication, which is consistent with the personal-use attestation (`redistribution: private`). It is not publication. If that ever changes (a public page, a second viewer), that is publication: it needs the `publish` use, a public data contract and the fail-closed gate, and this section must be revisited first.
+- **What the tracker may read is limited by construction.** Its database role reads only the versioned `tracker_v<n>` views (`TRACKER_INTERFACE.md`), which expose the fields the data contract retains, keyed by the provider's own paths, with no fetches, raw HTML, provenance, authorization records or crawl internals. `npm run grant:tracker` gives it nothing in `public`.
+- **Attribution and source links** still apply to whatever the tracker shows (the convention above): `schools.source_url` and `games.source_url` carry the source link.
