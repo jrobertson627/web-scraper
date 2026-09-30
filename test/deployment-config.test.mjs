@@ -8,6 +8,10 @@ test('the Render blueprint commits no secret values and cannot create a database
   for (const key of ['PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'USER_AGENT']) {
     assert.match(blueprint, new RegExp(`- key: ${key}\\n\\s+sync: false`), `${key} is entered in the dashboard`);
   }
+  // The first deploy starts the worker at once, so it must not start the full backfill by default (#78).
+  for (const key of ['CRAWL_SAMPLE', 'OPERATOR_IDS']) {
+    assert.match(blueprint, new RegExp(`- key: ${key}\\n\\s+sync: false`), `${key} is entered in the dashboard`);
+  }
   assert.doesNotMatch(blueprint, /^databases:/m);
   assert.doesNotMatch(blueprint, /fromDatabase|connectionString|postgres(ql)?:\/\//);
   assert.doesNotMatch(blueprint, /type: (web|pserv)/, 'the unauthenticated read API is not deployed');
