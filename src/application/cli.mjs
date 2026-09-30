@@ -16,6 +16,7 @@ import { persistenceSettings } from '../config/persistence.mjs';
 import { MIN_ELIGIBLE_SCHOOLS, PAGE_TYPES } from '../contracts/source.mjs';
 import { ELIGIBILITY_RULE } from '../contracts/season.mjs';
 import { REPROCESS_STATES } from '../contracts/jobs.mjs';
+import { exitOrIdle } from './idle.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { FileRawStore } from '../persistence/index.mjs';
 import { RawStoreMismatchError, assertRawStoreMatchesDatabase } from '../persistence/raw-store-identity.mjs';
@@ -660,8 +661,10 @@ export async function runCli({
 
 async function main() {
   try {
+    const mode = process.argv[2] ?? 'local';
     const result = await runCli();
-    process.exitCode = result.exitCode;
+    // A Render worker that exits is restarted; WORKER_IDLE_ON_EXIT keeps it up (#126).
+    process.exitCode = await exitOrIdle({ mode, exitCode: result.exitCode });
   } catch (error) {
     console.error(`runtime startup failed: ${safeMessage(error)}`);
     process.exitCode = EXIT_CODES.runtimeFailure;

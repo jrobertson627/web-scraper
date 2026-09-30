@@ -71,6 +71,7 @@ A scope can only widen. A worker started with a narrower scope than the store ho
 ## Pause, stop and resume
 
 - **Pause:** suspend the Render service, or press Stop on the operator page. The process finishes the page it is on: a request already sent completes and is saved; one not yet sent is skipped and retried later. Then it exits. Nothing else is needed, and no job is left half-done.
+- **A finished or halted worker idles (#126).** On Render the worker does not exit when there is nothing left to do or when it halts; it stays up and logs `worker.idle` (state `finished`, `halted`, `configuration_rejected` or `not_ready`), so Render does not restart it in a loop. After the halt is reviewed or the configuration fixed, restart or redeploy the service to resume.
 - **Resume:** resume the service, or press Start or resume. The worker picks up where it stopped. Any claim the old process still held expires after 30 seconds and is retried; a request that a crashed process left open is released automatically after its deadline (`JOB_LIFECYCLE.md`). Pages already parsed are never fetched again.
 - **After a crash or a deploy:** the same as a resume. A page whose claim is lost three times (its worker keeps disappearing) is marked `permanently_failed`, so a crash loop cannot repeat forever.
 - **A multi-day backfill** is just a sequence of runs: stop and resume as often as needed, and each resume continues from the stored state.
