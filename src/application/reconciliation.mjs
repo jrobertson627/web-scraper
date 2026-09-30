@@ -1,7 +1,7 @@
 import { assertBoundaryPort } from '../contracts/boundaries.mjs';
 import { CORE_STAT_FIELDS } from '../contracts/parsed-documents.mjs';
 import { canonicalizeSourceUrl, createSourceUrl, serializeCanonicalPath } from '../contracts/source.mjs';
-import { LEGACY_SEASON_ENDING_YEAR } from '../contracts/season.mjs';
+import { LEGACY_SEASON_ENDING_YEAR, targetEndingYearsFor } from '../contracts/season.mjs';
 
 const MINUTES_TOLERANCE = 1;
 const SOURCE_VALUE_STATES = Object.freeze(['blank', 'unavailable', 'null', 'present']);
@@ -112,16 +112,24 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
   const unavailable = new Set((await reads.coverageGaps()).map((gap) => `${gap.schoolSourcePath}:${gap.endingYear}`));
   const seasonRecords = [];
   const coverageRecords = [];
+  // The years a history is expected to have discovered: the window of the season
+  // the index was read under. A full scope also holds the years crawled before the
+  // season rolled over (#154), which an older history has discovered and a school
+  // new since then has not, so those are allowed but not required.
+  const indexSeasons = [...schoolObservations.values()].map((observation) => observation.seasonEndingYear).filter(Number.isInteger);
+  const windowYears = scope.kind === 'sample' ? scopeYears
+    : targetEndingYearsFor(indexSeasons.length ? Math.max(...indexSeasons) : LEGACY_SEASON_ENDING_YEAR).filter((year) => scopeYears.includes(year));
   for (const batch of batches(parsedJobs('school_history'), batchSize)) {
     for (const page of (await pagesFor(batch.map((job) => job.key))).values()) {
       const linked = (page.data.seasons ?? []).filter((season) => season.url && scopeYears.includes(season.endingYear));
+      const required = linked.filter((season) => windowYears.includes(season.endingYear));
       const seasons = childrenOf(page.jobKey, 'season');
       const parsed = seasons.filter((child) => child.state === 'parsed');
-      if (linked.length !== seasons.length || seasons.length !== parsed.length) {
-        seasonRecords.push({ key: page.jobKey, linkedRows: linked.length, discovered: seasons.length, parsed: parsed.length });
+      if (seasons.length < required.length || seasons.length > linked.length || seasons.length !== parsed.length) {
+        seasonRecords.push({ key: page.jobKey, linkedRows: required.length, discovered: seasons.length, parsed: parsed.length });
       }
       const schoolSourcePath = jobByKey.get(page.jobKey)?.schoolSourcePath;
-      for (const year of scopeYears) {
+      for (const year of windowYears) {
         const expectedMissing = !linked.some((season) => season.endingYear === year);
         const recordedMissing = unavailable.has(`${schoolSourcePath}:${year}`);
         if (expectedMissing !== recordedMissing) coverageRecords.push({ key: page.jobKey, endingYear: year, expectedMissing, recordedMissing });

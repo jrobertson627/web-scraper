@@ -81,8 +81,16 @@ export function describeScope(scope) {
 
 // The persistence adapters' rule for recording a scope: a store keeps the
 // scopes it was crawled under, and a new one must cover the latest.
+//
+// A full scope only gains years (#154): when the season rolls over, the target
+// window moves on (2023-2027 after 2022-2026) but the seasons already crawled are
+// still in the store, so the recorded scope is the years of both. Reconciliation
+// checks what was crawled against it.
 export function nextCrawlScope(previous, scope) {
-  const next = createCrawlScope(scope);
+  let next = createCrawlScope(scope);
+  if (previous?.kind === 'full' && next.kind === 'full') {
+    next = fullCrawlScope([...new Set([...previous.endingYears, ...next.endingYears])].sort((a, b) => a - b));
+  }
   if (previous && !scopeCovers(next, previous)) {
     throw new Error(`crawl scope refused: this store was crawled under ${describeScope(previous)}, which ${describeScope(next)} does not cover. A scope may only widen.`);
   }

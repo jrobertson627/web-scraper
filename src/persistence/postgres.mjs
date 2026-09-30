@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, HOST_BUSY_WAIT_MS, ORPHANED_REQUEST_REASON,
-  REPROCESS_STATES, REVIEW_JOB_STATES, assertTransition, createLeaseToken, createOperatorDisposition, createReviewDisposition, positiveInteger,
+  REPROCESS_STATES, REVIEW_JOB_STATES, assertTransition, createLeaseToken, createOperatorDisposition, createReviewDisposition, positiveInteger, REFRESH_PAGE_TYPES,
 } from '../contracts/jobs.mjs';
 import {
   createJob, createPageRequest, createQueryModels, createReadPage, decodePageCursor, deepFreeze,
@@ -86,6 +86,7 @@ function mapJob(row, events = []) {
     lastError: row.last_error,
     createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
     claim: lease ? { owner: row.claim_owner, expiresAt: iso(row.claim_expires_at), lease } : null,
+    ...(row.refresh_requested_at ? { refreshRequestedAt: iso(row.refresh_requested_at) } : {}),
     history,
     failures: history.filter((event) => FAILURE_STATES.has(event.to)).map((event) => ({
       state: event.to, at: event.at, attempts: event.attempts,
@@ -513,8 +514,11 @@ export class PostgresPersistence {
   async commitPageAndTransition(page, provenance, lease) {
     return this.transaction(async (client) => {
       const job = await this.leasedJob(client, page.jobKey, lease);
-      const result = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId));
+      // A page whose refresh an operator asked for replaces the accepted record
+      // instead of being held as a conflict, and the request is met once it is (#154).
+      const result = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId), { accept: Boolean(job.refresh_requested_at) });
       await this.transition(client, job, 'parsed');
+      if (job.refresh_requested_at) await client.query('UPDATE crawl_jobs SET refresh_requested_at = NULL WHERE id = $1', [job.id]);
       return result;
     });
   }
@@ -555,9 +559,12 @@ export class PostgresPersistence {
       const parseRunId = portId('parse', run.rows[0].id);
       if (!page) return { parseRunId, committed: false };
       if (page.jobKey !== jobKey || provenance?.sourceFetchId !== parseRun.sourceFetchId) throw new Error('reprocessed page does not match its parse run');
-      const written = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId));
+      const written = await writeNormalizedPage(client, job, page, provenance, sqlId('fetch', provenance.sourceFetchId), { accept: Boolean(job.refresh_requested_at) });
       const transitioned = job.state === 'parse_failed' && !written.conflict;
-      if (transitioned) await this.transition(client, job, 'parsed', { reprocessed: true, parserVersion: parseRun.parserVersion });
+      if (transitioned) {
+        await this.transition(client, job, 'parsed', { reprocessed: true, parserVersion: parseRun.parserVersion });
+        await client.query('UPDATE crawl_jobs SET refresh_requested_at = NULL WHERE id = $1', [job.id]);
+      }
       return { parseRunId, committed: true, ...written, transitioned };
     });
   }
@@ -792,7 +799,36 @@ export class PostgresPersistence {
     });
   }
 
+  // Puts parsed school index and history pages back in the queue for their
+  // season rollover refresh (#154), all or none, in one transaction. Same
+  // contract as InMemoryPersistence#requestRefresh.
+  async requestRefresh({ keys, operatorId, reason, at = new Date() }) {
+    const validated = createOperatorDisposition('refresh', operatorId, reason, new Date(at));
+    if (!this.authorizeOperator(validated.operatorId, validated)) throw new Error(`operator ${validated.operatorId} is not authorized to review operator-stop work`);
+    const unique = [...new Set(keys)];
+    return this.transaction(async (client) => {
+      const rows = [];
+      for (const key of unique) {
+        const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(key));
+        const job = found.rows[0];
+        if (!job || job.state !== 'parsed' || !REFRESH_PAGE_TYPES.includes(job.page_type)) {
+          throw new Error(`refresh needs a parsed ${REFRESH_PAGE_TYPES.join(' or ')} job. ${key} is ${job ? `${job.page_type} in state ${job.state}` : 'missing'}`);
+        }
+        rows.push(job);
+      }
+      for (const job of rows) {
+        await client.query(`INSERT INTO operator_dispositions (job_id,disposition,operator_id,reason,recorded_at)
+          VALUES ($1,'refresh',$2,$3,$4)`, [job.id, validated.operatorId, validated.reason, validated.at]);
+        await client.query(`UPDATE crawl_jobs SET failure_attempts = 0, rate_limit_attempts = 0, claim_recoveries = 0,
+          refresh_requested_at = $2 WHERE id = $1`, [job.id, validated.at]);
+        await this.transition(client, job, 'retry_wait', { nextAllowedAt: validated.at, lastError: `refresh requested: ${validated.reason}`, operatorId: validated.operatorId });
+      }
+      return { requested: rows.length };
+    });
+  }
+
   async recordOperatorDisposition(key, disposition) {
+    if (disposition.kind === 'refresh') throw new Error('a refresh is recorded with requestRefresh, for a set of parsed pages');
     const validated = createOperatorDisposition(disposition.kind, disposition.operatorId, disposition.reason,
       disposition.at ? new Date(disposition.at) : new Date());
     if (!this.authorizeOperator(validated.operatorId, validated)) throw new Error('operator is not authorized to review operator-stop work');

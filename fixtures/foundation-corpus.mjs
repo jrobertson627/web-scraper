@@ -89,3 +89,27 @@ export function foundationCorpus({ faults = false } = {}) {
     ...(faults ? [entry('/box/shift.html', { layoutShift: true })] : []),
   ];
 }
+
+// The corpus as the site would serve it after the season rolled over (#154): the
+// index lists the active schools under To 2027, and school A's history links 2027,
+// whose season page and game log now exist. School B's history has no 2027 yet.
+export function rolledFoundationCorpus() {
+  const upcoming = { location: 'home', opponent: { name: 'Unlinked Opponent', schoolPath: null }, status: 'scheduled', date: '2026-11-20' };
+  const replaced = new Map([
+    entry('/cbb/schools/', schoolIndexDocument([
+      { path: '/school/a', name: 'Fixture A', to: 2027, historyUrl: '/school/a/men/' },
+      { path: '/school/b', name: 'Fixture B', to: 2027, historyUrl: '/school/b/men/' },
+      { path: '/school/c', name: 'Fixture C', to: 2025, historyUrl: '/school/c/men/' },
+    ])),
+    entry('/school/a/men/', schoolHistoryDocument([
+      { endingYear: 2027, url: '/school/a/men/2027.html' },
+      { endingYear: 2026, url: '/school/a/men/2026.html' },
+      { endingYear: 2024, url: '/school/a/men/2024.html' },
+    ])),
+    entry('/school/a/men/2027.html', seasonDocument({ school: 'Fixture A', endingYear: 2027, gameLogUrl: '/school/a/men/2027-gamelogs.html', games: [upcoming] })),
+    entry('/school/a/men/2027-gamelogs.html', gameLogDocument(2027, [upcoming])),
+  ].map((item) => [item.url, item]));
+  const corpus = foundationCorpus().map((item) => replaced.get(item.url) ?? item);
+  for (const [url, item] of replaced) if (!corpus.some((existing) => existing.url === url)) corpus.push(item);
+  return corpus;
+}

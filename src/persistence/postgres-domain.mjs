@@ -117,6 +117,9 @@ async function writeSchoolHistory(client, job, page, provenance) {
   if (!id) throw new Error('school history has no stored school identity');
   for (const season of page.data.seasons ?? []) {
     if (!season.url || !Number.isInteger(season.endingYear)) continue;
+    // A year the history now links is no longer unavailable (#154).
+    await client.query('DELETE FROM unavailable_coverage WHERE provider_id = $1 AND school_source_path = $2 AND ending_year = $3',
+      [job.provider_id, unprefix(job.provider_id, job.school_source_path), season.endingYear]);
     await client.query(`INSERT INTO school_seasons (school_id,ending_year,coverage_status,provenance)
       VALUES ($1,$2,'linked',$3::jsonb) ON CONFLICT (school_id,ending_year)
       DO UPDATE SET coverage_status = 'linked',provenance = EXCLUDED.provenance`,

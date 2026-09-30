@@ -12,7 +12,10 @@ const TRANSITIONS = new Map([
   ['fetched', new Set(['parsed', 'parse_failed', 'retry_wait', 'operator_stop', 'permanently_failed'])],
   ['retry_wait', new Set(['fetching', 'permanently_failed'])],
   ['operator_stop', new Set(['retry_wait', 'permanently_failed'])],
-  ['parsed', new Set()],
+  // Only an operator refresh (requestRefresh, #154) takes a parsed job back into
+  // the queue, when the season rolled over and its page has to be read again. It
+  // holds no lease, so no worker can take this edge.
+  ['parsed', new Set(['retry_wait'])],
   // Only offline reprocessing takes parse_failed -> parsed, when a fixed parser
   // reads the stored snapshot. It holds no lease; a worker never claims a
   // parse_failed job, and transitionJob needs a lease, so no worker can.
@@ -147,12 +150,19 @@ export function createReviewDisposition(kind, operatorId, reason, at = new Date(
 }
 
 // hold, release_retry and release_permanent act on an operator_stop job;
-// requeue_failed acts on a permanently_failed one (#114).
-export const OPERATOR_DISPOSITION_KINDS = Object.freeze(['hold', 'release_retry', 'release_permanent', 'requeue_failed']);
+// requeue_failed acts on a permanently_failed one (#114); refresh acts on a
+// parsed school index or school history (#154) and is only recorded through
+// requestRefresh, which does the whole set at once.
+export const OPERATOR_DISPOSITION_KINDS = Object.freeze(['hold', 'release_retry', 'release_permanent', 'requeue_failed', 'refresh']);
+
+// The pages a season rollover makes stale: the school index says which schools
+// are in the season, and each history says which seasons a school has. Season,
+// game log and box score pages of finished seasons do not change.
+export const REFRESH_PAGE_TYPES = Object.freeze(['school_index', 'school_history']);
 
 export function createOperatorDisposition(kind, operatorId, reason, at) {
   if (!OPERATOR_DISPOSITION_KINDS.includes(kind)) {
-    throw new Error(`invalid operator disposition: ${kind}. Expected hold, release_retry, release_permanent, or requeue_failed. Example: release_retry`);
+    throw new Error(`invalid operator disposition: ${kind}. Expected hold, release_retry, release_permanent, requeue_failed, or refresh. Example: release_retry`);
   }
   if (!operatorId || !reason) {
     throw new Error('operator disposition requires operatorId and reason. Example: operatorId: ops-1, reason: reviewed');
