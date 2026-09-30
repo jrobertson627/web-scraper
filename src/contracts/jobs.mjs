@@ -17,7 +17,9 @@ const TRANSITIONS = new Map([
   // reads the stored snapshot. It holds no lease; a worker never claims a
   // parse_failed job, and transitionJob needs a lease, so no worker can.
   ['parse_failed', new Set(['parsed'])],
-  ['permanently_failed', new Set()],
+  // Only an operator disposition (requeue_failed, #114) moves a job out of
+  // permanently_failed. It holds no lease, so no worker can take this edge.
+  ['permanently_failed', new Set(['retry_wait'])],
 ]);
 
 // Settled states whose stored snapshot offline reprocessing may parse again.
@@ -51,6 +53,17 @@ const TRANSIENT_STORE_CODES = new Set(['40001', '40P01', '57P01', '57014', '5330
 // does not help until someone acts, so it is systemic, not a page failure: the
 // run halts (#114, #122).
 const SYSTEMIC_STORE_CODES = new Set(['53100', '53200']);
+
+// The raw store's disk is full or read-only (ENOSPC, EDQUOT, EROFS): every write
+// would fail, so the run halts instead of charging each page (#114).
+const SYSTEMIC_RAW_CODES = new Set(['ENOSPC', 'EDQUOT', 'EROFS']);
+
+export function isSystemicRawStoreError(error, seen = new Set()) {
+  if (!error || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  if (SYSTEMIC_RAW_CODES.has(typeof error.code === 'string' ? error.code : '')) return true;
+  return isSystemicRawStoreError(error.cause, seen) || (error.errors ?? []).some((inner) => isSystemicRawStoreError(inner, seen));
+}
 
 export function isSystemicStoreError(error, seen = new Set()) {
   if (!error || typeof error !== 'object' || seen.has(error)) return false;
@@ -114,6 +127,11 @@ export const DENY_ALL_OPERATORS = Object.freeze(() => false);
 // to parse.
 export const REVIEW_JOB_STATES = Object.freeze(['parse_failed', 'operator_stop']);
 
+// The states a review can be asked to list or act on: the ones above, plus
+// permanently_failed, which an operator may requeue (#114). It is not in the
+// default list, which would be pages nobody needs to look at one by one.
+export const REVIEWABLE_JOB_STATES = Object.freeze([...REVIEW_JOB_STATES, 'permanently_failed']);
+
 // A disposition of a reconciliation issue: accept its quarantined revision, or
 // dismiss it and keep the accepted record. Same shape as an operator-stop
 // disposition.
@@ -127,9 +145,13 @@ export function createReviewDisposition(kind, operatorId, reason, at = new Date(
   return Object.freeze({ kind, operatorId, reason, at: new Date(at).toISOString() });
 }
 
+// hold, release_retry and release_permanent act on an operator_stop job;
+// requeue_failed acts on a permanently_failed one (#114).
+export const OPERATOR_DISPOSITION_KINDS = Object.freeze(['hold', 'release_retry', 'release_permanent', 'requeue_failed']);
+
 export function createOperatorDisposition(kind, operatorId, reason, at) {
-  if (!['hold', 'release_retry', 'release_permanent'].includes(kind)) {
-    throw new Error(`invalid operator disposition: ${kind}. Expected hold, release_retry, or release_permanent. Example: release_retry`);
+  if (!OPERATOR_DISPOSITION_KINDS.includes(kind)) {
+    throw new Error(`invalid operator disposition: ${kind}. Expected hold, release_retry, release_permanent, or requeue_failed. Example: release_retry`);
   }
   if (!operatorId || !reason) {
     throw new Error('operator disposition requires operatorId and reason. Example: operatorId: ops-1, reason: reviewed');

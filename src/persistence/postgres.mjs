@@ -222,6 +222,36 @@ export class PostgresPersistence {
   // no hold was recorded after their latest release (a job is only stopped
   // again after a release). Ordered by disposition ids, not by clocks. Same
   // contract as the in-memory adapter's.
+  // Halts of the whole run that no operator has released (#114): the raw disk is
+  // full, requests keep failing across pages, the database is out of storage. A
+  // restarted worker makes no request until they are released. Same contract as
+  // the in-memory adapter's.
+  async recordRunHalt({ reason, detail = null }) {
+    if (!reason) throw new Error('a run halt needs a reason');
+    const result = await this.pool.query('INSERT INTO run_halts (reason, detail) VALUES ($1, $2) RETURNING id', [reason, detail]);
+    return `halt-${result.rows[0].id}`;
+  }
+
+  async unreviewedRunHalts() {
+    const result = await this.pool.query('SELECT id, reason, detail, raised_at FROM run_halts WHERE released_at IS NULL ORDER BY id');
+    return result.rows.map((row) => deepFreeze({ jobKey: null, pageType: null, url: null, code: row.reason, detail: row.detail,
+      stoppedAt: iso(row.raised_at), haltId: `halt-${row.id}` }));
+  }
+
+  async releaseRunHalt(haltId, { operatorId, reason }) {
+    if (!operatorId || !reason?.trim()) throw new Error('releasing a halt requires operatorId and reason');
+    if (!this.authorizeOperator(operatorId, { kind: 'release_halt' })) throw new Error(`operator ${operatorId} is not authorized to review operator-stop work`);
+    const id = /^halt-([1-9]\d*)$/.exec(haltId ?? '')?.[1];
+    if (!id) throw new Error(`halt id ${haltId} is invalid. Expected an id from the review list. Example: halt-3`);
+    const released = await this.pool.query(`UPDATE run_halts SET released_at = clock_timestamp(), released_by = $2, release_reason = $3
+      WHERE id = $1 AND released_at IS NULL RETURNING id`, [id, operatorId, reason]);
+    if (!released.rowCount) {
+      const exists = await this.pool.query('SELECT 1 FROM run_halts WHERE id = $1', [id]);
+      throw new Error(exists.rowCount ? `halt ${haltId} is already released` : `halt ${haltId} does not exist`);
+    }
+    return Object.freeze({ haltId, releasedBy: operatorId, reason });
+  }
+
   async unreviewedChallenges() {
     const result = await this.pool.query(`SELECT j.provider_id || ':' || j.canonical_path || ':' || j.page_type AS job_key,
         j.page_type, j.source_url, e.details->>'code' AS code, e.transitioned_at
@@ -233,8 +263,8 @@ export class PostgresPersistence {
           AND h.id > COALESCE((SELECT max(r.id) FROM operator_dispositions r
             WHERE r.job_id = j.id AND r.disposition <> 'hold'), 0))
       ORDER BY e.transitioned_at, j.id`, [[...HALTING_STOP_CODES]]);
-    return result.rows.map((row) => deepFreeze({ jobKey: row.job_key, pageType: row.page_type, url: row.source_url,
-      code: row.code, stoppedAt: iso(row.transitioned_at) }));
+    return [...await this.unreviewedRunHalts(), ...result.rows.map((row) => deepFreeze({ jobKey: row.job_key, pageType: row.page_type, url: row.source_url,
+      code: row.code, stoppedAt: iso(row.transitioned_at) }))];
   }
 
   // Jobs holding an unexpired claim by the database clock: a worker is running
@@ -769,7 +799,8 @@ export class PostgresPersistence {
     return this.transaction(async (client) => {
       const found = await client.query(`SELECT * FROM crawl_jobs WHERE ${byKey(1)} FOR UPDATE`, jobKeyParts(key));
       const job = found.rows[0];
-      if (!job || job.state !== 'operator_stop') throw new Error('operator disposition requires operator_stop');
+      const needed = validated.kind === 'requeue_failed' ? 'permanently_failed' : 'operator_stop';
+      if (!job || job.state !== needed) throw new Error(`operator disposition ${validated.kind} requires ${needed}`);
       await client.query(`INSERT INTO operator_dispositions (job_id,disposition,operator_id,reason,recorded_at)
         VALUES ($1,$2,$3,$4,$5)`, [job.id, validated.kind, validated.operatorId, validated.reason, validated.at]);
       // A reviewed release gives the job a fresh 429 budget; the transport/5xx
@@ -781,6 +812,11 @@ export class PostgresPersistence {
       if (validated.kind === 'release_permanent') await this.transition(client, job, 'permanently_failed', {
         failureReason: validated.reason, operatorId: validated.operatorId,
       });
+      // Requeue gives the page a fresh budget of every kind (#114).
+      if (validated.kind === 'requeue_failed') {
+        await client.query('UPDATE crawl_jobs SET failure_attempts = 0, rate_limit_attempts = 0, claim_recoveries = 0 WHERE id = $1', [job.id]);
+        await this.transition(client, job, 'retry_wait', { nextAllowedAt: validated.at, lastError: validated.reason, operatorId: validated.operatorId });
+      }
       return validated;
     });
   }

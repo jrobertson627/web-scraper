@@ -278,3 +278,54 @@ test('a review job summary carries the code of its latest stop', async (t) => {
   assert.deepEqual(page.items.map((item) => [item.key, item.code]), [[claimed.key, 'rate_limit_cap']]);
   await reset(pool);
 });
+
+// #114: run halts and requeue.
+test('a run halt is recorded, blocks a start with the job stops, and needs an authorized release', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool, authorizeOperator: (id) => id === 'ops' });
+  assert.deepEqual(await persistence.unreviewedRunHalts(), []);
+  const id = await persistence.recordRunHalt({ reason: 'raw_disk_low', detail: 'the raw store has 5 bytes free' });
+  assert.equal(id, 'halt-1');
+  const halts = await persistence.unreviewedRunHalts();
+  assert.deepEqual(halts.map((halt) => [halt.haltId, halt.code, halt.detail, halt.jobKey]), [['halt-1', 'raw_disk_low', 'the raw store has 5 bytes free', null]]);
+  assert.deepEqual((await persistence.unreviewedChallenges()).map((entry) => entry.code), ['raw_disk_low'], 'it blocks a start like a challenge stop');
+  await assert.rejects(persistence.releaseRunHalt(id, { operatorId: 'intruder', reason: 'x' }), /not authorized/);
+  await assert.rejects(persistence.releaseRunHalt('halt-99', { operatorId: 'ops', reason: 'x' }), /does not exist/);
+  await assert.rejects(persistence.releaseRunHalt('bad', { operatorId: 'ops', reason: 'x' }), /halt id bad is invalid/);
+  await persistence.releaseRunHalt(id, { operatorId: 'ops', reason: 'freed space' });
+  await assert.rejects(persistence.releaseRunHalt(id, { operatorId: 'ops', reason: 'again' }), /already released/);
+  assert.deepEqual(await persistence.unreviewedChallenges(), []);
+  const [row] = (await pool.query('SELECT released_by, release_reason FROM run_halts')).rows;
+  assert.deepEqual(row, { released_by: 'ops', release_reason: 'freed space' });
+  await reset(pool);
+});
+
+test('a permanently_failed page is requeued with a fresh budget, recorded, and shows its failure code', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 30_000, authorizeOperator: (id) => id === 'ops' });
+  const source = job('/box/requeue.html');
+  await persistence.addJob(source);
+  const first = await persistence.claimNextJob(new Date(), 'worker');
+  await persistence.transitionJob(first.key, 'retry_wait', first.lease, { nextAllowedAt: new Date(Date.now() - 1_000).toISOString(), charge: 'failure' });
+  const second = await persistence.claimNextJob(new Date(), 'worker');
+  await persistence.transitionJob(second.key, 'permanently_failed', second.lease, { lastError: 'network error; retry limit reached', code: 'transient_network' });
+  const listed = await persistence.reviewJobs({ states: ['permanently_failed'] });
+  assert.deepEqual(listed.items.map((item) => [item.key, item.state, item.code]), [[source.key, 'permanently_failed', 'transient_network']]);
+  assert.deepEqual((await persistence.reviewJobs()).items, [], 'the default review list does not include it');
+  await assert.rejects(persistence.recordOperatorDisposition(source.key, { kind: 'release_retry', operatorId: 'ops', reason: 'x' }), /requires operator_stop/);
+  await assert.rejects(persistence.recordOperatorDisposition(source.key, { kind: 'requeue_failed', operatorId: 'intruder', reason: 'x' }), /not authorized/);
+
+  await persistence.recordOperatorDisposition(source.key, { kind: 'requeue_failed', operatorId: 'ops', reason: 'the outage is over' });
+  const [after] = (await pool.query('SELECT state, failure_attempts, rate_limit_attempts, claim_recoveries FROM crawl_jobs')).rows;
+  assert.deepEqual(after, { state: 'retry_wait', failure_attempts: 0, rate_limit_attempts: 0, claim_recoveries: 0 });
+  assert.deepEqual((await pool.query('SELECT disposition, operator_id, reason FROM operator_dispositions')).rows,
+    [{ disposition: 'requeue_failed', operator_id: 'ops', reason: 'the outage is over' }]);
+  await assert.rejects(persistence.recordOperatorDisposition(source.key, { kind: 'requeue_failed', operatorId: 'ops', reason: 'again' }), /requires permanently_failed/);
+  const claimed = await persistence.claimNextJob(new Date(), 'worker');
+  assert.equal(claimed.key, source.key, 'the requeued page is claimable again');
+  await reset(pool);
+});

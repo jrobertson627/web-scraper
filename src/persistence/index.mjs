@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync } from 'node:fs';
-import { link, lstat, mkdir, open, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readFile, readdir, statfs, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { platform } from 'node:os';
 import {
@@ -16,7 +16,7 @@ import {
 } from '../contracts/boundaries.mjs';
 import {
   DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, HOST_BUSY_WAIT_MS, ORPHANED_REQUEST_REASON,
-  REPROCESS_STATES, REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
+  REPROCESS_STATES, REVIEWABLE_JOB_STATES, REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { FULL_CRAWL_SCOPE, nextCrawlScope } from '../contracts/crawl-scope.mjs';
@@ -151,8 +151,8 @@ export async function inventoryRawObjects({ rawStore, fetches, observedAt }) {
 }
 
 export function assertReviewStates(states) {
-  if (!Array.isArray(states) || !states.length || states.some((state) => !REVIEW_JOB_STATES.includes(state))) {
-    throw new Error(`review states are invalid. Expected some of ${REVIEW_JOB_STATES.join(', ')}. Example: parse_failed`);
+  if (!Array.isArray(states) || !states.length || states.some((state) => !REVIEWABLE_JOB_STATES.includes(state))) {
+    throw new Error(`review states are invalid. Expected some of ${REVIEWABLE_JOB_STATES.join(', ')}. Example: parse_failed`);
   }
 }
 
@@ -269,6 +269,9 @@ export class MemoryRawStore {
   // Identifies this store, as the filesystem store's marker file does.
   storeId() { return this.#storeId; }
 
+  // The in-memory store cannot fill a disk.
+  freeBytes() { return Number.POSITIVE_INFINITY; }
+
   put(bytes) {
     const body = Buffer.from(bytes);
     const checksum = sha256(body);
@@ -339,6 +342,13 @@ export class FileRawStore {
     }
     if (!existing || !existing.equals(body)) throw new Error(`raw checksum collision or incomplete write: ${checksum}`);
     return Object.freeze({ ok: true, checksum, objectPath: rawObjectKey(checksum), size: body.length });
+  }
+
+  // The bytes available to write on the disk the store lives on (#114); the run
+  // halts before a request when this is below its minimum.
+  async freeBytes() {
+    const stats = await statfs(this.root);
+    return Number(stats.bavail) * Number(stats.bsize);
   }
 
   // Identifies this store: a UUID kept in a marker file at its root, created the
@@ -477,6 +487,7 @@ export class InMemoryPersistence {
     this.unavailableCoverage = new Map();
     this.reconciliationIssues = [];
     this.operatorDispositions = [];
+    this.runHalts = [];
     this.reconciliationDispositions = [];
     this.crawlScopes = [];
     this.nextIssueId = 1;
@@ -537,7 +548,7 @@ export class InMemoryPersistence {
   // latest stop. A release moves it out of operator_stop. Ordered by the job's
   // own history, not by clocks. Same contract as the PostgreSQL adapter's.
   unreviewedChallenges() {
-    const pending = [];
+    const pending = this.unreviewedRunHalts();
     for (const job of this.jobs.values()) {
       if (job.state !== 'operator_stop') continue;
       const stopIndex = job.history.findLastIndex((event) => event.to === 'operator_stop');
@@ -547,6 +558,31 @@ export class InMemoryPersistence {
         code: job.history[stopIndex].details.code, stoppedAt: job.history[stopIndex].at }));
     }
     return pending;
+  }
+
+  // Halts of the whole run that no operator has released (#114): the raw disk is
+  // full, requests keep failing across pages, the database is out of storage.
+  // Same contract as the PostgreSQL adapter's.
+  recordRunHalt({ reason, detail = null }) {
+    if (!reason) throw new Error('a run halt needs a reason');
+    const id = this.runHalts.length + 1;
+    this.runHalts.push({ id, reason, detail, raisedAt: this.clock().toISOString(), releasedAt: null, releasedBy: null, releaseReason: null });
+    return `halt-${id}`;
+  }
+
+  unreviewedRunHalts() {
+    return this.runHalts.filter((halt) => !halt.releasedAt).map((halt) => deepFreeze({
+      jobKey: null, pageType: null, url: null, code: halt.reason, detail: halt.detail, stoppedAt: halt.raisedAt, haltId: `halt-${halt.id}` }));
+  }
+
+  releaseRunHalt(haltId, { operatorId, reason }) {
+    if (!operatorId || !reason?.trim()) throw new Error('releasing a halt requires operatorId and reason');
+    const halt = this.runHalts.find((entry) => `halt-${entry.id}` === haltId);
+    if (!halt) throw new Error(`halt ${haltId} does not exist`);
+    if (halt.releasedAt) throw new Error(`halt ${haltId} is already released`);
+    if (!this.authorizeOperator(operatorId, { kind: 'release_halt' })) throw new Error(`operator ${operatorId} is not authorized to review operator-stop work`);
+    Object.assign(halt, { releasedAt: this.clock().toISOString(), releasedBy: operatorId, releaseReason: reason });
+    return Object.freeze({ haltId, releasedBy: operatorId, reason });
   }
 
   // Jobs holding an unexpired claim by this store's clock: a worker is running
@@ -1017,7 +1053,8 @@ export class InMemoryPersistence {
 
   recordOperatorDisposition(key, disposition) {
     const job = this.jobs.get(key);
-    if (!job || job.state !== 'operator_stop') throw new Error(`operator disposition requires operator_stop. Current state: ${job?.state ?? 'missing'}`);
+    const needed = disposition.kind === 'requeue_failed' ? 'permanently_failed' : 'operator_stop';
+    if (!job || job.state !== needed) throw new Error(`operator disposition ${disposition.kind} requires ${needed}. Current state: ${job?.state ?? 'missing'}`);
     const validated = createOperatorDisposition(
       disposition.kind,
       disposition.operatorId,
@@ -1034,6 +1071,13 @@ export class InMemoryPersistence {
     if (validated.kind === 'release_retry') job.rateLimitAttempts = 0;
     if (validated.kind === 'release_retry') this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString(), lastError: validated.reason });
     if (validated.kind === 'release_permanent') this.#applyTransition(job, 'permanently_failed', { failureReason: validated.reason });
+    // Requeue gives the page a fresh budget of every kind (#114).
+    if (validated.kind === 'requeue_failed') {
+      job.failureAttempts = 0;
+      job.rateLimitAttempts = 0;
+      job.claimRecoveries = 0;
+      this.#applyTransition(job, 'retry_wait', { nextAllowedAt: this.clock().toISOString(), lastError: validated.reason });
+    }
   }
 
   acquireRequest(key, lease, host) {

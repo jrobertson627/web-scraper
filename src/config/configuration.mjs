@@ -44,6 +44,11 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   config.seasonYearPinned = config.currentSeasonEndingYear !== undefined;
   config.currentSeasonEndingYear = seasonEndingYear;
   config.targetEndingYears = years;
+  // The least free space the raw store's disk may have before the run halts (#114); 0 disables the check.
+  if (config.rawMinFreeBytes === undefined) config.rawMinFreeBytes = 0;
+  if (!Number.isSafeInteger(config.rawMinFreeBytes) || config.rawMinFreeBytes < 0) {
+    throw configError('rawMinFreeBytes', 'is invalid', 'Expected a whole number of bytes, 0 or more', 'rawMinFreeBytes: 536870912');
+  }
   // The fewest eligible schools a school index may yield (#115); 0 disables the check.
   if (config.minEligibleSchools === undefined) config.minEligibleSchools = 0;
   if (!Number.isSafeInteger(config.minEligibleSchools) || config.minEligibleSchools < 0 || config.minEligibleSchools > 10_000) {
