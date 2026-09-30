@@ -63,7 +63,7 @@ export class Discovery {
     const resolveLink = (target, rowIndex) => {
       let sourceUrl;
       try {
-        sourceUrl = snapshot.sourceUrlFrom(target, snapshot.sourceUrl?.absoluteUrl);
+        sourceUrl = snapshot.sourceUrlFrom(target, snapshot.baseUrl ?? snapshot.sourceUrl?.absoluteUrl);
       } catch (error) {
         reject(target, error.message, rowIndex);
         return null;
@@ -117,7 +117,7 @@ export class Discovery {
       // The sample's schools as identities, resolved like the index rows' links.
       const sample = this.scope.kind === 'sample' ? new Set(this.scope.schools.map((path) => {
         try {
-          const sourceUrl = snapshot.sourceUrlFrom(path, snapshot.sourceUrl?.absoluteUrl);
+          const sourceUrl = snapshot.sourceUrlFrom(path, snapshot.baseUrl ?? snapshot.sourceUrl?.absoluteUrl);
           return serializeCanonicalPath(canonicalizeSourceUrl(adapter?.schoolUrl ? adapter.schoolUrl(sourceUrl) : sourceUrl));
         } catch { return null; }
       })) : null;

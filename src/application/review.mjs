@@ -195,7 +195,7 @@ export async function acceptIssue({ persistence, rawStore, parsers, discovery, n
   if (!parsers.has(job.pageType, revision.parserVersion)) {
     throw new Error(`accepting needs the parser that produced the revision, ${job.pageType}@${revision.parserVersion}, which is not registered`);
   }
-  const snapshot = snapshotFor(job, stored.body);
+  const snapshot = snapshotFor(job, stored.body, { finalUrl: fetch.finalUrl });
   const { parsed, run } = parseSnapshot({ parsers, job, snapshot, parserVersion: revision.parserVersion, sourceFetchId: fetch.id, clock });
   if (parsed.kind !== 'valid') throw new Error(`the stored snapshot no longer parses: ${parsed.error}`);
   const { page, provenance } = normalizeParsedPage({ job, snapshot, parsed, run, discovery, normalizer, clock });
