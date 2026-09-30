@@ -71,6 +71,7 @@ A scope can only widen. A worker started with a narrower scope than the store ho
 ## Pause, stop and resume
 
 - **Pause:** suspend the Render service, or press Stop on the operator page. The process finishes the page it is on: a request already sent completes and is saved; one not yet sent is skipped and retried later. Then it exits. Nothing else is needed, and no job is left half-done.
+- **A finished or halted worker idles (#126).** On Render the worker does not exit when there is nothing left to do or when it halts; it stays up and logs `worker.idle` (state `finished`, `halted`, `configuration_rejected` or `not_ready`), so Render does not restart it in a loop. After the halt is reviewed or the configuration fixed, restart or redeploy the service to resume.
 - **Resume:** resume the service, or press Start or resume. The worker picks up where it stopped. Any claim the old process still held expires after 30 seconds and is retried; a request that a crashed process left open is released automatically after its deadline (`JOB_LIFECYCLE.md`). Pages already parsed are never fetched again.
 - **After a crash or a deploy:** the same as a resume. A page whose claim is lost three times (its worker keeps disappearing) is marked `permanently_failed`, so a crash loop cannot repeat forever.
 - **A multi-day backfill** is just a sequence of runs: stop and resume as often as needed, and each resume continues from the stored state.
@@ -169,7 +170,7 @@ A `conflicting_game_log_fact` issue (a game log disagrees with its box score) ca
 
 A parser version is a code change reviewed like any other. A new version never overwrites data by accident: a re-parse of the same stored page with a different parser version replaces the record, but a changed page is held for review (`PARSER_NORMALIZATION.md`).
 
-1. Add the new version, for example `BoxScoreParserV2` returning version `'2'`, next to the old one in `PRODUCTION_PARSERS` (`src/parsers/index.mjs`), with tests against the real captures. Merge and deploy. Keeping v1 registered allows a rollback.
+1. Add the new version, for example `BoxScoreParserV2` returning version `'2'`, next to the old one in `PRODUCTION_PARSERS` (`src/parsers/index.mjs`), with tests against the real captures. Before you open the pull request, run `npm run parsers:verify` on the machine that holds the captures: it runs every test that reads them (refusing to count a skipped one) and prints a `Real-capture verification: passed (captures ..., parsers ..., N tests, date)` line. Paste that line into the pull request description. CI cannot run those tests, because the captures are not in this public repository, so its `Parser changes carry real-capture evidence` job instead checks that the line names the committed capture set and this change's exact parser code; if the parsers change again after you ran it, the line goes stale and you run it again. Merge and deploy. Keeping v1 registered allows a rollback.
 2. Set `PARSER_VERSIONS={"box_score":"2"}` on the service. From now on the worker parses box scores with v2, including pages queued before.
 3. Re-parse what is stored, with no requests:
 

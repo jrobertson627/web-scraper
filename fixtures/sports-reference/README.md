@@ -30,3 +30,7 @@ MSYS_NO_PATHCONV=1 USER_AGENT="web-scraper (+your-contact)" node scripts/capture
 | Unlinked (non-D-I) opponent | `/cbb/boxscores/2023-11-13-19-le-moyne.html` |
 
 Not yet covered: a canceled or rescheduled game with an explicit status label.
+
+## Checking the parsers against the captures
+
+CI skips every test that reads `raw/`, so it cannot catch a parser change that breaks on real pages. `npm run parsers:verify` runs those tests here, refuses to count a skipped one, checks each capture against `manifest.json`, and prints the `Real-capture verification` line a pull request that changes the parsers must carry (`.github/pull_request_template.md`; checked by the `parser-evidence` job in CI). The line names a hash of the manifest and a hash of the parser code, so it is only good for that code and that capture set. Adding or recapturing a page changes the manifest and needs the line again.

@@ -13,6 +13,11 @@ services:
     preDeployCommand: npm run migrate
     startCommand: npm run start:worker:personal
     autoDeploy: false
+    # After SIGTERM the worker lets the request on the wire finish (up to
+    # requestTimeoutMs, 30 s) and commit it before it stops, so a deploy or a
+    # suspend does not kill a job midway and charge its page a claim recovery.
+    # Render's default is 30 s, the same as the request timeout alone.
+    maxShutdownDelaySeconds: 90
     disk:
       name: raw-store
       mountPath: /var/data
@@ -23,6 +28,10 @@ services:
         value: "22"
       - key: PERSISTENCE
         value: postgres
+      # A finished or halted worker stays up and idle instead of exiting, which
+      # Render would restart in a loop (DEPLOYMENT.md, "Worker").
+      - key: WORKER_IDLE_ON_EXIT
+        value: "true"
       - key: RAW_STORE_ROOT
         value: /var/data/raw
       # Internal connection values of the existing database.

@@ -33,6 +33,7 @@
     "repair:raw": "node src/application/cli.mjs repair",
     "robots:check": "node scripts/robots-check.mjs",
     "grant:tracker": "node scripts/grant-tracker.mjs",
+    "parsers:verify": "node scripts/parsers-verify.mjs",
     "smoke:foundation": "node scripts/foundation-smoke.mjs",
     "migrate": "node scripts/migrate.mjs",
     "smoke:migrations": "node scripts/migration-smoke.mjs",
