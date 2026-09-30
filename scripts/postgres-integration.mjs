@@ -398,7 +398,7 @@ test('real PostgreSQL persistence and process restart', async () => {
         mode: 'worker', providerId: 'sports-reference', allowedHosts: ['www.sports-reference.com'],
         rawStore: 'filesystem', rawStoreRoot: join(localRoot, 'raw-worker'), publication: 'private',
         policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-test (+ops@example.com)' },
-        eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+        eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026],
         authorization: record('authorization'), dataContract: record('data-contract'),
       },
       transport,
@@ -442,6 +442,8 @@ test('worker mode runs the production worker end to end on PostgreSQL with the c
       USER_AGENT: 'web-scraper-test (+ops@example.com)', RAW_STORE_ROOT: join(localRoot, 'raw-cli-worker'),
       // The fixture index has a handful of schools, far below the real index's floor (#115).
       MIN_ELIGIBLE_SCHOOLS: '0',
+      // The fixture world is the 2025-26 season whatever the date is (#115).
+      CURRENT_SEASON_ENDING_YEAR: '2026',
       AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(record('data-contract')) },
     crawlLog: createCrawlLog({ write: (line) => lines.push(JSON.parse(line)) }),
     startWorker: async (context) => {

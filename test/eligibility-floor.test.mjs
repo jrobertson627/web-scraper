@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateConfiguration } from '../src/config/configuration.mjs';
 import { createSnapshot, createJob } from '../src/contracts/boundaries.mjs';
-import { EXPECTED_ELIGIBLE_SCHOOLS, MIN_ELIGIBLE_SCHOOLS, TARGET_ENDING_YEARS, canonicalizeSourceUrl, createSourceUrl, sourceKey } from '../src/contracts/source.mjs';
+import { EXPECTED_ELIGIBLE_SCHOOLS, MIN_ELIGIBLE_SCHOOLS, canonicalizeSourceUrl, createSourceUrl, sourceKey } from '../src/contracts/source.mjs';
+import { targetEndingYearsFor } from '../src/contracts/season.mjs';
+const TARGET_ENDING_YEARS = targetEndingYearsFor(2026);
 import { Discovery } from '../src/discovery/index.mjs';
 import { Fetcher, FixtureTransport } from '../src/fetcher/index.mjs';
 import { Normalizer } from '../src/domain/public.mjs';
@@ -56,7 +58,7 @@ test('the floor is a configuration value that defaults to off and is validated',
   const base = {
     mode: 'local', providerId: 'p', allowedHosts: [HOST], rawStore: 'memory', publication: 'private',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' },
-    eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+    eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026],
   };
   assert.equal(validateConfiguration(base).minEligibleSchools, 0);
   assert.equal(validateConfiguration({ ...base, minEligibleSchools: 300 }).minEligibleSchools, 300);
@@ -64,7 +66,7 @@ test('the floor is a configuration value that defaults to off and is validated',
 });
 
 // A minimal worker: an index page served by a fixture transport, parsed and discovered.
-async function runIndex(document, minEligibleSchools) {
+async function runIndex(document, minEligibleSchools, seasonEndingYear = 2026) {
   let time = Date.parse('2026-01-01T00:00:00.000Z');
   const clock = () => new Date(time);
   const persistence = new InMemoryPersistence(clock);
@@ -79,7 +81,7 @@ async function runIndex(document, minEligibleSchools) {
       transport, rawStore, persistence, clock, sleep: async (ms) => { time += ms; }, allowedHosts: [HOST],
       policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' },
     }),
-    discovery: new Discovery({ providerId: 'p', allowedHosts: [HOST], targetEndingYears: TARGET_ENDING_YEARS, minEligibleSchools }),
+    discovery: new Discovery({ providerId: 'p', allowedHosts: [HOST], targetEndingYears: TARGET_ENDING_YEARS, seasonEndingYear, minEligibleSchools }),
     parsers, normalizer: new Normalizer(), persistence, rawStore, clock,
   });
   return { result: await orchestrator.runOnce(), persistence };
@@ -112,4 +114,12 @@ test('reconciliation fails an index below the floor even when its stored decisio
 
   const healthy = (await runIndex(indexOf(400), 0)).persistence;
   assert.equal((await buildReconciliationReport(healthy, { minEligibleSchools: MIN_ELIGIBLE_SCHOOLS })).checks.find((entry) => entry.id === 'eligible_school_count').passed, true);
+});
+
+test('an index read under the season it lists passes the floor, and reconciliation checks each decision against that season', async () => {
+  const { result, persistence } = await runIndex(indexOf(400, 2027), MIN_ELIGIBLE_SCHOOLS, 2027);
+  assert.equal(result.events[0].kind, 'parsed');
+  assert.equal(persistence.listJobs().length, 401);
+  const report = await buildReconciliationReport(persistence, { minEligibleSchools: MIN_ELIGIBLE_SCHOOLS });
+  assert.equal(report.checks.find((check) => check.id === 'eligible_school_count').passed, true, 'each decision was made under 2027 and matches To == 2027');
 });

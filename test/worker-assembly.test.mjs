@@ -30,7 +30,7 @@ function workerConfig(overrides = {}) {
     mode: 'worker', providerId: 'sports-reference', allowedHosts: ['www.sports-reference.com'],
     rawStore: 'filesystem', rawStoreRoot, publication: 'private',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-test (+ops@example.com)' },
-    eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+    eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026],
     authorization, dataContract, ...overrides,
   };
 }

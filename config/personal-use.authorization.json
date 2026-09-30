@@ -7,8 +7,8 @@
   "effectiveAt": "2026-09-22T00:00:00.000Z",
   "scope": {
     "allowedHosts": ["www.sports-reference.com"],
-    "eligibilityPredicate": "To == 2026",
-    "targetEndingYears": [2022, 2023, 2024, 2025, 2026]
+    "eligibilityPredicate": "To == CurrentSeasonEndingYear",
+    "targetEndingYears": "CurrentSeasonEndingYear-4..CurrentSeasonEndingYear"
   },
   "contractVersion": "personal-v3",
   "contractFingerprint": "b234a3d8e3d1d96038980e0d875ad0b994f32fe62e7717920f934031ccab1915"

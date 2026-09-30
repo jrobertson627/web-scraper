@@ -1,4 +1,4 @@
-import { REQUIRED_ELIGIBILITY_PREDICATE, TARGET_ENDING_YEARS } from '../contracts/source.mjs';
+import { ELIGIBILITY_RULE, TARGET_YEARS_RULE, assertSeasonEndingYear, seasonEndingYearAt, targetEndingYearsFor } from '../contracts/season.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { requireAuthorization } from './authorization.mjs';
@@ -23,13 +23,27 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   if (typeof config.providerId !== 'string' || !config.providerId) {
     throw configError('providerId', 'is missing', 'Expected a non-empty provider identifier', 'providerId: provider');
   }
-  if (config.eligibilityPredicate !== REQUIRED_ELIGIBILITY_PREDICATE) {
-    throw configError('eligibilityPredicate', 'is invalid', `Expected exactly ${REQUIRED_ELIGIBILITY_PREDICATE}`, `eligibilityPredicate: '${REQUIRED_ELIGIBILITY_PREDICATE}'`);
+  if (config.eligibilityPredicate !== ELIGIBILITY_RULE) {
+    throw configError('eligibilityPredicate', 'is invalid', `Expected exactly ${ELIGIBILITY_RULE}`, `eligibilityPredicate: '${ELIGIBILITY_RULE}'`);
   }
-  const years = [...(config.targetEndingYears ?? [])].sort((a, b) => a - b);
-  if (JSON.stringify(years) !== JSON.stringify(TARGET_ENDING_YEARS)) {
-    throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(TARGET_ENDING_YEARS)}`, 'targetEndingYears: [2022, 2023, 2024, 2025, 2026]');
+  // The season is the one a crawl provisionally runs under: the year given
+  // (CURRENT_SEASON_ENDING_YEAR, which is pinned) or else the season now. A worker
+  // resolves the final one when it starts, from the school index's fetch time
+  // (#115), so a pinned year always wins there.
+  let seasonEndingYear;
+  try {
+    seasonEndingYear = config.currentSeasonEndingYear === undefined ? seasonEndingYearAt(clock()) : assertSeasonEndingYear(config.currentSeasonEndingYear);
+  } catch {
+    throw configError('currentSeasonEndingYear', 'is invalid', 'Expected a four-digit year', 'currentSeasonEndingYear: 2026');
   }
+  const window = targetEndingYearsFor(seasonEndingYear);
+  const years = config.targetEndingYears === undefined ? [...window] : [...config.targetEndingYears].sort((a, b) => a - b);
+  if (JSON.stringify(years) !== JSON.stringify(window)) {
+    throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(window)}, the five ending years up to the current season`, `targetEndingYears: ${JSON.stringify(window)}`);
+  }
+  config.seasonYearPinned = config.currentSeasonEndingYear !== undefined;
+  config.currentSeasonEndingYear = seasonEndingYear;
+  config.targetEndingYears = years;
   // The fewest eligible schools a school index may yield (#115); 0 disables the check.
   if (config.minEligibleSchools === undefined) config.minEligibleSchools = 0;
   if (!Number.isSafeInteger(config.minEligibleSchools) || config.minEligibleSchools < 0 || config.minEligibleSchools > 10_000) {
@@ -37,7 +51,7 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   }
   // A sample restricts the full scope above; it never replaces it (#78).
   try {
-    config.crawlScope = createCrawlScope(config.crawlScope);
+    config.crawlScope = createCrawlScope(config.crawlScope, { targetEndingYears: years });
   } catch (error) {
     throw new Error(`crawlScope is invalid: ${error.message}`);
   }
@@ -69,7 +83,8 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   if (config.mode === 'local' && config.publication === 'public') {
     throw configError('publication', 'cannot be public in local mode', 'Expected private fixture output', 'publication: private');
   }
-  const expectedScope = { allowedHosts: config.allowedHosts, eligibilityPredicate: config.eligibilityPredicate, targetEndingYears: years };
+  // The authorization record states the rules symbolically, so it stays valid as the season rolls.
+  const expectedScope = { allowedHosts: config.allowedHosts, eligibilityPredicate: config.eligibilityPredicate, targetEndingYears: TARGET_YEARS_RULE };
   const requiresUpstream = config.mode === 'worker' || (config.mode === 'api' && config.publication === 'public');
   if (requiresUpstream) {
     const use = config.mode === 'worker' ? 'crawl' : 'publish';

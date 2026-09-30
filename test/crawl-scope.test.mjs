@@ -5,8 +5,9 @@ import { buildReconciliationReport } from '../src/application/reconciliation.mjs
 import { formatCrawlStatus, summarizeCrawlStatus } from '../src/application/crawl-status.mjs';
 import { EXIT_CODES, runCli } from '../src/application/cli.mjs';
 import { SPORTS_REFERENCE_HOST, SportsReferenceSourceAdapter } from '../src/application/sports-reference-source-adapter.mjs';
-import { FULL_CRAWL_SCOPE, createCrawlScope, nextCrawlScope, scopeCovers } from '../src/contracts/crawl-scope.mjs';
-import { TARGET_ENDING_YEARS } from '../src/contracts/source.mjs';
+import { FULL_CRAWL_SCOPE, createCrawlScope, fullCrawlScope, nextCrawlScope, scopeCovers } from '../src/contracts/crawl-scope.mjs';
+import { targetEndingYearsFor } from '../src/contracts/season.mjs';
+const TARGET_ENDING_YEARS = targetEndingYearsFor(2026);
 import { validateConfiguration } from '../src/config/configuration.mjs';
 import { Discovery } from '../src/discovery/index.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
@@ -43,7 +44,7 @@ test('a sample is a subset of the full scope and can only widen', () => {
     [{ schools: ['/a/', '/a/'], endingYears: [2024] }, /repeat/],
     [{ schools: ['/a/'], endingYears: [2024], eligibility: 'To >= 2025' }, /unknown fields eligibility/],
     [{ kind: 'everything', schools: ['/a/'], endingYears: [2024] }, /kind everything is invalid/],
-  ]) assert.throws(() => createCrawlScope(input), message);
+  ]) assert.throws(() => createCrawlScope(input, { targetEndingYears: TARGET_ENDING_YEARS }), message);
 
   const wider = createCrawlScope({ schools: ['/cbb/schools/duke/men/', '/cbb/schools/le-moyne/men/', '/cbb/schools/unc/men/'], endingYears: [2024, 2025] });
   assert.equal(scopeCovers(wider, sample), true);
@@ -58,10 +59,12 @@ test('a sample is a subset of the full scope and can only widen', () => {
 
 test('a sample never loosens the full-scope checks', () => {
   const base = { mode: 'local', providerId: 'p', allowedHosts: ['allowed.example'], rawStore: 'memory', publication: 'private', policy,
-    eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+    eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
   assert.deepEqual(validateConfiguration({ ...base, crawlScope: SAMPLE }).crawlScope, { kind: 'sample', ...SAMPLE });
   assert.equal(validateConfiguration(base).crawlScope, FULL_CRAWL_SCOPE);
   assert.throws(() => validateConfiguration({ ...base, crawlScope: { schools: ['/a/'], endingYears: [2020] } }), /crawlScope is invalid/);
+  // The window follows the season (#115): the same sample is invalid for a later season.
+  assert.throws(() => validateConfiguration({ ...base, currentSeasonEndingYear: 2027, targetEndingYears: undefined, crawlScope: { schools: ['/a/'], endingYears: [2022] } }), /crawlScope is invalid/);
   // The sample is a separate restriction; the scope it restricts must still be exact.
   assert.throws(() => validateConfiguration({ ...base, targetEndingYears: [2024], crawlScope: SAMPLE }), /targetEndingYears is invalid/);
   assert.throws(() => validateConfiguration({ ...base, eligibilityPredicate: 'To >= 2024', crawlScope: SAMPLE }), /eligibilityPredicate is invalid/);

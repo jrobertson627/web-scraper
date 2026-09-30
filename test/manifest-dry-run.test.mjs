@@ -70,7 +70,7 @@ test('the crawl stage is full or manifest', () => {
   assert.throws(() => assertCrawlStage('box_scores_only'), /crawl stage box_scores_only is invalid/);
   const base = { mode: 'local', providerId: 'p', allowedHosts: ['allowed.example'], rawStore: 'memory', publication: 'private',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'scraper (+ops@example.com)' },
-    eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
+    eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
   assert.equal(validateConfiguration(base).crawlStage, 'full');
   assert.equal(validateConfiguration({ ...base, crawlStage: 'manifest' }).crawlStage, 'manifest');
   assert.throws(() => validateConfiguration({ ...base, crawlStage: 'everything' }), /crawlStage is invalid/);

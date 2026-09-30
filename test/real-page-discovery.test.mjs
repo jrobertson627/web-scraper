@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { Discovery } from '../src/discovery/index.mjs';
 import { InMemoryPersistence } from '../src/persistence/index.mjs';
 import { createSnapshot } from '../src/contracts/boundaries.mjs';
-import { TARGET_ENDING_YEARS, createSourceUrl } from '../src/contracts/source.mjs';
+import { createSourceUrl } from '../src/contracts/source.mjs';
+import { targetEndingYearsFor } from '../src/contracts/season.mjs';
+const TARGET_ENDING_YEARS = targetEndingYearsFor(2026);
 import { SPORTS_REFERENCE_HOST, SportsReferenceSourceAdapter } from '../src/application/sports-reference-source-adapter.mjs';
 import { gameLogDocument, schoolHistoryDocument, seasonDocument } from '../src/application/fixture-documents.mjs';
 import {
