@@ -48,3 +48,13 @@ services:
       # Application name plus the operator's contact address.
       - key: USER_AGENT
         sync: false
+      # The #78 sample, entered when the Blueprint is applied: without it the
+      # first deploy would start the full 60-70 hour backfill on a 1 GB disk.
+      # Managed in the dashboard after that: clear it for the full backfill.
+      # For example {"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}
+      - key: CRAWL_SAMPLE
+        sync: false
+      # Reviewers allowed to use npm run review (dispositions, refresh-season).
+      # Unset means nobody may.
+      - key: OPERATOR_IDS
+        sync: false

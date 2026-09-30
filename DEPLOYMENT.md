@@ -2,6 +2,8 @@
 
 Day-to-day operation (starting, pausing, reviewing, parser upgrades) is in [`OPERATIONS_RUNBOOK.md`](OPERATIONS_RUNBOOK.md).
 
+The order to take it live (provisioning, the sample, the manifest, the backfill, the tracker's access) is in [`GO_LIVE_CHECKLIST.md`](GO_LIVE_CHECKLIST.md).
+
 This is the production topology on Render and the rules for configuration and secrets. It follows the decisions recorded on issue #52: the scraper only fills the database, and march-madness-tracker reads PostgreSQL directly.
 
 Nothing in this repository creates or changes Render resources by itself. `render.yaml` is a Blueprint that someone applies from the Render dashboard; until then it is documentation.
@@ -127,7 +129,7 @@ The tracker does not need the API, so none is deployed. If one is wanted later, 
 ## Provisioning steps
 
 1. PostgreSQL: use the existing instance. Note its region; the worker must be in the same region.
-2. Apply `render.yaml` from the Render dashboard (New, then Blueprint). Render prompts for each `sync: false` value; enter the internal `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and `USER_AGENT`. Set the service's region to the database's region.
+2. Apply `render.yaml` from the Render dashboard (New, then Blueprint). Render prompts for each `sync: false` value; enter the internal `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `USER_AGENT`, your reviewer id as `OPERATOR_IDS`, and the #78 sample as `CRAWL_SAMPLE` (below). The first deploy starts the worker at once, and a worker with no `CRAWL_SAMPLE` starts the full backfill, so do not leave it empty. Set the service's region to the database's region.
 3. The first deploy runs `npm ci`, then `npm run migrate`, then starts the worker. Check the deploy log for `migrate passed` and for the worker's configuration line.
 4. Check progress with the Render shell on the worker: `npm run status` (the service already has `PERSISTENCE=postgres` and the PG* values). It prints progress by page type, request pace, and projected time remaining. `npm run review:personal -- list` in the same shell lists pages stopped for review; see "Operator review" in `JOB_LIFECYCLE.md`.
 5. Create the tracker's read-only role (above), run `npm run grant:tracker`, and give march-madness-tracker those credentials through its own service's secrets.
