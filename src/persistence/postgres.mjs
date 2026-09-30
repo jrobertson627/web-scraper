@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, ORPHANED_REQUEST_REASON,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, HOST_BUSY_WAIT_MS, ORPHANED_REQUEST_REASON,
   REPROCESS_STATES, REVIEW_JOB_STATES, assertTransition, createLeaseToken, createOperatorDisposition, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import {
@@ -364,9 +364,34 @@ export class PostgresPersistence {
   }
 
   async getRequestSchedule(host) {
-    const result = await this.pool.query('SELECT last_request_started_at, recent_request_starts FROM host_request_schedule WHERE host = $1', [host]);
+    const result = await this.pool.query('SELECT last_request_started_at, recent_request_starts, paused_until FROM host_request_schedule WHERE host = $1', [host]);
     return { lastStartedAt: result.rows[0]?.last_request_started_at ?? null,
-      starts: (result.rows[0]?.recent_request_starts ?? []).map((value) => new Date(value)) };
+      starts: (result.rows[0]?.recent_request_starts ?? []).map((value) => new Date(value)),
+      pausedUntil: result.rows[0]?.paused_until ? new Date(result.rows[0].paused_until) : null };
+  }
+
+  // No request to the host may start before `until` (#113); a later pause is never
+  // shortened by an earlier one. Same contract as the in-memory adapter's.
+  async pauseHost(host, until) {
+    await this.pool.query(`INSERT INTO host_request_schedule (host, paused_until) VALUES ($1, $2)
+      ON CONFLICT (host) DO UPDATE SET paused_until = GREATEST(host_request_schedule.paused_until, EXCLUDED.paused_until)`, [host, until]);
+  }
+
+  // Whether a request to the host may start now, and how long to wait if not
+  // (#113, #118): a pause after a 429, or another request holding the host. An
+  // orphaned request is released first, so a crashed worker's lock clears on its
+  // own deadline. Judged by the database clock. Same contract as the in-memory
+  // adapter's.
+  async hostGate(host) {
+    await this.releaseOrphanedRequests();
+    const result = await this.pool.query(`SELECT
+        (SELECT GREATEST(0, ceil(extract(epoch FROM (paused_until - clock_timestamp())) * 1000))::bigint
+          FROM host_request_schedule WHERE host = $1 AND paused_until IS NOT NULL) AS paused_ms,
+        EXISTS (SELECT 1 FROM in_flight_requests WHERE host = $1 AND released_at IS NULL) AS in_flight`, [host]);
+    const { paused_ms: pausedMs, in_flight: inFlight } = result.rows[0];
+    if (pausedMs !== null && Number(pausedMs) > 0) return { waitMs: Number(pausedMs), reason: 'paused' };
+    if (inFlight) return { waitMs: HOST_BUSY_WAIT_MS, reason: 'in_flight' };
+    return { waitMs: 0, reason: null };
   }
 
   async recordRequestStart(host, at = new Date()) {

@@ -20,6 +20,9 @@ const OUTCOMES = {
   rateLimited: () => createFetchResult({ kind: 'retry_wait', reason: 'rate limited', nextAllowedAt: '2099-01-01T00:00:00.000Z', charge: 'rate_limit' }),
   serverError: () => createFetchResult({ kind: 'retry_wait', code: 'upstream_5xx', reason: 'upstream 503', nextAllowedAt: '2099-01-01T00:00:00.000Z', charge: 'failure' }),
   rateLimitCap: () => createFetchResult({ kind: 'operator_stop', code: 'rate_limit_cap', reason: 'rate limited 5 times; operator review required' }),
+  invalidRetryAfter: () => createFetchResult({ kind: 'operator_stop', code: 'invalid_retry_after', reason: 'rate limited without valid Retry-After; operator review required' }),
+  retryAfterTooLong: () => createFetchResult({ kind: 'operator_stop', code: 'retry_after_too_long', reason: 'Retry-After exceeds the configured maximum; operator review required' }),
+  hardStop: () => createFetchResult({ kind: 'operator_stop', code: 'response_too_large', reason: 'response body exceeds the configured byte limit' }),
   page: () => createFetchResult({ kind: 'fetched', sourceFetchId: 'fetch-1', checksum: 'a'.repeat(64), body: Buffer.from(BODY) }),
 };
 
@@ -96,16 +99,33 @@ test('a hold from before a release does not review a new challenge on the retrie
   assert.equal(run.store.getJob(run.keys[1]).state, 'parsed');
 });
 
-test('429s, server errors and other operator stops do not halt the run', async () => {
-  const run = crawl(['rateLimited', 'serverError', 'rateLimitCap', 'page']);
+test('a 429 with a usable Retry-After, a server error and a page-level stop do not halt the run', async () => {
+  const run = crawl(['rateLimited', 'serverError', 'hardStop', 'page']);
   // runOnce: the two retries wait until 2099, which the long-running loop would sleep for.
   const result = await run.orchestrator.runOnce('worker');
   assert.equal(result.halt, undefined);
   assert.deepEqual(run.fetched, run.keys, 'every page is tried');
   assert.deepEqual(result.counts, { operator_stop: 1, parsed: 1, retry_wait: 2 });
-  assert.deepEqual(run.store.unreviewedChallenges(), [], 'a rate-limit cap stops its page but not the crawl');
+  assert.deepEqual(run.store.unreviewedChallenges(), [], 'a page-level stop stops its page but not the crawl');
   assert.equal(run.events.some(([name]) => name === 'run.halted'), false);
 });
+
+// #113: when the site says to stop, or gives no way to tell when to go on, the whole run halts.
+for (const [outcome, code] of [['rateLimitCap', 'rate_limit_cap'], ['invalidRetryAfter', 'invalid_retry_after'], ['retryAfterTooLong', 'retry_after_too_long']]) {
+  test(`a ${code} stop halts the run until it is reviewed, like a challenge`, async () => {
+    const run = crawl([outcome, 'page', 'page']);
+    const result = await run.orchestrator.runOnce('worker');
+    assert.deepEqual(result.halt, { reason: code, jobKey: run.keys[0], pageType: 'season', awaitingReview: 1 });
+    assert.deepEqual(run.fetched, [run.keys[0]], 'nothing after it is tried');
+    assert.equal(run.store.unreviewedChallenges()[0].code, code);
+    // A restarted worker makes no request until an operator has reviewed the stop.
+    const restarted = await run.orchestrator.run({ workerId: 'worker', maxIdleMs: 1, sleep: async () => {} });
+    assert.deepEqual([restarted.stopped, restarted.stopReason, restarted.processed], [true, code, 0]);
+    assert.deepEqual(run.fetched, [run.keys[0]]);
+    run.store.recordOperatorDisposition(run.keys[0], { kind: 'release_retry', operatorId: 'ops', reason: 'reviewed' });
+    assert.deepEqual(run.store.unreviewedChallenges(), []);
+  });
+}
 
 test('a signal stop reports its own reason', async () => {
   const run = crawl(['page', 'page']);

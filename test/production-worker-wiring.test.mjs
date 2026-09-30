@@ -34,6 +34,7 @@ function workerEnv(overrides = {}) {
 
 // Job methods answer from memory; the pool is never queried.
 class InMemoryPostgres extends PostgresPersistence {
+  async hostGate() { return { waitMs: 0, reason: null }; }
   async rawStoreId() { return null; }
   async claimRawStoreId(storeId) { return storeId; }
   constructor(options) {

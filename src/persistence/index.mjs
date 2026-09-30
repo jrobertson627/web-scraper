@@ -15,7 +15,7 @@ import {
   createJob, createPageRequest, createQueryModels, createReadPage, createReconciliationIssue, decodePageCursor, deepFreeze,
 } from '../contracts/boundaries.mjs';
 import {
-  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, ORPHANED_REQUEST_REASON,
+  DEFAULT_MAX_CLAIM_RECOVERIES, DEFAULT_ORPHAN_GRACE_MS, DENY_ALL_OPERATORS, HALTING_STOP_CODES, HOST_BUSY_WAIT_MS, ORPHANED_REQUEST_REASON,
   REPROCESS_STATES, REVIEW_JOB_STATES, createReviewDisposition, positiveInteger,
 } from '../contracts/jobs.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
@@ -163,6 +163,8 @@ export function reviewJobSummary(job) {
     key: job.key, pageType: job.pageType, state: job.state, url: job.sourceUrl.absoluteUrl,
     parentKey: job.parentKey ?? null, attempts: job.attempts, updatedAt: job.updatedAt,
     reason: job.failures?.at(-1)?.reason ?? job.lastError ?? null,
+    // The code the job's latest stop or failure carried, such as challenge or rate_limit_cap.
+    code: [...(job.history ?? [])].reverse().find((event) => event.to === job.state && event.details?.code)?.details.code ?? null,
     history: (job.history ?? []).map((event) => ({ ...event })),
   };
 }
@@ -635,15 +637,36 @@ export class InMemoryPersistence {
   }
 
   getRequestSchedule(host, now = this.clock()) {
-    const current = this.requestSchedules.get(host) ?? { lastStartedAt: null, starts: [] };
+    const current = this.requestSchedules.get(host) ?? { lastStartedAt: null, starts: [], pausedUntil: null };
     const starts = current.starts.filter((at) => now.getTime() - at.getTime() < 60_000);
-    return { lastStartedAt: current.lastStartedAt, starts: [...starts] };
+    return { lastStartedAt: current.lastStartedAt, starts: [...starts], pausedUntil: current.pausedUntil ?? null };
   }
 
   recordRequestStart(host, at) {
     const current = this.getRequestSchedule(host, at);
     current.starts.push(at);
-    this.requestSchedules.set(host, { lastStartedAt: at, starts: current.starts });
+    this.requestSchedules.set(host, { lastStartedAt: at, starts: current.starts, pausedUntil: current.pausedUntil });
+  }
+
+  // No request to the host may start before `until` (#113); a later pause is
+  // never shortened by an earlier one. Same contract as the PostgreSQL adapter's.
+  pauseHost(host, until) {
+    const current = this.getRequestSchedule(host);
+    const later = current.pausedUntil && current.pausedUntil.getTime() > until.getTime() ? current.pausedUntil : until;
+    this.requestSchedules.set(host, { lastStartedAt: current.lastStartedAt, starts: current.starts, pausedUntil: later });
+  }
+
+  // Whether a request to the host may start now, and how long to wait if not
+  // (#113, #118): a pause after a 429, or another request holding the host. An
+  // orphaned request is released first, so a crashed worker's lock clears on its
+  // own deadline. Same contract as the PostgreSQL adapter's.
+  hostGate(host) {
+    this.releaseOrphanedRequests();
+    const now = this.clock();
+    const { pausedUntil } = this.getRequestSchedule(host, now);
+    if (pausedUntil && pausedUntil.getTime() > now.getTime()) return { waitMs: pausedUntil.getTime() - now.getTime(), reason: 'paused' };
+    if ([...this.inFlight.values()].some((request) => request.host === host)) return { waitMs: HOST_BUSY_WAIT_MS, reason: 'in_flight' };
+    return { waitMs: 0, reason: null };
   }
 
   // verification is the raw store's result for this body (from put or read);

@@ -80,10 +80,17 @@ export function sameLease(left, right) {
   return Boolean(left && right && left.value === right.value);
 }
 
-// Operator-stop codes that halt the whole run, not just the page: a challenge
-// (403 or a challenge page) means the site is refusing the crawler, so no
-// further request is made until an operator has reviewed the stop.
-export const HALTING_STOP_CODES = Object.freeze(['challenge']);
+// Operator-stop codes that halt the whole run, not just the page: the site is
+// refusing the crawler, so no further request is made until an operator has
+// reviewed the stop. A challenge (403 or a challenge page); a 429 with no usable
+// Retry-After, or one longer than the policy allows, so there is no telling when
+// it is safe to go on; and a page that reached its rate-limit cap (#113).
+export const HALTING_STOP_CODES = Object.freeze(['challenge', 'invalid_retry_after', 'retry_after_too_long', 'rate_limit_cap']);
+
+// How long the worker waits before looking again when another request holds the
+// host (an orphan from a crashed worker, or a second worker), instead of
+// claiming and settling one job after another (#118).
+export const HOST_BUSY_WAIT_MS = 5_000;
 
 // The persistence adapters' default operator authorizer: nobody may record a
 // disposition until the process supplies one (src/config/operators.mjs, #48).

@@ -105,6 +105,12 @@ export class Fetcher {
       }
     }
     const requestHost = new URL(job.sourceUrl.absoluteUrl).host;
+    // A 429 paused the whole host (#113): whichever job is claimed waits for it,
+    // uncharged, and takes no request slot meanwhile.
+    const { pausedUntil } = await this.#getSchedule(requestHost, this.clock());
+    if (pausedUntil && pausedUntil.getTime() > this.clock().getTime()) {
+      return createFetchResult({ kind: 'retry_wait', code: 'host_paused', reason: 'host paused after a rate limit', nextAllowedAt: pausedUntil.toISOString() });
+    }
     let ownedHost = requestHost;
     let ownsRequest = Boolean(await this.persistence.acquireRequest(job.key, lease, ownedHost));
     if (!ownsRequest) return createFetchResult({ kind: 'retry_wait', reason: 'host request already owned', nextAllowedAt: this.#nextTime(1000) });
@@ -184,7 +190,10 @@ export class Fetcher {
           return createFetchResult({ kind: 'operator_stop', code: 'retry_after_too_long', reason: 'Retry-After exceeds the configured maximum; operator review required' });
         }
         const earliest = this.#nextTime(this.policy.minIntervalMs);
-        return createFetchResult(rateLimitedRetry(this.policy, job, new Date(Math.max(retryAt.getTime(), Date.parse(earliest))).toISOString()));
+        const resumeAt = new Date(Math.max(retryAt.getTime(), Date.parse(earliest)));
+        // Not just this page: no request to the host starts before the Retry-After has passed.
+        await this.persistence.pauseHost?.(ownedHost, resumeAt);
+        return createFetchResult(rateLimitedRetry(this.policy, job, resumeAt.toISOString()));
       }
       if (response.status === 403 || response.challenge) {
         const marker = response.challengeMarker ?? (response.status === 403 ? 'status 403' : null);

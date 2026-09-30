@@ -162,6 +162,8 @@ const REVIEW_USAGE = 'Example: npm run review -- list, npm run review -- show <j
 const REVIEW_ACTIONS = new Set([...Object.keys(JOB_DISPOSITIONS), 'accept', 'dismiss']);
 
 // review <list|show|hold|release-retry|release-permanent|accept|dismiss> ...
+// A job action with no target and --state and --code instead is a bulk one
+// (#113): every job in that state whose latest stop carries that code.
 export function parseReviewArgs(args) {
   const [command, ...rest] = args;
   const review = { command };
@@ -178,6 +180,7 @@ export function parseReviewArgs(args) {
     return review;
   }
   if (command !== 'show' && !REVIEW_ACTIONS.has(command)) throw new Error(`review command ${command ?? '(none)'} is invalid. ${REVIEW_USAGE}`);
+  if (Object.hasOwn(JOB_DISPOSITIONS, command) && rest[0]?.startsWith('--')) return parseBulkReviewArgs(review, rest);
   review.target = rest[0];
   if (!review.target || review.target.startsWith('--')) throw new Error(`review ${command} needs a job key or issue id. ${REVIEW_USAGE}`);
   for (let index = 1; index < rest.length; index += 2) {
@@ -187,6 +190,31 @@ export function parseReviewArgs(args) {
   }
   if (command !== 'show' && (!review.operatorId || !review.reason?.trim())) {
     throw new Error(`review ${command} needs --operator <id> and --reason "<why>"; every disposition is recorded. ${REVIEW_USAGE}`);
+  }
+  return review;
+}
+
+const BULK_USAGE = 'Example: npm run review -- release-retry --state operator_stop --code rate_limit_cap --operator <id> --reason "<why>" [--dry-run]';
+
+function parseBulkReviewArgs(review, rest) {
+  review.bulk = { states: [], code: undefined, dryRun: false };
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    if (flag === '--dry-run') { review.bulk.dryRun = true; continue; }
+    const value = rest[index + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`review ${review.command} argument ${flag} is invalid. ${BULK_USAGE}`);
+    index += 1;
+    if (flag === '--state') review.bulk.states.push(...value.split(',').filter(Boolean));
+    else if (flag === '--code') review.bulk.code = value;
+    else if (flag === '--operator') review.operatorId = value;
+    else if (flag === '--reason') review.reason = value;
+    else throw new Error(`review ${review.command} argument ${flag} is invalid. ${BULK_USAGE}`);
+  }
+  if (!review.bulk.states.length || !review.bulk.code) {
+    throw new Error(`review ${review.command} without a job key needs both --state and --code, so a bulk release names exactly what it releases. ${BULK_USAGE}`);
+  }
+  if (!review.operatorId || !review.reason?.trim()) {
+    throw new Error(`review ${review.command} needs --operator <id> and --reason "<why>"; every disposition is recorded. ${BULK_USAGE}`);
   }
   return review;
 }
@@ -555,7 +583,8 @@ export async function runCli({
         result = await app.list({ jobs: review.jobs ?? true, issues: review.issues ?? true, states: review.states, limit: review.limit });
         stdout(review.json ? JSON.stringify(result, null, 2) : formatReviewList(result));
       } else {
-        if (review.command === 'show') result = await app.show(review.target);
+        if (review.bulk) result = await app.disposeMatching(review.command, review.bulk, by);
+        else if (review.command === 'show') result = await app.show(review.target);
         else if (review.command === 'accept') result = await app.accept(review.target, by);
         else if (review.command === 'dismiss') result = await app.dismiss(review.target, by);
         else result = await app.dispose(review.target, review.command, by);
@@ -597,7 +626,8 @@ export async function runCli({
       crawlLog.summary?.({ jobStates: result.counts, stopped: result.stopped });
       stdout(JSON.stringify({ mode, ...result }));
       if (result.halt) {
-        stderr(`worker halted: a challenge response on ${result.halt.jobKey} awaits operator review; no request is made until every challenge stop is reviewed. `
+        const cause = result.halt.reason === 'challenge' ? 'a challenge response' : `a ${result.halt.reason} stop`;
+        stderr(`worker halted: ${cause} on ${result.halt.jobKey} awaits operator review; no request is made until every halting stop is reviewed. `
           + 'Pause the service, then: npm run review -- list --state operator_stop (see OPERATIONS_RUNBOOK.md)');
         return { exitCode: EXIT_CODES.haltedForReview, result };
       }
