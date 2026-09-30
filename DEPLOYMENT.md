@@ -36,7 +36,7 @@ The tracker is a consumer of the database, not of this service. The scraper's sc
 - If a configured `pageType@version` has no production parser, an accepted configuration exits with code `4` and no crawl starts. A Background Worker that exits is restarted by Render, so suspend the service after a failed configuration check rather than letting it restart in a loop.
 - Stopping: Render sends `SIGTERM` on deploys, restarts and suspends, then stops the process after its grace period. Any claim the process still held is recovered after `claimTimeoutMs` and retried by the next run (see `JOB_LIFECYCLE.md`), so an interrupted crawl resumes rather than restarts. Suspending the service is the way to pause a backfill.
 - A service with a persistent disk runs as a single instance and has no zero-downtime deploys. That fits the crawler, which must run one request at a time per host anyway.
-- Migrations run as the pre-deploy command, `npm run migrate`. Every migration is repeat-safe, and both runtime modes refuse to start if any file in `migrations/` is unrecorded.
+- Migrations run as the pre-deploy command, `npm run migrate`. It applies only the files not yet recorded in `schema_migrations`, so a deploy with no new migration runs no DDL and takes no table lock while the previous worker may still be running. Each applied file's checksum is recorded, and a deploy whose `migrations/` has an applied file edited fails before applying anything and names the file: change history with a new migration, never an edit (see "Migration rules" in `POSTGRES_SCHEMA.md`). The run holds an advisory lock, so two deploys cannot migrate at once, and sets `lock_timeout` (5 s) and `statement_timeout` (120 s) so a blocked lock fails the deploy instead of stalling every other query. Every migration is still repeat-safe (`smoke:migrations` applies each twice), and both runtime modes refuse to start if any file in `migrations/` is unrecorded.
 
 ### PostgreSQL
 
@@ -79,6 +79,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `OPERATOR_TRUSTED_PROXY_HOPS` | optional; proxies in front of the operator trigger, for the per-client PIN lockout (default 1 on Render; 0 when unproxied) | no |
 | `CURRENT_SEASON_ENDING_YEAR` | optional; pins the season a crawl runs under (for example `2027`), for when the site's index lists a different season than the calendar rule expects. Leave unset: the season is derived from when the school index was fetched (see `REQUEST_POLICY.md`, "Decision: the current season") | no |
 | `MIN_ELIGIBLE_SCHOOLS` | optional; the fewest eligible schools a school index may yield before it fails (default 300). Leave unset for a real crawl (see `OPERATIONS_RUNBOOK.md`) | no |
+| `MIGRATE_LOCK_TIMEOUT_MS`, `MIGRATE_STATEMENT_TIMEOUT_MS` | optional; the migration run's `lock_timeout` (default 5000) and `statement_timeout` (default 120000). Raise the statement timeout only for a migration that rewrites a large table | no |
 | `NODE_VERSION` | `22` | no |
 
 `PROVIDER_ID`, `PROVIDER_HOST`, `AUTHORIZATION_JSON` and `DATA_CONTRACT_JSON` are set by `start:worker:personal` from the checked-in records. If a future deployment uses `start:worker` directly, supply them as dashboard values; they are configuration, not secrets, but they are never echoed into logs either.

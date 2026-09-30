@@ -25,6 +25,8 @@ import { definePersistenceConformance } from '../fixtures/persistence-conformanc
 import { assertDisposableDatabase } from './disposable-guard.mjs';
 // Adapter-hardening and API read-query checks share this disposable database.
 import './postgres-ops-integration.mjs';
+// The migration runner's checks share this disposable database too (#120).
+import './postgres-migrator-integration.mjs';
 
 if (process.env.PG_TEST_CONFIRM !== 'disposable' || !process.env.PGHOST || !process.env.PGDATABASE || !process.env.PGUSER) {
   throw new Error('PostgreSQL integration tests require an explicitly disposable PG* database');
