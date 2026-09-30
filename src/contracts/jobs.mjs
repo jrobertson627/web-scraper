@@ -112,7 +112,8 @@ export function sameLease(left, right) {
 // reviewed the stop. A challenge (403 or a challenge page); a 429 with no usable
 // Retry-After, or one longer than the policy allows, so there is no telling when
 // it is safe to go on; and a page that reached its rate-limit cap (#113).
-export const HALTING_STOP_CODES = Object.freeze(['challenge', 'invalid_retry_after', 'retry_after_too_long', 'rate_limit_cap']);
+// The provider's robots.txt now asks for something the crawler does not honour, or could not be read (#131).
+export const HALTING_STOP_CODES = Object.freeze(['challenge', 'invalid_retry_after', 'retry_after_too_long', 'rate_limit_cap', 'robots_changed', 'robots_unavailable']);
 
 // How long the worker waits before looking again when another request holds the
 // host (an orphan from a crashed worker, or a second worker), instead of

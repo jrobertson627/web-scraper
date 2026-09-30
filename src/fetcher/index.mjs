@@ -3,6 +3,7 @@ import { createSourceUrl, isAllowedSourceUrl } from '../contracts/source.mjs';
 import { createFetchResult } from '../contracts/boundaries.mjs';
 import { chargedRetry, notFoundRetry, rateLimitedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { HttpTransport } from './http-transport.mjs';
+const ROBOTS_MAX_BYTES = 512 * 1024;
 
 function header(headers, name) {
   if (!headers) return undefined;
@@ -69,8 +70,11 @@ function forbidsStoredReuse(cacheControl) {
 
 export class Fetcher {
   // events is the application's crawl-log sink (src/application/crawl-log.mjs).
-  constructor({ transport = new HttpTransport(), rawStore, persistence, clock, policy, allowedHosts, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), events = { emit() {} } }) {
+  // robots (a RobotsGuard, ./robots.mjs) makes the Fetcher check the provider's
+  // robots.txt before the first request of a run and then at its interval (#131).
+  constructor({ transport = new HttpTransport(), rawStore, persistence, clock, policy, allowedHosts, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), events = { emit() {} }, robots }) {
     this.events = events;
+    this.robots = robots;
     this.transport = transport;
     this.rawStore = rawStore;
     this.persistence = persistence;
@@ -115,6 +119,11 @@ export class Fetcher {
     let ownsRequest = Boolean(await this.persistence.acquireRequest(job.key, lease, ownedHost));
     if (!ownsRequest) return createFetchResult({ kind: 'retry_wait', reason: 'host request already owned', nextAllowedAt: this.#nextTime(1000) });
     try {
+      // The provider's robots.txt is fetched under this same host lock and pace when it is due (#131).
+      if (this.robots?.due(requestHost, this.clock())) {
+        const outcome = await this.#checkRobots(job, lease, requestHost, signal);
+        if (outcome) return outcome;
+      }
       let headers = { 'user-agent': this.policy.userAgent };
       if (prior && !forbidsStoredReuse(prior.cacheControl)) {
         if (prior.etag) headers['if-none-match'] = prior.etag;
@@ -182,19 +191,7 @@ export class Fetcher {
         this.events.emit('cache.not_modified', { jobKey: job.key, pageType: job.pageType });
         return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: priorBody.body });
       }
-      if (response.status === 429) {
-        const retryAfter = header(response.headers, 'retry-after');
-        const retryAt = retryAfterDate(retryAfter, this.clock());
-        if (!retryAt) return createFetchResult({ kind: 'operator_stop', code: 'invalid_retry_after', reason: 'rate limited without valid Retry-After; operator review required' });
-        if (retryAt.getTime() - this.clock().getTime() > this.policy.maxRetryAfterMs) {
-          return createFetchResult({ kind: 'operator_stop', code: 'retry_after_too_long', reason: 'Retry-After exceeds the configured maximum; operator review required' });
-        }
-        const earliest = this.#nextTime(this.policy.minIntervalMs);
-        const resumeAt = new Date(Math.max(retryAt.getTime(), Date.parse(earliest)));
-        // Not just this page: no request to the host starts before the Retry-After has passed.
-        await this.persistence.pauseHost?.(ownedHost, resumeAt);
-        return createFetchResult(rateLimitedRetry(this.policy, job, resumeAt.toISOString()));
-      }
+      if (response.status === 429) return this.#rateLimited(job, response, ownedHost);
       if (response.status === 403 || response.challenge) {
         const marker = response.challengeMarker ?? (response.status === 403 ? 'status 403' : null);
         return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: `operator review required for challenge response${marker ? ` (${marker})` : ''}` });
@@ -224,6 +221,66 @@ export class Fetcher {
     } finally {
       if (ownsRequest) await this.persistence.releaseRequest(job.key, lease);
     }
+  }
+
+  // Fetches and evaluates robots.txt for the job's host. Returns null when the
+  // crawl may go on, else the job's result: a stop for review when the file now
+  // asks for something the crawler does not honour (the run halts), or a retry when
+  // the file could not be fetched (#131).
+  async #checkRobots(job, lease, host, signal) {
+    const url = createSourceUrl(job.sourceUrl.providerId, '/robots.txt', job.sourceUrl.absoluteUrl);
+    await this.#waitForPolicy(job, lease, host, signal);
+    if (signal?.aborted) return createFetchResult({ kind: 'retry_wait', code: 'worker_stopping', reason: 'worker stopped before the request started', nextAllowedAt: this.#nextTime(0) });
+    await this.#recordRequestStart(host, this.clock());
+    this.events.emit('request.started', { jobKey: job.key, pageType: 'robots', host });
+    let response;
+    try {
+      response = await this.#requestWithRenewal(job, lease, {
+        method: 'GET', url: url.absoluteUrl, headers: { 'user-agent': this.policy.userAgent }, redirect: 'manual',
+        timeoutMs: this.policy.requestTimeoutMs, maxResponseBytes: ROBOTS_MAX_BYTES,
+      });
+    } catch (error) {
+      if (error?.code === 'lease_renewal_failed') throw error;
+      return this.#retry(job, `robots.txt transport error: ${error.message}`, error?.code ?? 'transient_network');
+    }
+    const { status } = response;
+    if (status === 429) return this.#rateLimited(job, response, host);
+    if (status === 403 || response.challenge) return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: 'operator review required for challenge response (robots.txt)' });
+    if (status >= 500) return this.#retry(job, `robots.txt upstream ${status}`, 'upstream_5xx');
+    if (status === 404 || status === 410) {
+      // No robots.txt means no restrictions.
+      this.robots.markChecked(host, this.clock());
+      this.events.emit('robots.checked', { host, status, problems: [] });
+      return null;
+    }
+    const text = Buffer.from(response.body ?? '').toString('utf8');
+    if (status !== 200 || !/user-agent\s*:/i.test(text)) {
+      return createFetchResult({ kind: 'operator_stop', code: 'robots_unavailable', reason: `robots.txt could not be read (status ${status}${status === 200 ? ', no User-agent line' : ''}); operator review required` });
+    }
+    const problems = this.robots.problems(text, { minIntervalMs: this.policy.minIntervalMs });
+    this.events.emit('robots.checked', { host, status, problems });
+    if (problems.length) {
+      return createFetchResult({ kind: 'operator_stop', code: 'robots_changed', reason: `robots.txt now ${problems.join('; ')}; operator review required` });
+    }
+    this.robots.markChecked(host, this.clock());
+    return null;
+  }
+
+  // A 429 (#113): with a valid Retry-After it pauses the whole host until then; without one, or with one
+  // longer than the policy allows, there is no telling when to go on, so the page stops for review and
+  // the run halts.
+  async #rateLimited(job, response, ownedHost) {
+    const retryAfter = header(response.headers, 'retry-after');
+    const retryAt = retryAfterDate(retryAfter, this.clock());
+    if (!retryAt) return createFetchResult({ kind: 'operator_stop', code: 'invalid_retry_after', reason: 'rate limited without valid Retry-After; operator review required' });
+    if (retryAt.getTime() - this.clock().getTime() > this.policy.maxRetryAfterMs) {
+      return createFetchResult({ kind: 'operator_stop', code: 'retry_after_too_long', reason: 'Retry-After exceeds the configured maximum; operator review required' });
+    }
+    const earliest = this.#nextTime(this.policy.minIntervalMs);
+    const resumeAt = new Date(Math.max(retryAt.getTime(), Date.parse(earliest)));
+    // Not just this page: no request to the host starts before the Retry-After has passed.
+    await this.persistence.pauseHost?.(ownedHost, resumeAt);
+    return createFetchResult(rateLimitedRetry(this.policy, job, resumeAt.toISOString()));
   }
 
   async #waitForPolicy(job, lease, host = job.sourceUrl.host, signal) {

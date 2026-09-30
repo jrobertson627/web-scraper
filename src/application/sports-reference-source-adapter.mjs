@@ -49,6 +49,12 @@ export class SportsReferenceSourceAdapter {
   providerId() { return SPORTS_REFERENCE_PROVIDER_ID; }
   indexUrl() { return createSourceUrl(SPORTS_REFERENCE_PROVIDER_ID, `${ORIGIN}/cbb/schools/`); }
 
+  // What in a robots.txt body the crawler does not honour: a Disallow rule under
+  // /cbb/ that this adapter does not refuse (#131). The worker checks it while it runs.
+  robotsProblems(robotsTxt) {
+    return unrefusedRobotsRules(robotsTxt).map((rule) => `disallows ${rule}, which the crawler does not refuse`);
+  }
+
   // Returns the validated URL's path, or throws when it is off-provider,
   // robots-disallowed, or carries a query the published pages never use.
   #checkedPath(sourceUrl) {
