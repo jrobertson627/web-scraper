@@ -39,3 +39,5 @@ The adapter's pool logs an idle client's `'error'` (by error code only) instead 
 `015_host_pause` (#113) adds `host_request_schedule.paused_until`: the time before which no request to the host may start, set after a 429 with a valid `Retry-After`. It is read by the host gate (`hostGate`) the worker checks before claiming a job, and by the Fetcher, and it survives a restart. A later pause is never shortened by an earlier one.
 
 `016_run_halts` (#114) adds `run_halts`: a halt of the whole run that is not one page's (the raw disk is full or nearly so, requests keep failing across pages, the database is out of storage), with who released it and why. A run refuses to start while one is unreleased. It also allows `requeue_failed` in `operator_dispositions`, which is how an operator puts a `permanently_failed` page back in the queue with a fresh budget.
+
+`017_final_url` (#124) adds `source_fetches.final_url`: where a fetch ended after redirects, when that is not the queued URL. Links are resolved against it, and offline reprocessing reads it back so a stored page is re-derived the same way it was first derived.

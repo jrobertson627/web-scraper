@@ -329,3 +329,24 @@ test('a permanently_failed page is requeued with a fresh budget, recorded, and s
   assert.equal(claimed.key, source.key, 'the requeued page is claimable again');
   await reset(pool);
 });
+
+// #124: the final URL of a fetch that followed redirects.
+test('a fetch records the URL it ended at, and it reads back from every fetch read', async (t) => {
+  const pool = new Pool({ max: 2 });
+  t.after(async () => { await pool.end(); });
+  await reset(pool);
+  const persistence = new PostgresPersistence({ pool, claimTimeoutMs: 30_000 });
+  const source = job('/box/redirected.html');
+  await persistence.addJob(source);
+  const claimed = await persistence.claimNextJob(new Date(), 'worker');
+  const raw = createRawStore('filesystem', join(localRoot, 'raw-final-url'));
+  const stored = await raw.put(Buffer.from('a body'));
+  const finalUrl = 'https://fixture.example/box/renamed.html';
+  const id = await persistence.recordFetch({ jobKey: claimed.key, status: 200, ...stored, finalUrl }, claimed.lease, stored);
+  assert.equal((await persistence.lastSuccessfulFetch(claimed.key)).finalUrl, finalUrl);
+  assert.equal((await persistence.getSourceFetch(id)).finalUrl, finalUrl);
+  const plain = await raw.put(Buffer.from('another body'));
+  await persistence.recordFetch({ jobKey: claimed.key, status: 200, ...plain }, claimed.lease, plain);
+  assert.equal((await persistence.lastSuccessfulFetch(claimed.key)).finalUrl, undefined, 'a fetch that was not redirected has none');
+  await reset(pool);
+});

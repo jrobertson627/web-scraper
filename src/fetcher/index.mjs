@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createSourceUrl, isAllowedSourceUrl } from '../contracts/source.mjs';
+import { canonicalizeSourceUrl, createSourceUrl, isAllowedSourceUrl, serializeCanonicalPath } from '../contracts/source.mjs';
 import { createFetchResult } from '../contracts/boundaries.mjs';
 import { chargedRetry, notFoundRetry, rateLimitedRetry, validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { HttpTransport } from './http-transport.mjs';
@@ -102,10 +102,10 @@ export class Fetcher {
         const sourceFetchId = await this.persistence.recordFetch({
           jobKey: job.key, status: 200, checksum: prior.checksum, objectPath: prior.objectPath,
           etag: prior.etag, lastModified: prior.lastModified, cacheControl: prior.cacheControl,
-          fetchedAt: prior.fetchedAt, reusedBody: true, cacheHit: true,
+          fetchedAt: prior.fetchedAt, reusedBody: true, cacheHit: true, ...(prior.finalUrl ? { finalUrl: prior.finalUrl } : {}),
         }, lease, cached);
         this.events.emit('cache.hit', { jobKey: job.key, pageType: job.pageType });
-        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: cached.body });
+        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: cached.body, ...(prior.finalUrl ? { finalUrl: prior.finalUrl } : {}) });
       }
     }
     const requestHost = new URL(job.sourceUrl.absoluteUrl).host;
@@ -187,9 +187,10 @@ export class Fetcher {
           cacheControl: header(response.headers, 'cache-control') ?? prior.cacheControl,
           fetchedAt: startedAt.toISOString(),
           reusedBody: true,
+          ...(prior.finalUrl ? { finalUrl: prior.finalUrl } : {}),
         }, lease, priorBody);
         this.events.emit('cache.not_modified', { jobKey: job.key, pageType: job.pageType });
-        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: priorBody.body });
+        return createFetchResult({ kind: 'not_modified', sourceFetchId, checksum: prior.checksum, body: priorBody.body, ...(prior.finalUrl ? { finalUrl: prior.finalUrl } : {}) });
       }
       if (response.status === 429) return this.#rateLimited(job, response, ownedHost);
       if (response.status === 403 || response.challenge) {
@@ -202,6 +203,8 @@ export class Fetcher {
       if (response.status === 404 || response.status === 410) return createFetchResult(notFoundRetry(this.policy, job, response.status, this.clock()));
       if (response.status < 200 || response.status >= 300) return createFetchResult({ kind: 'permanently_failed', reason: `upstream ${response.status}` });
       const body = Buffer.from(response.body ?? '');
+      // Where the redirects ended, when it is not where the job started.
+      const finalUrl = sourceUrl.absoluteUrl === job.sourceUrl.absoluteUrl ? undefined : sourceUrl.absoluteUrl;
       if (body.length > this.policy.maxResponseBytes) return createFetchResult({ kind: 'operator_stop', code: 'response_too_large', reason: 'response body exceeds the configured byte limit' });
       // put() returns the verification of the stored object, hashing the body once.
       const raw = await this.rawStore.put(body);
@@ -216,8 +219,17 @@ export class Fetcher {
         cacheControl: header(response.headers, 'cache-control'),
         fetchedAt: startedAt.toISOString(),
         reusedBody: false,
+        ...(finalUrl ? { finalUrl } : {}),
       }, lease, raw);
-      return createFetchResult({ kind: 'fetched', sourceFetchId, checksum: raw.checksum, body });
+      // The body came from a different page than the job names: it is kept, with both
+      // URLs on record, but not parsed under this page's identity (#124).
+      if (finalUrl && serializeCanonicalPath(canonicalizeSourceUrl(sourceUrl)) !== serializeCanonicalPath(job.canonicalPath)) {
+        return createFetchResult({
+          kind: 'operator_stop', code: 'redirected_identity',
+          reason: `redirected from ${job.sourceUrl.absoluteUrl} to ${finalUrl}, a different page; operator review required`,
+        });
+      }
+      return createFetchResult({ kind: 'fetched', sourceFetchId, checksum: raw.checksum, body, ...(finalUrl ? { finalUrl } : {}) });
     } finally {
       if (ownsRequest) await this.persistence.releaseRequest(job.key, lease);
     }

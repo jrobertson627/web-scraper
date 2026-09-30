@@ -469,12 +469,12 @@ export class PostgresPersistence {
     return this.transaction(async (client) => {
       const job = await this.leasedJob(client, metadata.jobKey, lease);
       const record = await client.query(`INSERT INTO source_fetches
-        (job_id,provider_id,canonical_path,http_status,fetched_at,etag,last_modified,checksum,raw_object_path,reused_body,cache_control,cache_hit)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        (job_id,provider_id,canonical_path,http_status,fetched_at,etag,last_modified,checksum,raw_object_path,reused_body,cache_control,cache_hit,final_url)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
       [job.id, job.provider_id, job.canonical_path, metadata.status, metadata.fetchedAt ?? new Date(),
         metadata.etag ?? null, metadata.lastModified ?? null, metadata.checksum ?? null,
         metadata.objectPath ?? null, metadata.reusedBody ?? false,
-        metadata.cacheControl ?? null, metadata.cacheHit ?? false]);
+        metadata.cacheControl ?? null, metadata.cacheHit ?? false, metadata.finalUrl ?? null]);
       return portId('fetch', record.rows[0].id);
     });
   }
@@ -486,7 +486,7 @@ export class PostgresPersistence {
     const row = result.rows[0];
     return row ? { id: portId('fetch', row.id), jobKey, status: row.http_status, checksum: row.checksum,
       objectPath: normalizeObjectReference(row.raw_object_path), etag: row.etag, lastModified: row.last_modified,
-      cacheControl: row.cache_control, cacheHit: row.cache_hit, fetchedAt: iso(row.fetched_at) } : null;
+      cacheControl: row.cache_control, cacheHit: row.cache_hit, fetchedAt: iso(row.fetched_at), finalUrl: row.final_url ?? undefined } : null;
   }
 
   async recordParse(run, lease) {
@@ -748,7 +748,7 @@ export class PostgresPersistence {
       FROM source_fetches f JOIN crawl_jobs j ON j.id = f.job_id WHERE f.id = $1`, [sqlId('fetch', sourceFetchId)]);
     const row = result.rows[0];
     return row ? deepFreeze({ id: portId('fetch', row.id), jobKey: row.job_key, status: row.http_status, checksum: row.checksum,
-      objectPath: normalizeObjectReference(row.raw_object_path), fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit }) : null;
+      objectPath: normalizeObjectReference(row.raw_object_path), fetchedAt: iso(row.fetched_at), cacheHit: row.cache_hit, finalUrl: row.final_url ?? undefined }) : null;
   }
 
   // Accepts the quarantined revision an open conflicting_page_reprocess issue
