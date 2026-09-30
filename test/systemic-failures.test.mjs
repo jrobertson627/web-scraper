@@ -79,7 +79,11 @@ function harness({ answer, jobs = 10, policy = {}, health, minFreeBytes = 0, raw
 const networkDown = () => { throw Object.assign(new Error('getaddrinfo ENOTFOUND allowed.example'), { code: 'transient_network' }); };
 const serverDown = () => ({ status: 503, headers: {}, body: Buffer.alloc(0) });
 const ok = () => ({ status: 200, headers: {}, body: Buffer.from('{}') });
-const states = (run) => Object.fromEntries(Object.entries(Object.groupBy(run.persistence.listJobs(), (job) => job.state)).map(([state, list]) => [state, list.length]));
+const states = (run) => {
+  const counts = {};
+  for (const job of run.persistence.listJobs()) counts[job.state] = (counts[job.state] ?? 0) + 1;
+  return counts;
+};
 
 for (const [label, answer] of [['a network or DNS outage', networkDown], ['a 5xx period', serverDown]]) {
   test(`${label}: the run halts after a bounded number of requests and no page becomes permanently_failed`, async () => {
