@@ -14,6 +14,7 @@ import { WorkerStartRefused, startProductionWorker } from './production-worker.m
 import { validateConfiguration } from '../config/configuration.mjs';
 import { persistenceSettings } from '../config/persistence.mjs';
 import { MIN_ELIGIBLE_SCHOOLS, PAGE_TYPES } from '../contracts/source.mjs';
+import { ELIGIBILITY_RULE } from '../contracts/season.mjs';
 import { REPROCESS_STATES } from '../contracts/jobs.mjs';
 import { openPostgresPersistence } from '../persistence/postgres.mjs';
 import { FileRawStore } from '../persistence/index.mjs';
@@ -89,6 +90,17 @@ function configuredMinEligibleSchools(env) {
   return Number(value);
 }
 
+// CURRENT_SEASON_ENDING_YEAR pins the season a crawl runs under (#115), for when
+// the site's index lists a different season than the calendar rule expects, for
+// example because it added the next season early. Unset, a worker derives it from
+// when the school index was fetched. Undefined when unset.
+function configuredSeasonEndingYear(env) {
+  const value = env.CURRENT_SEASON_ENDING_YEAR;
+  if (value === undefined || value === '') return undefined;
+  if (!/^\d{4}$/.test(value)) throw new Error('invalid CURRENT_SEASON_ENDING_YEAR. Expected a four-digit year, or leave it unset. Example: CURRENT_SEASON_ENDING_YEAR=2027');
+  return Number(value);
+}
+
 // CRAWL_SAMPLE restricts the crawl to a sample (#78), as JSON, for example
 // {"schools":["/cbb/schools/duke/men/"],"endingYears":[2024]}. Configuration
 // validation checks it against the full scope.
@@ -105,7 +117,7 @@ function workerConfiguration(env) {
     mode: 'worker', providerId: env.PROVIDER_ID ?? 'provider', allowedHosts: [env.PROVIDER_HOST ?? 'provider.example'],
     rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
-    eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026],
+    eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? ELIGIBILITY_RULE, currentSeasonEndingYear: configuredSeasonEndingYear(env),
     minEligibleSchools: configuredMinEligibleSchools(env),
     authorization: parseAuthorization(env.AUTHORIZATION_JSON),
     dataContract: parseDataContract(env.DATA_CONTRACT_JSON),

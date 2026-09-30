@@ -18,7 +18,7 @@ const workerConfig = {
   mode: 'worker', providerId: authorization.providerId, allowedHosts: authorization.scope.allowedHosts,
   rawStore: 'filesystem', rawStoreRoot, publication: 'private', policy,
   eligibilityPredicate: authorization.scope.eligibilityPredicate,
-  targetEndingYears: authorization.scope.targetEndingYears,
+  currentSeasonEndingYear: 2026,
   authorization, dataContract,
 };
 

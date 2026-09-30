@@ -50,5 +50,13 @@ export async function assertDisposableDatabase(query, env = process.env, { mark 
     host: env.PGHOST, database: env.PGDATABASE, override: env.PG_DESTRUCTIVE_OVERRIDE, hasRows, hasMarker: state.has_marker,
   });
   if (problem) throw new Error(`refusing to continue: ${problem}`);
-  if (mark && !state.has_marker) await query(`CREATE TABLE IF NOT EXISTS ${DISPOSABLE_MARKER_TABLE} (marked_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  if (mark && !state.has_marker) {
+    // Modules that share a database mark it as they load, in parallel; two
+    // CREATE TABLE IF NOT EXISTS can still collide, and losing is fine.
+    try {
+      await query(`CREATE TABLE IF NOT EXISTS ${DISPOSABLE_MARKER_TABLE} (marked_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+    } catch (error) {
+      if (!['42P07', '23505', '42710'].includes(error?.code)) throw error;
+    }
+  }
 }

@@ -3,13 +3,13 @@ import {
   canonicalizeSourceUrl,
   isAllowedSourceUrl,
   EXPECTED_ELIGIBLE_SCHOOLS,
-  REQUIRED_ELIGIBILITY_PREDICATE,
   isEligibleSchool,
   serializeCanonicalPath,
   sourceKey,
 } from '../contracts/source.mjs';
 import { createDiscoveryResult, createJob } from '../contracts/boundaries.mjs';
 import { FULL_CRAWL_SCOPE } from '../contracts/crawl-scope.mjs';
+import { assertSeasonEndingYear, targetEndingYearsFor } from '../contracts/season.mjs';
 
 // Discovery reads the frozen parsed documents (PARSED_DOCUMENTS.md) and follows
 // only links the page published: it never builds a URL from a range, date, or
@@ -24,12 +24,25 @@ import { FULL_CRAWL_SCOPE } from '../contracts/crawl-scope.mjs';
 export class Discovery {
   // minEligibleSchools: a school index that yields fewer eligible schools fails
   // instead of queueing nothing (#115); 0 disables the check.
-  constructor({ providerId, allowedHosts, targetEndingYears, sourceAdapter, scope = FULL_CRAWL_SCOPE, minEligibleSchools = 0 }) {
+  //
+  // The season (contracts/season.mjs, #115) decides which schools are eligible
+  // (To equals its ending year) and which ending years are targets (the five up to
+  // it). A worker sets it with useSeason once it has resolved it; without a
+  // seasonEndingYear it is the latest of targetEndingYears.
+  constructor({ providerId, allowedHosts, targetEndingYears, seasonEndingYear, sourceAdapter, scope = FULL_CRAWL_SCOPE, minEligibleSchools = 0 }) {
     this.minEligibleSchools = minEligibleSchools;
     this.providerId = providerId;
     this.allowedHosts = allowedHosts;
-    this.targetEndingYears = targetEndingYears;
     this.sourceAdapter = sourceAdapter;
+    this.scope = scope;
+    this.seasonEndingYear = seasonEndingYear ?? Math.max(...targetEndingYears);
+    this.targetEndingYears = targetEndingYears ?? targetEndingYearsFor(this.seasonEndingYear);
+  }
+
+  // Adopts the resolved season, and the scope over its target years.
+  useSeason(seasonEndingYear, scope = this.scope) {
+    this.seasonEndingYear = assertSeasonEndingYear(seasonEndingYear);
+    this.targetEndingYears = targetEndingYearsFor(seasonEndingYear);
     this.scope = scope;
   }
 
@@ -97,9 +110,9 @@ export class Discovery {
     };
 
     if (pageType === 'school_index') {
-      const eligibleCount = (page.schools ?? []).filter((school) => isEligibleSchool(school)).length;
+      const eligibleCount = (page.schools ?? []).filter((school) => isEligibleSchool(school, this.seasonEndingYear)).length;
       if (eligibleCount < this.minEligibleSchools) {
-        throw new Error(`the school index yields only ${eligibleCount} eligible school${eligibleCount === 1 ? '' : 's'}; expected at least ${this.minEligibleSchools} (about ${EXPECTED_ELIGIBLE_SCHOOLS}). The eligibility rule (${REQUIRED_ELIGIBILITY_PREDICATE}) may no longer match the site, for example after it added a new season`);
+        throw new Error(`the school index yields only ${eligibleCount} eligible school${eligibleCount === 1 ? '' : 's'}; expected at least ${this.minEligibleSchools} (about ${EXPECTED_ELIGIBLE_SCHOOLS}). The current season is taken to end in ${this.seasonEndingYear} (To == ${this.seasonEndingYear}), which may not match the site, for example if it added a new season early or has not yet. Set CURRENT_SEASON_ENDING_YEAR to the season the index lists`);
       }
       // The sample's schools as identities, resolved like the index rows' links.
       const sample = this.scope.kind === 'sample' ? new Set(this.scope.schools.map((path) => {
@@ -109,8 +122,8 @@ export class Discovery {
         } catch { return null; }
       })) : null;
       for (const [rowIndex, school] of (page.schools ?? []).entries()) {
-        const eligible = isEligibleSchool(school);
-        observations.push({ kind: 'school', school, eligible, parentKey: snapshot.jobKey, rowIndex });
+        const eligible = isEligibleSchool(school, this.seasonEndingYear);
+        observations.push({ kind: 'school', school, eligible, seasonEndingYear: this.seasonEndingYear, parentKey: snapshot.jobKey, rowIndex });
         if (!eligible || !school.historyUrl) continue;
         if (!school.path) {
           reject(school.path, 'school source path is missing', rowIndex);

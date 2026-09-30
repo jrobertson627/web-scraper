@@ -120,7 +120,7 @@ npm run review:personal -- show <job key | issue id>
 
 ### The school index yields too few schools
 
-If the index job ends `parse_failed` with `the school index yields only N eligible schools; expected at least 300 (about 360)`, the eligibility rule (`To == 2026`) no longer matches the site. The usual cause is that Sports Reference added a new season, so every active school's `To` moved to 2027. Nothing was queued, and nothing is wrong with the stored page. Do not lower the floor to get past it: decide the eligibility rule first (issue #115), then reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`). `npm run reconcile` applies the same floor to a stored index and reports it under `eligible_school_count`. `MIN_ELIGIBLE_SCHOOLS` lowers the floor for a store that is not the real index, such as a local experiment; leave it unset for a real crawl.
+If the index job ends `parse_failed` with `the school index yields only N eligible schools; expected at least 300 (about 360)`, the season the crawl assumed (named in the message) is not the season the site's index lists. The usual cause is that Sports Reference added the next season before, or has not yet by, the calendar rollover on 1 November, so every active school's `To` differs by one. Nothing was queued, and nothing is wrong with the stored page. Do not lower the floor to get past it: set `CURRENT_SEASON_ENDING_YEAR` to the season the index lists (`2027` for 2026-27) on the worker, then reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`). Unset it again once the index and the calendar agree. `npm run reconcile` applies the same floor to a stored index and reports it under `eligible_school_count`. `MIN_ELIGIBLE_SCHOOLS` lowers the floor for a store that is not the real index, such as a local experiment; leave it unset for a real crawl.
 
 ### A conflicting record
 
@@ -187,7 +187,7 @@ docker stop scraper-pg
 
 The two `*_CONFIRM` variables are set per command on purpose; `.env.example` does not set them, so a `.env` copied from it never satisfies the guard. The scripts also refuse, whatever the variables say, a `PGHOST` that is not local (localhost, 127.0.0.1, ::1, or a unix socket directory) and a database that already holds crawl data. `test:postgres` marks the database it runs against with a `disposable_test_marker` table, so re-running it, or `smoke:migrations`, on the same local test database works. `PG_DESTRUCTIVE_OVERRIDE=<database name>` skips both checks for a private throwaway server; never set it for a database you care about.
 
-A migration must be repeat-safe (the smoke applies it twice). In production it runs as the pre-deploy command. A migration that rewrites existing rows needs a backup first; the free database plan has none, so export the affected tables with `pg_dump` before deploying.
+A migration must be repeat-safe (the smoke applies it twice), and once it has been applied anywhere it is never edited: `npm run migrate` records each file's checksum and refuses to deploy an edited one, naming it. A change is a new file with the next number. In production it runs as the pre-deploy command. A migration that rewrites existing rows needs a backup first; the free database plan has none, so export the affected tables with `pg_dump` before deploying.
 
 ## Secrets
 

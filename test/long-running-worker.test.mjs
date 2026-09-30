@@ -136,7 +136,7 @@ test('an idle worker wakes up and returns promptly on SIGTERM', async () => {
 test('worker mode runs an assembled worker to completion and reports counts', async () => {
   const dataContract = { providerId: 'provider', version: 'v1', retainedFields: ['school'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'private', retention: 'indefinite' };
   const authorization = { providerId: 'provider', status: 'active', uses: ['crawl'], evidenceRef: 'private-record', contractVersion: 'v1', contractFingerprint: contractFingerprint(dataContract),
-    scope: { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == 2026', targetEndingYears: [2022, 2023, 2024, 2025, 2026] } };
+    scope: { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'CurrentSeasonEndingYear-4..CurrentSeasonEndingYear' } };
   const env = { USER_AGENT: 'test (+ops@example.com)', RAW_STORE_ROOT: process.cwd(), AUTHORIZATION_JSON: JSON.stringify(authorization), DATA_CONTRACT_JSON: JSON.stringify(dataContract) };
   const { app, sleep } = crawl();
   let closed = 0;

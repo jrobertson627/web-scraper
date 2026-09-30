@@ -3,6 +3,7 @@ import { publicationStatus } from '../config/authorization.mjs';
 import { contractFingerprint, dataContractStatus } from '../config/data-contract.mjs';
 import { assertBoundaryPort, createPageRequest } from '../contracts/boundaries.mjs';
 import { API_FIELDS, MAPPED_RETAINED_FIELDS, retainFields } from '../contracts/retained-fields.mjs';
+import { TARGET_YEARS_RULE } from '../contracts/season.mjs';
 
 // Each route maps to one keyed or paged persistence read; no route loads the
 // whole read model. List methods take { limit, cursor } and return
@@ -47,7 +48,7 @@ export function createApiServer({ queries, config, clock = () => new Date() }) {
       const gate = publicationStatus(config.authorization, config.dataContract, config.providerId, clock, {
         expectedContractVersion: config.dataContract?.version,
         expectedContractFingerprint: config.dataContract ? contractFingerprint(config.dataContract) : undefined,
-        expectedScope: config.allowedHosts ? { allowedHosts: config.allowedHosts, eligibilityPredicate: config.eligibilityPredicate, targetEndingYears: config.targetEndingYears } : undefined,
+        expectedScope: config.allowedHosts ? { allowedHosts: config.allowedHosts, eligibilityPredicate: config.eligibilityPredicate, targetEndingYears: TARGET_YEARS_RULE } : undefined,
         dataContractStatus,
       });
       if (!gate.ok) {
