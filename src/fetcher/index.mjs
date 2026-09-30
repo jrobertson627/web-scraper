@@ -199,7 +199,7 @@ export class Fetcher {
         const marker = response.challengeMarker ?? (response.status === 403 ? 'status 403' : null);
         return createFetchResult({ kind: 'operator_stop', code: 'challenge', reason: `operator review required for challenge response${marker ? ` (${marker})` : ''}` });
       }
-      if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`);
+      if (response.status >= 500) return this.#retry(job, `upstream ${response.status}`, 'upstream_5xx');
       // The crawler follows only links the site published, so a 404 or 410 on one may be
       // temporary. Retry on a long backoff; give up only once the budget is spent (#130).
       if (response.status === 404 || response.status === 410) return createFetchResult(notFoundRetry(this.policy, job, response.status, this.clock()));

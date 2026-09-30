@@ -195,6 +195,7 @@ test('review arguments name a command, a target, and for an action the operator 
 
 // Reads answer from memory; the pool is never queried.
 class ReviewPostgres extends PostgresPersistence {
+  async unreviewedRunHalts() { return []; }
   async rawStoreId() { return null; }
   async claimRawStoreId(storeId) { return storeId; }
   constructor(options) { super({ pool: { end: async () => {} }, ...options }); this.closed = 0; }

@@ -22,7 +22,7 @@ import { FixtureSourceAdapter } from './fixture-source-adapter.mjs';
 import { SportsReferenceSourceAdapter } from './sports-reference-source-adapter.mjs';
 import { buildReconciliationReport } from './reconciliation.mjs';
 import { reprocessStoredPages } from './reprocess.mjs';
-import { acceptIssue, disposeJob, disposeMatching, dismissIssue, listForReview, showReviewItem } from './review.mjs';
+import { acceptIssue, disposeJob, disposeMatching, dismissIssue, listForReview, releaseHalt, showReviewItem } from './review.mjs';
 import { NO_CRAWL_EVENTS, jobStateCounts } from './crawl-log.mjs';
 import { MAPPED_RETAINED_FIELDS } from '../contracts/retained-fields.mjs';
 import {
@@ -321,6 +321,7 @@ export async function createWorkerApplication({
     clock,
     events,
     parserVersions: config.parserVersions,
+    minFreeBytes: config.rawMinFreeBytes,
   });
   let seeded;
   // Records the crawl scope, rediscovers stored pages if it widened, and queues
@@ -409,6 +410,7 @@ function reviewOperations({ persistence, rawStore, parsers, discovery, normalize
     dispose: (jobKey, action, { operatorId, reason }) => disposeJob({ persistence, jobKey, action, operatorId, reason, clock }),
     disposeMatching: (action, { states, code, dryRun }, { operatorId, reason }) => disposeMatching({ persistence, action, states, code, dryRun, operatorId, reason, clock }),
     dismiss: (issueId, { operatorId, reason }) => dismissIssue({ persistence, issueId, operatorId, reason, clock }),
+    releaseHalt: (haltId, { operatorId, reason }) => releaseHalt({ persistence, haltId, operatorId, reason }),
     accept: async (issueId, { operatorId, reason }) => {
       if (!parsers) throw new Error('accept needs the worker configuration: AUTHORIZATION_JSON, DATA_CONTRACT_JSON, RAW_STORE_ROOT and USER_AGENT, as for the worker');
       await assertRawStoreMatchesDatabase({ persistence, rawStore });

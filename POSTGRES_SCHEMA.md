@@ -37,3 +37,5 @@ The adapter's pool logs an idle client's `'error'` (by error code only) instead 
 - **An older checkout is not an error.** Versions recorded in the database with no file here are reported and ignored, so code can be rolled back over a newer schema.
 
 `015_host_pause` (#113) adds `host_request_schedule.paused_until`: the time before which no request to the host may start, set after a 429 with a valid `Retry-After`. It is read by the host gate (`hostGate`) the worker checks before claiming a job, and by the Fetcher, and it survives a restart. A later pause is never shortened by an earlier one.
+
+`016_run_halts` (#114) adds `run_halts`: a halt of the whole run that is not one page's (the raw disk is full or nearly so, requests keep failing across pages, the database is out of storage), with who released it and why. A run refuses to start while one is unreleased. It also allows `requeue_failed` in `operator_dispositions`, which is how an operator puts a `permanently_failed` page back in the queue with a fresh budget.

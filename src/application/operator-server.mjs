@@ -177,7 +177,7 @@ export function createOperatorServer({
     try {
       const challenged = await unreviewedChallenges();
       if (challenged.length) {
-        refusal = { status: 409, message: `The crawl is halted: ${challenged.length} challenge stop${challenged.length === 1 ? '' : 's'} (first ${challenged[0].url}) await review. Review them with npm run review before starting a run.` };
+        refusal = { status: 409, message: `The crawl is halted: ${challenged.length} challenge stop${challenged.length === 1 ? '' : 's'} (first ${challenged[0].url ?? challenged[0].code}) await review. Review them with npm run review before starting a run.` };
       } else {
         const claims = await liveClaims();
         if (claims > 0) refusal = { status: 409, message: `Another worker holds ${claims} live claim${claims === 1 ? '' : 's'}; not starting a second run.` };

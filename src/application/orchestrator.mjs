@@ -1,7 +1,8 @@
 import { NO_CRAWL_EVENTS } from './crawl-log.mjs';
 import { normalizeParsedPage, parseSnapshot, parserVersionFor, snapshotFor } from './page-pipeline.mjs';
 import { REQUEST_POLICY_DEFAULTS, chargedRetry } from '../contracts/request-policy.mjs';
-import { HALTING_STOP_CODES, isSystemicStoreError, isTransientStoreError } from '../contracts/jobs.mjs';
+import { HALTING_STOP_CODES, isSystemicRawStoreError, isSystemicStoreError, isTransientStoreError } from '../contracts/jobs.mjs';
+import { HealthMonitor } from './health-monitor.mjs';
 
 // Sleeps for ms, ending early (without throwing) if the signal aborts.
 function abortableDelay(ms, signal) {
@@ -27,6 +28,11 @@ class RunHalt extends Error {
 // baseMs to maxMs, which is about three and a half minutes with the defaults.
 const DEFAULT_STORE_RETRY = Object.freeze({ attempts: 10, baseMs: 1_000, maxMs: 60_000 });
 
+// Failure codes that say nothing about one page: the network, DNS, a timeout, a
+// 5xx, or an infrastructure error while fetching. They feed the health monitor
+// (#114); a 404, a parse failure and a 429 do not.
+const INFRASTRUCTURE_CODES = new Set(['transient_network', 'transport_timeout', 'connect_timeout', 'upstream_5xx', 'infrastructure']);
+
 const FAILURE_SETTLED_STATES = new Set(['retry_wait', 'operator_stop', 'parsed', 'parse_failed', 'permanently_failed']);
 
 export class IngestionOrchestrator {
@@ -35,8 +41,14 @@ export class IngestionOrchestrator {
   // parser for each page type; without it a job's queued version is used.
   // storeRetry ({ attempts, baseMs, maxMs }) bounds how long run() waits out a
   // transient database error from claiming work before it ends the run (#122).
-  constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock, events = NO_CRAWL_EVENTS, parserVersions, storeRetry = DEFAULT_STORE_RETRY }) {
+  // health ({ failuresToOpen, pauseBaseMs, pauseMaxMs, opensToHalt }) tunes the
+  // monitor that tells one page's failure from the whole crawl's, and
+  // minFreeBytes halts the run when the raw store's disk has less than that free
+  // (0 turns the check off) (#114).
+  constructor({ fetcher, discovery, parsers, normalizer, persistence, rawStore, clock, events = NO_CRAWL_EVENTS, parserVersions, storeRetry = DEFAULT_STORE_RETRY, health, minFreeBytes = 0 }) {
     this.events = events;
+    this.health = new HealthMonitor({ ...health, clock });
+    this.minFreeBytes = minFreeBytes;
     this.storeRetry = Object.freeze({ ...DEFAULT_STORE_RETRY, ...storeRetry });
     this.parserVersions = parserVersions;
     this.fetcher = fetcher;
@@ -55,7 +67,7 @@ export class IngestionOrchestrator {
   async #haltBeforeStart(store = (operation) => operation()) {
     const pending = await store(() => this.persistence.unreviewedChallenges());
     if (!pending.length) return null;
-    return this.#halt({ jobKey: pending[0].jobKey, pageType: pending[0].pageType, code: pending[0].code, awaitingReview: pending.length });
+    return this.#halt({ jobKey: pending[0].jobKey, pageType: pending[0].pageType, code: pending[0].code, awaitingReview: pending.length, detail: pending[0].detail ?? undefined });
   }
 
   #halt({ jobKey = null, pageType = null, code = 'challenge', awaitingReview = 1, detail }) {
@@ -105,6 +117,47 @@ export class IngestionOrchestrator {
     };
   }
 
+  // Halts the run when the raw store's disk is nearly full, before a request whose
+  // body could not be kept (#114).
+  async #checkDisk() {
+    if (!this.minFreeBytes || typeof this.rawStore?.freeBytes !== 'function') return;
+    const free = await this.rawStore.freeBytes();
+    if (free < this.minFreeBytes) {
+      throw new RunHalt('raw_disk_low', `the raw store has ${free} bytes free, below the ${this.minFreeBytes} minimum; free space on RAW_STORE_ROOT or enlarge the disk`);
+    }
+  }
+
+  // Records a halt that is not one page's, so a restarted worker stays halted until
+  // an operator releases it. Best effort: the database may be what is down.
+  async #recordHalt(error) {
+    try { await this.persistence.recordRunHalt?.({ reason: error.reason, detail: error.message }); } catch { /* not recorded */ }
+  }
+
+  // Puts a job back without charging it, because its failure is the crawl's and not
+  // its own (#114): it waits out the pause, and the run halts if the monitor says so.
+  async #putBack(job, reason, { pauseUntil, opens, halt }, phase) {
+    const nextAllowedAt = pauseUntil.toISOString();
+    this.events.emit('health.paused', { jobKey: job.key, opens, pauseUntil: nextAllowedAt, reason });
+    let event;
+    try {
+      await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, { nextAllowedAt, lastError: reason, code: 'systemic_pause', ...(phase ? { failurePhase: phase } : {}) });
+      event = { kind: 'retry_wait', code: 'systemic_pause', jobKey: job.key, pageType: job.pageType, reason, nextAllowedAt };
+    } catch (transitionError) {
+      event = { kind: 'unsettled', code: 'systemic_pause', jobKey: job.key, pageType: job.pageType, reason, settleError: transitionError?.message ?? String(transitionError) };
+    }
+    if (halt) throw new RunHalt('systemic_failures', `${opens} pauses in a row with no request succeeding in between: the site, the network or this host is failing every page. Last failure: ${reason}`);
+    return event;
+  }
+
+  // Puts the job back uncharged (best effort: the database may not answer) and ends
+  // the run for a cause that is not the page's.
+  async #haltFor(job, reason, halt, retryMessage) {
+    try {
+      await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, { nextAllowedAt: new Date(this.clock().getTime() + 300_000).toISOString(), lastError: retryMessage, code: halt });
+    } catch { /* claim recovery settles it */ }
+    throw new RunHalt(halt, reason);
+  }
+
   // One log line per wait, not one per sleep.
   #announceWait(wait) {
     const key = wait ? `${wait.host}:${wait.reason}` : null;
@@ -123,7 +176,8 @@ export class IngestionOrchestrator {
     let halt = await this.#haltBeforeStart();
     try {
       while (!halt) {
-        if (await this.#hostWait()) break;
+        if (this.health.waitUntil() || await this.#hostWait()) break;
+        await this.#checkDisk();
         const job = await this.persistence.claimNextJob(this.clock(), workerId, { pageTypes });
         if (!job) break;
         const event = await this.#process(job);
@@ -135,6 +189,7 @@ export class IngestionOrchestrator {
     } catch (error) {
       if (!(error instanceof RunHalt)) throw error;
       halt = this.#halt({ code: error.reason, awaitingReview: 0, detail: error.message });
+      await this.#recordHalt(error);
     }
     return { processed, counts: await this.persistence.jobCounts(), events: Object.freeze(events), ...(halt ? { halt } : {}) };
   }
@@ -154,6 +209,15 @@ export class IngestionOrchestrator {
     try {
       halt = await this.#haltBeforeStart(store);
       while (!halt && !signal?.aborted) {
+        const systemic = this.health.waitUntil();
+        if (systemic) {
+          const held = await store(() => this.persistence.workOutlook({ pageTypes }));
+          if (!held.remaining) break;
+          const waitMs = systemic.getTime() - this.clock().getTime();
+          this.#announceWait({ host: null, reason: 'systemic_pause', waitMs });
+          await sleep(Math.min(maxIdleMs, Math.max(minIdleMs, waitMs)), signal);
+          continue;
+        }
         const wait = await this.#hostWait(store);
         if (wait) {
           const held = await store(() => this.persistence.workOutlook({ pageTypes }));
@@ -163,6 +227,7 @@ export class IngestionOrchestrator {
           continue;
         }
         this.#announceWait(null);
+        await this.#checkDisk();
         const job = await store(() => this.persistence.claimNextJob(this.clock(), workerId, { pageTypes }));
         if (job) {
           const event = await this.#process(job, signal);
@@ -181,6 +246,7 @@ export class IngestionOrchestrator {
     } catch (error) {
       if (!(error instanceof RunHalt)) throw error;
       halt = this.#halt({ code: error.reason, awaitingReview: 0, detail: error.message });
+      await this.#recordHalt(error);
     }
     // stopped: the run ended with work left, for a signal or a challenge halt.
     const stopReason = halt ? halt.reason : signal?.aborted ? 'signal' : null;
@@ -193,6 +259,12 @@ export class IngestionOrchestrator {
     let phase = 'fetch';
     try {
       const result = await this.fetcher.fetch(job, job.lease, { signal });
+      // A transport error or 5xx across different pages is the crawl's failure, not
+      // a page's: past a few in a row the monitor has it put back uncharged (#114).
+      if (INFRASTRUCTURE_CODES.has(result.code) && (result.kind === 'permanently_failed' || (result.kind === 'retry_wait' && result.charge === 'failure'))) {
+        const verdict = this.health.recordFailure(job.key);
+        if (verdict.action !== 'charge') return this.#putBack(job, result.reason, { ...verdict, halt: verdict.action === 'halt' });
+      }
       if (result.kind === 'retry_wait') {
         await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, {
           nextAllowedAt: result.nextAllowedAt,
@@ -208,7 +280,7 @@ export class IngestionOrchestrator {
         return { kind: 'operator_stop', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       if (result.kind === 'permanently_failed') {
-        await this.persistence.transitionJob(job.key, 'permanently_failed', job.lease, { lastError: result.reason });
+        await this.persistence.transitionJob(job.key, 'permanently_failed', job.lease, { lastError: result.reason, ...(result.code ? { code: result.code } : {}) });
         return { kind: 'permanently_failed', code: result.code, jobKey: job.key, pageType: job.pageType, reason: result.reason };
       }
       phase = 'snapshot';
@@ -236,6 +308,7 @@ export class IngestionOrchestrator {
       await this.persistence.recordParse(run, job.lease);
       if (parsed.kind === 'structural_failure') {
         await this.persistence.transitionJob(job.key, 'parse_failed', job.lease, { failureReason: parsed.error });
+        this.health.recordSuccess();
         return { kind: 'parse_failed', jobKey: job.key, pageType: job.pageType, reason: parsed.error, warnings: parsed.warnings };
       }
       phase = 'normalize';
@@ -245,16 +318,22 @@ export class IngestionOrchestrator {
       this.events.emit('page.discovered', { jobKey: job.key, pageType: job.pageType, childKeys: discovered.childJobs.map((child) => child.key) });
       phase = 'commit';
       const committed = await this.persistence.commitPageAndTransition(page, provenance, job.lease);
+      this.health.recordSuccess();
       return { kind: 'parsed', jobKey: job.key, pageType: job.pageType, warnings: [...(parsed.warnings ?? []), ...discovered.warnings], reconciliationIssues: committed.conflict ? 1 : 0 };
     } catch (error) {
       // Fetch-phase errors, and transient database errors in any phase, say
       // nothing about the page: retry. Only the remaining parse, normalize
       // and commit errors are structural and become parse_failed.
+      if (error instanceof RunHalt) throw error;
       if (isSystemicStoreError(error)) {
-        // Out of disk or memory on the database says nothing about this page: put it back
-        // uncharged (best effort; the database may not answer) and end the run.
-        try { await this.persistence.transitionJob(job.key, 'retry_wait', job.lease, { nextAllowedAt: new Date(this.clock().getTime() + 300_000).toISOString(), lastError: `database out of resources (${error.code})` }); } catch { /* claim recovery settles it */ }
-        throw new RunHalt('database_storage_full', `the database reports it is out of disk or memory (${error.code ?? 'systemic'}); free space, then restart the worker`);
+        // Out of disk or memory on the database says nothing about this page.
+        await this.#haltFor(job, `the database reports it is out of disk or memory (${error.code ?? 'systemic'}); free space, then restart the worker`,
+          'database_storage_full', `database out of resources (${error.code})`);
+      }
+      if (isSystemicRawStoreError(error)) {
+        // The raw disk is full or read-only: every write would fail, so halt rather than charge each page.
+        await this.#haltFor(job, `the raw store cannot be written (${error.code ?? 'systemic'}); free space on RAW_STORE_ROOT, then release the halt with npm run review`,
+          'raw_store_write_failed', `raw store write failed (${error.code})`);
       }
       if (phase === 'fetch' || phase === 'snapshot' || isTransientStoreError(error)) return this.#retryFailure(job, error, phase);
       const current = await this.persistence.getJob(job.key);
@@ -289,6 +368,8 @@ export class IngestionOrchestrator {
   async #retryFailure(job, error, phase) {
     if (error?.fatal) throw error;
     const reason = `${phase} failed: ${error?.message ?? String(error)}`;
+    const verdict = this.health.recordFailure(job.key);
+    if (verdict.action !== 'charge') return this.#putBack(job, reason, { ...verdict, halt: verdict.action === 'halt' }, phase);
     const outcome = chargedRetry(this.fetcher.policy ?? REQUEST_POLICY_DEFAULTS, job, reason, error?.code ?? 'infrastructure', this.clock());
     const details = outcome.kind === 'retry_wait'
       ? { nextAllowedAt: outcome.nextAllowedAt, lastError: reason, failurePhase: phase, charge: outcome.charge }

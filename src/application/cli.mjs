@@ -90,6 +90,17 @@ function configuredMinEligibleSchools(env) {
   return Number(value);
 }
 
+// RAW_MIN_FREE_BYTES is the least free space the raw store's disk may have before
+// the worker halts instead of requesting a page it could not keep (#114). It
+// defaults to 512 MiB; 0 turns the check off.
+const DEFAULT_RAW_MIN_FREE_BYTES = 512 * 1024 * 1024;
+function configuredRawMinFreeBytes(env) {
+  const value = env.RAW_MIN_FREE_BYTES;
+  if (value === undefined || value === '') return DEFAULT_RAW_MIN_FREE_BYTES;
+  if (!/^\d{1,15}$/.test(value)) throw new Error('invalid RAW_MIN_FREE_BYTES. Expected a whole number of bytes, or leave it unset. Example: RAW_MIN_FREE_BYTES=536870912');
+  return Number(value);
+}
+
 // CURRENT_SEASON_ENDING_YEAR pins the season a crawl runs under (#115), for when
 // the site's index lists a different season than the calendar rule expects, for
 // example because it added the next season early. Unset, a worker derives it from
@@ -116,7 +127,10 @@ function workerConfiguration(env) {
   return validateConfiguration({
     mode: 'worker', providerId: env.PROVIDER_ID ?? 'provider', allowedHosts: [env.PROVIDER_HOST ?? 'provider.example'],
     rawStore: 'filesystem', rawStoreRoot: env.RAW_STORE_ROOT, publication: 'private',
-    policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '' },
+    // A multi-day crawl retries a failing page over minutes, not seconds: up to five
+    // tries, backing off 1, 2, 4 and 8 minutes (#114).
+    policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '', maxAttempts: 5, retryBaseMs: 60_000, retryMaxMs: 600_000 },
+    rawMinFreeBytes: configuredRawMinFreeBytes(env),
     eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? ELIGIBILITY_RULE, currentSeasonEndingYear: configuredSeasonEndingYear(env),
     minEligibleSchools: configuredMinEligibleSchools(env),
     authorization: parseAuthorization(env.AUTHORIZATION_JSON),
@@ -159,7 +173,7 @@ function stagePageTypes(config) {
 
 const REVIEW_USAGE = 'Example: npm run review -- list, npm run review -- show <job key | issue id>, '
   + 'npm run review -- release-retry <job key> --operator <id> --reason "<why>"';
-const REVIEW_ACTIONS = new Set([...Object.keys(JOB_DISPOSITIONS), 'accept', 'dismiss']);
+const REVIEW_ACTIONS = new Set([...Object.keys(JOB_DISPOSITIONS), 'accept', 'dismiss', 'release-halt']);
 
 // review <list|show|hold|release-retry|release-permanent|accept|dismiss> ...
 // A job action with no target and --state and --code instead is a bulk one
@@ -587,6 +601,7 @@ export async function runCli({
         else if (review.command === 'show') result = await app.show(review.target);
         else if (review.command === 'accept') result = await app.accept(review.target, by);
         else if (review.command === 'dismiss') result = await app.dismiss(review.target, by);
+        else if (review.command === 'release-halt') result = await app.releaseHalt(review.target, by);
         else result = await app.dispose(review.target, review.command, by);
         stdout(JSON.stringify(result, null, 2));
       }

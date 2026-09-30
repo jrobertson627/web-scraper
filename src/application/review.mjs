@@ -17,7 +17,11 @@ import { normalizeParsedPage, parseSnapshot, snapshotFor } from './page-pipeline
 // Actions are authorized by the persistence adapter's operator authorizer
 // (OPERATOR_IDS; see src/config/operators.mjs).
 
-export const JOB_DISPOSITIONS = Object.freeze({ hold: 'hold', 'release-retry': 'release_retry', 'release-permanent': 'release_permanent' });
+// requeue puts a permanently_failed page back in the queue with a fresh budget (#114).
+export const JOB_DISPOSITIONS = Object.freeze({ hold: 'hold', 'release-retry': 'release_retry', 'release-permanent': 'release_permanent', requeue: 'requeue_failed' });
+const HALT_ID = /^halt-[1-9]\d*$/;
+
+export function isHaltId(value) { return HALT_ID.test(value ?? ''); }
 const ISSUE_ID = /^issue-[1-9]\d*$/;
 const DIFF_LIMIT = 40;
 
@@ -72,6 +76,12 @@ function nextStepsForJob(job) {
       `To keep it stopped and record the review: npm run review -- hold ${job.key} --operator <id> --reason "<why>"`,
     ];
   }
+  if (job.state === 'permanently_failed') {
+    return [
+      `To put it back in the queue with a fresh failure budget: npm run review -- requeue ${job.key} --operator <id> --reason "<why>"`,
+      'To requeue every page that failed the same way: npm run review -- requeue --state permanently_failed --code <code> --operator <id> --reason "<why>" [--dry-run]',
+    ];
+  }
   return [];
 }
 
@@ -87,8 +97,11 @@ export async function listForReview({ persistence, jobs = true, issues = true, s
   assertBoundaryPort('persistenceReview', persistence);
   const jobPage = jobs ? await persistence.reviewJobs({ ...(states ? { states } : {}), limit, cursor: jobCursor }) : { items: [], nextCursor: null };
   const issuePage = issues ? await persistence.reviewIssues({ limit, cursor: issueCursor }) : { items: [], nextCursor: null };
+  // Halts of the whole run that await release (#114), which the jobs do not show.
+  const halts = jobs && typeof persistence.unreviewedRunHalts === 'function' ? await persistence.unreviewedRunHalts() : [];
   return Object.freeze({
-    jobs: jobPage.items.map((job) => ({ key: job.key, state: job.state, pageType: job.pageType, url: job.url, reason: job.reason,
+    halts: halts.map((halt) => ({ id: halt.haltId, reason: halt.code, detail: halt.detail, raisedAt: halt.stoppedAt })),
+    jobs: jobPage.items.map((job) => ({ key: job.key, state: job.state, pageType: job.pageType, url: job.url, reason: job.reason, code: job.code,
       parser: job.lastParseRun ? `${job.lastParseRun.parserName}@${job.lastParseRun.parserVersion}` : null, updatedAt: job.updatedAt })),
     nextJobCursor: jobPage.nextCursor,
     issues: issuePage.items.map((issue) => ({ id: issue.id, issueType: issue.issueType, recordKey: issue.recordKey,
@@ -149,6 +162,12 @@ export async function disposeMatching({ persistence, action, states, code, dryRu
   return Object.freeze(result);
 }
 
+// Releases a halt of the whole run (#114), so the worker may start again.
+export async function releaseHalt({ persistence, haltId, operatorId, reason }) {
+  if (!isHaltId(haltId)) throw new Error(`halt id ${haltId} is invalid. Expected an id from the review list. Example: halt-3`);
+  return persistence.releaseRunHalt(haltId, { operatorId, reason });
+}
+
 export async function dismissIssue({ persistence, issueId, operatorId, reason, clock }) {
   if (!isIssueId(issueId)) throw new Error(`issue id ${issueId} is invalid. Expected an id from the review list. Example: issue-12`);
   return persistence.dismissIssue({ issueId, operatorId, reason, at: clock() });
@@ -190,7 +209,16 @@ function column(value, width) { return String(value ?? '').padEnd(width); }
 
 // The review list as text for a terminal.
 export function formatReviewList(list) {
-  const lines = [`Jobs to review (${list.jobs.length}${list.nextJobCursor ? '+' : ''})`];
+  const lines = [];
+  if (list.halts?.length) {
+    lines.push(`Halts awaiting release (${list.halts.length}): the worker makes no request until each is released`);
+    for (const halt of list.halts) {
+      lines.push(`  ${column(halt.id, 14)} ${halt.reason}`);
+      if (halt.detail) lines.push(`  ${column('', 14)} ${halt.detail}`);
+    }
+    lines.push('  Release: npm run review -- release-halt <id> --operator <id> --reason "<why>"');
+  }
+  lines.push(`Jobs to review (${list.jobs.length}${list.nextJobCursor ? '+' : ''})`);
   for (const job of list.jobs) {
     lines.push(`  ${column(job.state, 14)} ${column(job.pageType, 15)} ${job.url}`);
     lines.push(`  ${column('', 14)} ${job.parser ? `${job.parser}: ` : ''}${job.reason ?? 'no reason recorded'}`);

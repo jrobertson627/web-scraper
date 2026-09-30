@@ -88,6 +88,33 @@ npm run review:personal -- release-retry --state operator_stop --code rate_limit
 
 `--code` is one of `rate_limit_cap`, `invalid_retry_after`, `retry_after_too_long`, `challenge`, and so on (`npm run review -- list --json` shows each stop's `code`). The single-page form, `release-retry <job key>`, still works. A release gives the page a fresh 429 budget. If 429s become frequent, pause the crawl for several hours, or a day, before releasing.
 
+## A halt that is not a page (disk, outage, database)
+
+The worker halts, and exits `6`, when the failure is the crawl's and not a page's. `npm run review:personal -- list` shows each one under "Halts awaiting release", with the reason, and the worker makes no request, even after a restart, until each is released.
+
+| Reason | Meaning | What to do |
+| --- | --- | --- |
+| `raw_disk_low` | less than `RAW_MIN_FREE_BYTES` (512 MiB by default) is free on the raw store's disk | enlarge the disk or free space |
+| `raw_store_write_failed` | a raw-store write failed with `ENOSPC`, `EDQUOT` or `EROFS`; the page was put back uncharged | free space, or fix the mount |
+| `systemic_failures` | requests failed across different pages, five pauses in a row (5 minutes doubling to 2 hours): the site, the worker's network or DNS is down | check the site and the worker's network; the pages were not charged, so nothing was lost |
+| `database_storage_full` | the database is out of disk or memory (`53100`, `53200`); recorded if the database can still take a write | upgrade the database's storage |
+
+Fix the cause, then release the halt and start the worker again:
+
+```sh
+npm run review:personal -- release-halt halt-1 --operator <you> --reason "disk enlarged to 20 GB"
+```
+
+A page whose failures were charged before the run noticed (the first one or two of an outage) may have used a try or two, but none is lost. If pages did reach `permanently_failed` some other way (a long outage on an older worker, or a bad page), put them back in the queue with a fresh budget:
+
+```sh
+npm run review:personal -- list --state permanently_failed
+npm run review:personal -- requeue --state permanently_failed --code transient_network --operator <you> --reason "the network is back" --dry-run
+npm run review:personal -- requeue --state permanently_failed --code transient_network --operator <you> --reason "the network is back"
+```
+
+`requeue` also works on one page (`requeue <job key>`), and the pages under it are then crawled as it parses.
+
 ## A challenge (403 or CAPTCHA)
 
 A 403 or a challenge page ("Just a moment...") means the site is refusing the crawler. The stop's reason says which check matched: `status 403`, `challenge response header`, `interstitial title`, or `captcha widget (<name>)`. A CAPTCHA widget in the markup counts only on a response under 32 KiB or a non-2xx one, so an ordinary page that embeds one (a newsletter or feedback form) is parsed, not halted on; if a page fails to parse and mentions a widget, look at it before assuming a block. **The crawl halts on the first one.** That page stops as `operator_stop` with code `challenge`, the run ends without another request, and the worker exits `6` (`worker halted: a challenge response on ... awaits operator review`). The halt is durable: every later run, whether a worker restart, a resume or the operator page's Start button, makes no request until each challenge stop has been reviewed. A Render Background Worker restarts after exiting, so it keeps exiting `6`; suspend the service while you review.

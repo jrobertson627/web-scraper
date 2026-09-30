@@ -80,6 +80,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `OPERATOR_TRUSTED_PROXY_HOPS` | optional; proxies in front of the operator trigger, for the per-client PIN lockout (default 1 on Render; 0 when unproxied) | no |
 | `CURRENT_SEASON_ENDING_YEAR` | optional; pins the season a crawl runs under (for example `2027`), for when the site's index lists a different season than the calendar rule expects. Leave unset: the season is derived from when the school index was fetched (see `REQUEST_POLICY.md`, "Decision: the current season") | no |
 | `MIN_ELIGIBLE_SCHOOLS` | optional; the fewest eligible schools a school index may yield before it fails (default 300). Leave unset for a real crawl (see `OPERATIONS_RUNBOOK.md`) | no |
+| `RAW_MIN_FREE_BYTES` | optional; the least free space the raw store's disk may have before the worker halts rather than request a page it could not keep (default 536870912, 512 MiB; `0` turns it off). Size it with the disk: the full backfill needs about 8 GB | no |
 | `MIGRATE_LOCK_TIMEOUT_MS`, `MIGRATE_STATEMENT_TIMEOUT_MS` | optional; the migration run's `lock_timeout` (default 5000) and `statement_timeout` (default 120000). Raise the statement timeout only for a migration that rewrites a large table | no |
 | `NODE_VERSION` | `22` | no |
 
