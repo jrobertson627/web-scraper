@@ -30,8 +30,7 @@ The service starts as soon as it is created, and a worker with no `CRAWL_SAMPLE`
 
 - [ ] Render dashboard, New, Blueprint, this repository. Enter the prompted values:
   - `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`: the Supabase session pooler values from step 1 (`PGUSER` is `postgres.<project-ref>`).
-  - `PGSSLMODE`: `no-verify`. It is not in the Blueprint's prompts, so add it to the service's environment in the dashboard before the first deploy finishes.
-  - `CURRENT_SEASON_ENDING_YEAR`: `2026`. Also added in the dashboard, and left set until step 9.
+  - `PGSSLMODE=no-verify` and `CURRENT_SEASON_ENDING_YEAR=2026` are already in `render.yaml`, so nothing to enter: the first deploy starts the worker, and the index it fetches fixes the season. Do not clear either until step 9.
   - `USER_AGENT`: application name plus your contact address, for example `web-scraper (+you@example.com)`.
   - **`CRAWL_SAMPLE`: the #78 sample. Do not leave it empty.** `{"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}`
   - `OPERATOR_IDS`: your reviewer id, for example `jessica`. Nothing can be reviewed or refreshed without it.
