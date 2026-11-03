@@ -76,7 +76,7 @@ test('the guard is due until it has checked, then again after its interval', () 
 
 test('the adapter names the Disallow rules it does not refuse', () => {
   assert.deepEqual(adapter.robotsProblems(CURRENT), []);
-  assert.deepEqual(adapter.robotsProblems(`${CURRENT}Disallow: /cbb/players/\n`), ['disallows /cbb/players/, which the crawler does not refuse']);
+  assert.deepEqual(adapter.robotsProblems(`${CURRENT}Disallow: /cbb/awards/\n`), ['disallows /cbb/awards/, which the crawler does not refuse']);
 });
 
 test('robots.txt is fetched before the first page of a run, paced like any request, and not again until it is due', async () => {
@@ -115,7 +115,7 @@ test('a robots.txt that now disallows a crawled path stops before any request to
 });
 
 test('after review the check runs again, and passes once robots.txt is back to what the crawler honours', async () => {
-  const run = harness({ robots: `${CURRENT}Disallow: /cbb/players/\n`, jobs: ['/cbb/schools/duke/men/'] });
+  const run = harness({ robots: `${CURRENT}Disallow: /cbb/awards/\n`, jobs: ['/cbb/schools/duke/men/'] });
   const orchestrator = new IngestionOrchestrator({ fetcher: run.fetcher, discovery: {}, parsers: {}, normalizer: {}, persistence: run.persistence, rawStore: run.rawStore, clock: run.clock });
   assert.equal((await orchestrator.runOnce('worker')).halt.reason, 'robots_changed');
   run.persistence.recordOperatorDisposition(jobFor('/cbb/schools/duke/men/').key, { kind: 'release_retry', operatorId: 'ops', reason: 'the adapter was updated' });
