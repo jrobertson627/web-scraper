@@ -19,6 +19,15 @@ function historyTableId(snapshot) {
   return match[1];
 }
 
+// The ending year a label starts with, or null when it does not start with a
+// season. Used to skip rows older than the first kept season before the strict
+// check below: the manifest run (#169) found 76 histories with old rows labelled
+// like `1972-73-nm`, which failed whole pages for rows that are discarded anyway.
+function leadingEndingYear(label) {
+  const match = /^(\d{4})-\d{2}/.exec(label.trim());
+  return match ? Number(match[1]) + 1 : null;
+}
+
 function endingYearOf(label) {
   const match = /^(\d{4})-(\d{2})$/.exec(label.trim());
   if (!match) throw new Error(`season label is unexpected: ${label.trim() || 'blank'}`);
@@ -42,6 +51,9 @@ export class SchoolHistoryParser {
       const seen = new Set();
       for (const row of rows) {
         const cell = requiredCell($, row, 'season', id);
+        // A row older than the first kept season is not read further, whatever its label says.
+        const leading = leadingEndingYear(cell.text());
+        if (leading !== null && leading < FIRST_KEPT_ENDING_YEAR) continue;
         const endingYear = endingYearOf(cell.text());
         const href = cell.find('a').attr('href');
         if (!href || endingYear < FIRST_KEPT_ENDING_YEAR) continue;

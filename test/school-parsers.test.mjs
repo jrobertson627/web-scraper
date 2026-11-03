@@ -66,6 +66,22 @@ test('school_history@1 reads a commented table and retains only linked target ye
   });
 });
 
+test('school_history@1 skips rows older than the first kept season whatever their label, and still fails closed on a kept one (#169)', () => {
+  const row = (label, href) => `<tr><th data-stat="season">${href ? `<a href="${href}">${label}</a>` : label}</th></tr>`;
+  const page = (rows) => `<table id="duke"><thead><tr><th data-stat="season">Season</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  const parse = (rows) => createProductionParserRegistry().parse('school_history', '1', snapshot('/cbb/schools/duke/men/', page(rows)));
+  const kept = row('2025-26', '/cbb/schools/duke/men/2026.html');
+  // Old rows with a suffix the parser does not know, as 76 real histories had, no longer fail the page.
+  const parsed = parse([kept, row('1972-73-nm'), row('1949-50-nm', '/cbb/schools/duke/men/1950.html'), row('2008-09-nm'), row('2020-21', '/cbb/schools/duke/men/2021.html')]);
+  assert.equal(parsed.kind, 'valid', parsed.error);
+  assert.deepEqual(parsed.document.seasons, [{ endingYear: 2026, url: `${origin}/cbb/schools/duke/men/2026.html` }]);
+  // The same label on a season we load is still a layout failure.
+  const recent = parse([kept, row('2023-24-nm', '/cbb/schools/duke/men/2024.html')]);
+  assert.equal(recent.kind, 'structural_failure');
+  assert.match(recent.error, /season label is unexpected: 2023-24-nm/);
+  for (const label of ['', 'Career', '24-25']) assert.equal(parse([kept, row(label)]).kind, 'structural_failure', `label ${JSON.stringify(label)}`);
+});
+
 test('school parsers fail closed on layout-shift fixtures', () => {
   const fixtures = [
     [new SchoolIndexParser(), '/cbb/schools/', 'school-index-layout-shift.html', /year_max column/],
