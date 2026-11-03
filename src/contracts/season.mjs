@@ -21,7 +21,10 @@ export const LEGACY_SEASON_ENDING_YEAR = 2026;
 // The rules as the authorization record's scope states them. They name the
 // season symbolically, so the record stays valid as the season rolls forward.
 export const ELIGIBILITY_RULE = 'To == CurrentSeasonEndingYear';
-export const TARGET_YEARS_RULE = `CurrentSeasonEndingYear-${TARGET_SEASON_COUNT - 1}..CurrentSeasonEndingYear`;
+// The target window ends at the target final season, which is the current season
+// unless an operator sets it earlier (#165): the schools active now, over the
+// seasons before this one.
+export const TARGET_YEARS_RULE = `TargetFinalEndingYear-${TARGET_SEASON_COUNT - 1}..TargetFinalEndingYear`;
 
 export function assertSeasonEndingYear(year) {
   if (!Number.isSafeInteger(year) || year < 1900 || year > 2200) {
@@ -40,6 +43,19 @@ export function seasonEndingYearAt(date, rolloverMonth = SEASON_ROLLOVER_MONTH) 
 export function targetEndingYearsFor(seasonEndingYear) {
   assertSeasonEndingYear(seasonEndingYear);
   return Object.freeze(Array.from({ length: TARGET_SEASON_COUNT }, (_, index) => seasonEndingYear - (TARGET_SEASON_COUNT - 1) + index));
+}
+
+// The last season of the target window (#165): the configured year, else the
+// season itself. It may not be later than the season, since the window would then
+// reach seasons the eligible schools have not played.
+export function resolveTargetFinalEndingYear({ explicit, seasonEndingYear }) {
+  assertSeasonEndingYear(seasonEndingYear);
+  if (explicit === undefined || explicit === null) return seasonEndingYear;
+  assertSeasonEndingYear(explicit);
+  if (explicit > seasonEndingYear) {
+    throw new Error(`the target final season ${explicit} is later than the season ${seasonEndingYear}. Expected a year no later than the season, or leave TARGET_FINAL_ENDING_YEAR unset`);
+  }
+  return explicit;
 }
 
 // The season a crawl runs under. An explicit year (CURRENT_SEASON_ENDING_YEAR)

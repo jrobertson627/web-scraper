@@ -14,7 +14,7 @@ import { contractFingerprint } from '../src/config/data-contract.mjs';
 
 const validPolicy = { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'test (+ops@example.com)' };
 const validScope = { eligibilityPredicate: 'To == CurrentSeasonEndingYear', currentSeasonEndingYear: 2026, targetEndingYears: [2022, 2023, 2024, 2025, 2026] };
-const validAuthorizationScope = { allowedHosts: ['allowed.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'CurrentSeasonEndingYear-4..CurrentSeasonEndingYear' };
+const validAuthorizationScope = { allowedHosts: ['allowed.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'TargetFinalEndingYear-4..TargetFinalEndingYear' };
 const validDataContract = { providerId: 'p', version: 'v1', retainedFields: ['school', 'games'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'public', retention: 'indefinite' };
 
 function makeJob(providerId = 'p', absoluteUrl = 'https://allowed.example/page') {

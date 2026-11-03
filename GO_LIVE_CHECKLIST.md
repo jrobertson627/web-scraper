@@ -9,7 +9,7 @@ Rough clock time once provisioned: sample about 10 minutes, manifest about 40 mi
 ## 0. Before anything
 
 - [ ] `master` is the code you mean to deploy, and its CI is green (Node 20.18.1, Node 22, PostgreSQL 16, local mode, parser evidence).
-- [ ] **The season has already rolled over (1 November UTC), and this launch is for the previous seasons: 2021-22 to 2025-26, ending years 2022 to 2026.** Left to the clock, a crawl started now would run under 2027 and target 2023 to 2027. So the worker is **pinned**: `CURRENT_SEASON_ENDING_YEAR=2026` (step 2). A pinned year always wins over the clock, so it must stay set for the whole load, restarts included. Unsetting it after the index is fetched would flip the store to 2027, because the fetch date is now after the rollover. The pin only works if the site's index still lists 2025-26 schools with `To` 2026; if it already lists 2026-27 the index fails with too few eligible schools (step 6). When you later want 2026-27, unset the pin and run `refresh-season` (step 9).
+- [ ] **The season has already rolled over (1 November UTC), and this launch is for the previous seasons: 2021-22 to 2025-26, ending years 2022 to 2026.** The site already lists 2026-27, so the schools active now have `To` 2027, and a crawl started now would target 2023 to 2027. So the worker sets `TARGET_FINAL_ENDING_YEAR=2026` (step 2): the schools are the ones active in 2026-27 (about 360), and the seasons loaded are the five ending in 2026. The season that picks the schools is derived from when the school index is fetched, so it is 2027 for an index fetched on or after 1 November 2026. Keep `TARGET_FINAL_ENDING_YEAR` set for the whole load. When you later want 2026-27, unset it and run `refresh-season` (step 9).
 - [ ] **Your local `.env` points at the old Render database**, which this launch replaces with Supabase. Replace its `PG*` values or blank them so no local command can reach the wrong database, and never put the Supabase values there either. Never run `npm run test:postgres` or `npm run smoke:migrations` with real values: they truncate tables. Use CI, or a local Docker Postgres with `PG_TEST_CONFIRM=disposable`.
 - [ ] Nothing to capture for #38: Sports Reference does not record canceled or rescheduled games, so there is no such page to freeze (`fixtures/sports-reference/README.md`). A parser change needs the real-capture evidence line in its PR (`npm run parsers:verify`).
 
@@ -30,7 +30,7 @@ The service starts as soon as it is created, and a worker with no `CRAWL_SAMPLE`
 
 - [ ] Render dashboard, New, Blueprint, this repository. Enter the prompted values:
   - `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`: the Supabase session pooler values from step 1 (`PGUSER` is `postgres.<project-ref>`).
-  - `PGSSLMODE=no-verify` and `CURRENT_SEASON_ENDING_YEAR=2026` are already in `render.yaml`, so nothing to enter: the first deploy starts the worker, and the index it fetches fixes the season. Do not clear either until step 9.
+  - `PGSSLMODE=no-verify` and `TARGET_FINAL_ENDING_YEAR=2026` are already in `render.yaml`, so nothing to enter: the first deploy starts the worker. Do not clear either until step 9.
   - `USER_AGENT`: application name plus your contact address, for example `web-scraper (+you@example.com)`.
   - **`CRAWL_SAMPLE`: the #78 sample. Do not leave it empty.** `{"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}`
   - `OPERATOR_IDS`: your reviewer id, for example `jessica`. Nothing can be reviewed or refreshed without it.
@@ -62,7 +62,7 @@ The service starts as soon as it is created, and a worker with no `CRAWL_SAMPLE`
 ## 6. The manifest dry run (#44), about 366 requests
 
 - [ ] Clear `CRAWL_SAMPLE` in the dashboard and set `CRAWL_STAGE=manifest`, then restart the service. It records the full scope, reads the index and every eligible school's history, and stops with the season pages queued.
-- [ ] **If the index stops as `parse_failed` with "yields only N eligible schools; expected at least 300":** with the pin at 2026, the site's index already lists 2026-27 (active schools have `To` 2027). Nothing is wrong with the stored page, but the previous seasons can no longer be selected by eligibility. Stop here and decide before changing anything: pinning `2027` loads 2023 to 2027, which drops 2022 and includes the season in progress. Do not lower `MIN_ELIGIBLE_SCHOOLS` (`OPERATIONS_RUNBOOK.md`).
+- [ ] **If the index stops as `parse_failed` with "yields only N eligible schools; expected at least 300":** the season the crawl assumed is not the one the site lists. The season comes from when the index was fetched (2027 from 1 November 2026) and `TARGET_FINAL_ENDING_YEAR` does not change it, so this means the site's index is not on 2026-27 after all. Set `CURRENT_SEASON_ENDING_YEAR` to the season it lists, reprocess the index (`npm run reprocess:personal -- --page-type school_index --state parse_failed`), and unset it again once they agree. Do not lower `MIN_ELIGIBLE_SCHOOLS` (`OPERATIONS_RUNBOOK.md`).
 - [ ] `npm run manifest > manifest.txt`. Read it: eligible schools against index rows (about 360), linked and unavailable seasons per school, unique URLs, projected requests and hours, projected raw storage. Surprising unavailable seasons are worth a look before the backfill.
 
 ## 6b. Size the storage, before the backfill (#45)
@@ -75,10 +75,10 @@ Render disks only grow, so choose the size deliberately.
 ## 7. The full backfill (#45), 60 to 70 hours
 
 - [ ] Repeat step 3.
-- [ ] Clear `CRAWL_STAGE` (and confirm `CRAWL_SAMPLE` is empty and `CURRENT_SEASON_ENDING_YEAR` is still `2026`), then restart the service. It continues from the queued seasons; nothing is fetched twice.
+- [ ] Clear `CRAWL_STAGE` (and confirm `CRAWL_SAMPLE` is empty and `TARGET_FINAL_ENDING_YEAR` is still `2026`), then restart the service. It continues from the queued seasons; nothing is fetched twice.
 - [ ] **Watch it:** `npm run status` every so often (pace at or below 600 an hour, `remaining` falling), and the service logs for `crawl.summary`, `worker.idle`, `runHalts`, `challengeStops` and `operatorStops` (`OPERATIONS_RUNBOOK.md`, "Watch it"). Pausing is suspending the service; resuming continues where it stopped.
 - [ ] **If it stops for a reason that is not one page** (a challenge or CAPTCHA, a 429 that needs you, robots.txt changed, the disk or database full, requests failing across pages): the worker logs `worker.idle` with `severity: error`. Read the review section of the runbook, fix the cause, release it with `npm run review:personal` (`release-halt`, `release-retry`), then restart the service. It never resumes by itself.
-- [ ] The pin keeps the whole backfill on 2026. Do not unset it until the load is reconciled (step 8).
+- [ ] `TARGET_FINAL_ENDING_YEAR` keeps the whole backfill on the seasons ending 2022 to 2026. Do not unset it until the load is reconciled (step 8).
 
 ## 8. Reconcile (#46)
 
@@ -90,7 +90,7 @@ Render disks only grow, so choose the size deliberately.
 
 ## 9. After go-live
 
-- [ ] **To add 2026-27 later** (once the site lists it): unset `CURRENT_SEASON_ENDING_YEAR` on the worker (or set it to `2027`), then `npm run review:personal -- refresh-season --operator <you> --reason "..." --dry-run`, then without `--dry-run`, then start the worker (`OPERATIONS_RUNBOOK.md`, "When a new season starts"). The index was fetched after the rollover, so the refresh will report the store as already on 2027 and do nothing; it needs `--force` (use it on the dry run too). Adding a new season does not need a code change.
+- [ ] **To add 2026-27 later** (once the site lists it): unset `TARGET_FINAL_ENDING_YEAR` on the worker (and in `render.yaml`, or the next Blueprint sync puts it back), then `npm run review:personal -- refresh-season --operator <you> --reason "..." --dry-run`, then without `--dry-run`, then start the worker (`OPERATIONS_RUNBOOK.md`, "When a new season starts"). The index was fetched after the rollover, so the refresh will report the store as already on 2027 and do nothing; it needs `--force` (use it on the dry run too). Adding a new season does not need a code change.
 - [ ] A finished worker idles; restart the service to run it again. A halted one stays halted until reviewed.
 - [ ] Changing the schema is a new migration, never an edit of an applied file; changing what the tracker reads is a new `tracker_v<n>` version (`POSTGRES_SCHEMA.md`, `TRACKER_INTERFACE.md`).
 - [ ] A parser change needs real-capture evidence in its PR (`npm run parsers:verify`).

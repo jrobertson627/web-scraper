@@ -39,10 +39,12 @@ export class Discovery {
     this.targetEndingYears = targetEndingYears ?? targetEndingYearsFor(this.seasonEndingYear);
   }
 
-  // Adopts the resolved season, and the scope over its target years.
-  useSeason(seasonEndingYear, scope = this.scope) {
+  // Adopts the resolved season, and the scope over its target years. The target
+  // window ends at targetFinalEndingYear when an operator set one earlier than
+  // the season (#165); eligibility still follows the season.
+  useSeason(seasonEndingYear, scope = this.scope, targetFinalEndingYear = seasonEndingYear) {
     this.seasonEndingYear = assertSeasonEndingYear(seasonEndingYear);
-    this.targetEndingYears = targetEndingYearsFor(seasonEndingYear);
+    this.targetEndingYears = targetEndingYearsFor(targetFinalEndingYear);
     this.scope = scope;
   }
 

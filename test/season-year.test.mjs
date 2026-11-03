@@ -5,7 +5,7 @@ import { validateConfiguration } from '../src/config/configuration.mjs';
 import { createSnapshot } from '../src/contracts/boundaries.mjs';
 import { FULL_CRAWL_SCOPE, createCrawlScope, fullCrawlScope, nextCrawlScope, scopeCovers } from '../src/contracts/crawl-scope.mjs';
 import {
-  ELIGIBILITY_RULE, LEGACY_SEASON_ENDING_YEAR, SEASON_ROLLOVER_MONTH, TARGET_YEARS_RULE, resolveSeasonEndingYear, seasonEndingYearAt, targetEndingYearsFor,
+  ELIGIBILITY_RULE, LEGACY_SEASON_ENDING_YEAR, SEASON_ROLLOVER_MONTH, TARGET_YEARS_RULE, resolveSeasonEndingYear, resolveTargetFinalEndingYear, seasonEndingYearAt, targetEndingYearsFor,
 } from '../src/contracts/season.mjs';
 import { createSourceUrl, isEligibleSchool } from '../src/contracts/source.mjs';
 import { Discovery } from '../src/discovery/index.mjs';
@@ -115,6 +115,40 @@ test('configuration derives the season from the clock unless it is pinned, and d
   assert.throws(() => validateConfiguration({ ...base, currentSeasonEndingYear: 26 }), /currentSeasonEndingYear is invalid/);
   assert.throws(() => validateConfiguration({ ...base, currentSeasonEndingYear: 2027, targetEndingYears: [2022, 2023, 2024, 2025, 2026] }), /targetEndingYears is invalid/);
   assert.throws(() => validateConfiguration({ ...base, eligibilityPredicate: 'To == 2026' }), /eligibilityPredicate is invalid/);
+});
+
+test('the target final season ends the window earlier than the season, never later (#165)', () => {
+  assert.equal(resolveTargetFinalEndingYear({ seasonEndingYear: 2027 }), 2027, 'unset, it is the season');
+  assert.equal(resolveTargetFinalEndingYear({ explicit: 2026, seasonEndingYear: 2027 }), 2026);
+  assert.equal(resolveTargetFinalEndingYear({ explicit: 2027, seasonEndingYear: 2027 }), 2027);
+  assert.throws(() => resolveTargetFinalEndingYear({ explicit: 2028, seasonEndingYear: 2027 }), /later than the season/);
+  assert.throws(() => resolveTargetFinalEndingYear({ explicit: 26, seasonEndingYear: 2027 }), /four-digit year/);
+
+  const clock = { clock: () => at('2026-11-03T00:00:00Z') };
+  const config = validateConfiguration({ ...base, targetFinalEndingYear: 2026 }, clock);
+  assert.deepEqual([config.currentSeasonEndingYear, config.targetFinalEndingYear, config.targetFinalYearPinned, [...config.targetEndingYears]],
+    [2027, 2026, true, [2022, 2023, 2024, 2025, 2026]], 'eligible schools follow the season, the window ends a year earlier');
+  assert.equal(config.crawlScope, FULL_CRAWL_SCOPE, 'that window is the legacy full scope, so the stored scope is unchanged');
+  const unset = validateConfiguration(base, clock);
+  assert.deepEqual([unset.targetFinalEndingYear, unset.targetFinalYearPinned, [...unset.targetEndingYears]], [2027, false, [2023, 2024, 2025, 2026, 2027]]);
+  assert.throws(() => validateConfiguration({ ...base, targetFinalEndingYear: 2028 }, clock), /targetFinalEndingYear is invalid/);
+  assert.throws(() => validateConfiguration({ ...base, targetFinalEndingYear: 26 }, clock), /targetFinalEndingYear is invalid/);
+  assert.throws(() => validateConfiguration({ ...base, targetFinalEndingYear: 2026, targetEndingYears: [2023, 2024, 2025, 2026, 2027] }, clock), /targetEndingYears is invalid/);
+});
+
+test('discovery reads the index under the season and queues only the window before it (#165)', () => {
+  const discovery = new Discovery({ providerId: 'p', allowedHosts: [HOST], seasonEndingYear: 2027, targetEndingYears: targetEndingYearsFor(2026), minEligibleSchools: 3 });
+  const index = discovery.discover('school_index', snapshotOf(indexUrl), schoolIndexDocument([...schools(4, 2027), ...schools(1, 2026).map((school) => ({ ...school, path: '/school/old' }))]));
+  assert.equal(index.childJobs.length, 4, 'the schools active in 2026-27 are eligible; one that ended in 2026 is not');
+  const historyUrl = createSourceUrl('p', `https://${HOST}/school/0/men/`);
+  const rows = [2021, 2022, 2023, 2024, 2025, 2026, 2027].map((endingYear) => ({ endingYear, url: `https://${HOST}/school/0/men/${endingYear}.html` }));
+  const years = () => discovery.discover('school_history', snapshotOf(historyUrl), schoolHistoryDocument(rows)).childJobs
+    .map((job) => Number(/(\d{4})\.html$/.exec(job.sourceUrl.absoluteUrl)[1]));
+  assert.deepEqual(years(), [2022, 2023, 2024, 2025, 2026], 'no 2027 season page, which has barely started');
+  discovery.useSeason(2027, undefined, 2026);
+  assert.deepEqual(years(), [2022, 2023, 2024, 2025, 2026]);
+  discovery.useSeason(2027);
+  assert.deepEqual(years(), [2023, 2024, 2025, 2026, 2027], 'without a target final season the window ends at the season');
 });
 
 test('the authorization record states the rules symbolically, so it stays valid as the season rolls', () => {

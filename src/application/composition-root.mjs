@@ -1,7 +1,7 @@
 import { validateConfiguration } from '../config/configuration.mjs';
 import { createSourceUrl, sourceKey } from '../contracts/source.mjs';
 import { refreshSeason } from './season-refresh.mjs';
-import { ELIGIBILITY_RULE, resolveSeasonEndingYear, targetEndingYearsFor } from '../contracts/season.mjs';
+import { ELIGIBILITY_RULE, resolveSeasonEndingYear, resolveTargetFinalEndingYear, targetEndingYearsFor } from '../contracts/season.mjs';
 import { createCrawlScope } from '../contracts/crawl-scope.mjs';
 import { assertSourceAdapter } from '../contracts/source-adapter.mjs';
 import { assertBoundaryPort, createJob } from '../contracts/boundaries.mjs';
@@ -39,6 +39,8 @@ export function createFixtureApplication({
   retainedFields = MAPPED_RETAINED_FIELDS, crawlScope,
   // The season the fixture crawl is pinned to; null derives it from the clock, as a worker does.
   pinSeason = 2026,
+  // The last season of the target window when it is earlier than the season (#165); undefined ends it at the season.
+  targetFinalYear,
 } = {}) {
   if (sharedState?.transport instanceof HttpTransport) {
     throw new Error('fixture application refused the real HttpTransport: its fake clock would skip request pacing. Use createWorkerApplication for real requests.');
@@ -72,6 +74,7 @@ export function createFixtureApplication({
     mode: 'local', providerId, allowedHosts: [host], rawStore: 'memory',
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: 'web-scraper-fixture (+local@example.com)' },
     eligibilityPredicate: ELIGIBILITY_RULE, ...(pinSeason === null ? {} : { currentSeasonEndingYear: pinSeason }),
+    ...(targetFinalYear === undefined ? {} : { targetFinalEndingYear: targetFinalYear }),
     publication: 'private', crawlScope,
   }, { clock });
   const rawStore = sharedState?.rawStore ?? createRawStore(config.rawStore, config.rawStoreRoot);
@@ -238,9 +241,10 @@ function resolveCrawlSeason({ persistence, rootJob, config, clock }) {
 
 // Gives discovery the resolved season and returns the scope over its target years.
 function adoptSeason({ discovery, config, events, season }) {
-  const scope = createCrawlScope(config.crawlScope, { targetEndingYears: targetEndingYearsFor(season.seasonEndingYear) });
-  discovery.useSeason(season.seasonEndingYear, scope);
-  events.emit('crawl.season', { seasonEndingYear: season.seasonEndingYear, source: season.source });
+  const targetFinalEndingYear = resolveTargetFinalEndingYear({ explicit: config.targetFinalYearPinned ? config.targetFinalEndingYear : undefined, seasonEndingYear: season.seasonEndingYear });
+  const scope = createCrawlScope(config.crawlScope, { targetEndingYears: targetEndingYearsFor(targetFinalEndingYear) });
+  discovery.useSeason(season.seasonEndingYear, scope, targetFinalEndingYear);
+  events.emit('crawl.season', { seasonEndingYear: season.seasonEndingYear, targetFinalEndingYear, source: season.source });
   return scope;
 }
 
@@ -466,6 +470,7 @@ export function createReviewApplication({
   const rootJob = { key: rootJobKey(adapter) };
   const season = async () => adoptSeason({ discovery, config, events: NO_CRAWL_EVENTS, season: await resolveCrawlSeason({ persistence, rootJob, config, clock }) });
   const seasonRefresh = (options) => refreshSeason({ persistence, rootKey: rootJob.key, clock,
-    pinnedYear: config.seasonYearPinned ? config.currentSeasonEndingYear : undefined, ...options });
+    pinnedYear: config.seasonYearPinned ? config.currentSeasonEndingYear : undefined,
+    targetFinalYear: config.targetFinalYearPinned ? config.targetFinalEndingYear : undefined, ...options });
   return reviewOperations({ persistence, rawStore: store, parsers, discovery, normalizer, clock, season, seasonRefresh });
 }

@@ -4,7 +4,7 @@ import { authorizationStatus, publicationStatus } from '../src/config/authorizat
 import { createDataContract, dataContractStatus, contractFingerprint } from '../src/config/data-contract.mjs';
 import { validateConfiguration } from '../src/config/configuration.mjs';
 
-const scope = { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'CurrentSeasonEndingYear-4..CurrentSeasonEndingYear' };
+const scope = { allowedHosts: ['provider.example'], eligibilityPredicate: 'To == CurrentSeasonEndingYear', targetEndingYears: 'TargetFinalEndingYear-4..TargetFinalEndingYear' };
 const configScope = { eligibilityPredicate: scope.eligibilityPredicate, currentSeasonEndingYear: 2026 };
 const contract = { providerId: 'provider', version: 'v1', retainedFields: ['school', 'games'], attribution: 'Provider', sourceLinksRequired: true, redistribution: 'public', retention: 'indefinite', effectiveAt: '2026-01-01T00:00:00.000Z' };
 const authorization = { providerId: 'provider', status: 'active', uses: ['crawl', 'publish'], evidenceRef: 'vault://grant-1', contractVersion: 'v1', scope };
