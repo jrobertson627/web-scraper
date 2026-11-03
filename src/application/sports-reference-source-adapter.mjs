@@ -10,10 +10,14 @@ export const SPORTS_REFERENCE_HOST = 'www.sports-reference.com';
 const ORIGIN = `https://${SPORTS_REFERENCE_HOST}`;
 
 // The /cbb/ Disallow rules of https://www.sports-reference.com/robots.txt as
-// recorded in #36. The index.cgi rule is `/cbb/boxscores/index.cgi?*`; the
-// adapter refuses the script with or without a query.
+// recorded in #36, plus the search and player-splits rules the live file carried
+// at go-live (#162). The index.cgi rule is `/cbb/boxscores/index.cgi?*`; the
+// adapter refuses the script with or without a query. The only /cbb/players/
+// rules are `/cbb/players/*/splits...`, and a wildcard rule is compared by its
+// literal prefix, so the whole /cbb/players/ prefix is refused rather than the
+// wildcard modelled; no page type lives there.
 export const SPORTS_REFERENCE_DISALLOWED_PATHS = Object.freeze([
-  '/cbb/boxscores/index.cgi', '/cbb/req/', '/cbb/short/', '/cbb/nocdn/',
+  '/cbb/boxscores/index.cgi', '/cbb/req/', '/cbb/short/', '/cbb/nocdn/', '/cbb/search.cgi', '/cbb/players/',
 ]);
 
 const SLUG = '[a-z0-9]+(?:-[a-z0-9]+)*';

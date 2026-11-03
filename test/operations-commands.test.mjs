@@ -22,9 +22,9 @@ test('robots:check passes when the adapter already refuses every /cbb/ rule, and
   const current = robotsCheck('User-agent: *\nDisallow: /cbb/boxscores/index.cgi?*\nDisallow: /cbb/req/\nDisallow: /cbb/short/\nDisallow: /cbb/nocdn/\nDisallow: /cfb/req/\n');
   assert.equal(current.status, 0, current.stderr);
   assert.match(current.stdout, /robots.txt check passed/);
-  const changed = robotsCheck('User-agent: *\nDisallow: /cbb/req/\nDisallow: /cbb/players/\n');
+  const changed = robotsCheck('User-agent: *\nDisallow: /cbb/req/\nDisallow: /cbb/awards/\n');
   assert.equal(changed.status, 1);
-  assert.match(changed.stdout, /does not refuse: \/cbb\/players\//);
+  assert.match(changed.stdout, /does not refuse: \/cbb\/awards\//);
   assert.equal(robotsCheck('<html>Just a moment...</html>').status, 2, 'a challenge page is not a robots.txt');
   assert.equal(robotsCheck(null).status, 2);
 });

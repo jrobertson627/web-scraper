@@ -33,12 +33,18 @@ test('Sports Reference adapter refuses robots.txt-disallowed paths before classi
   for (const path of [
     '/cbb/boxscores/index.cgi?month=1&day=20&year=2024', '/cbb/boxscores/index.cgi',
     '/cbb/req/202602162/tlogo/ncaa/duke-2024.png', '/cbb/short/inc/footer.html', '/cbb/nocdn/schools/duke/men/2024.html',
+    '/cbb/search.cgi', '/cbb/players/zion-williamson-1/splits/2019.html',
   ]) {
     assert.throws(() => adapter.classify(url(path)), /robots\.txt disallows/, path);
     assert.throws(() => adapter.canonicalize(url(path)), /robots\.txt disallows/, path);
     assert.throws(() => adapter.schoolUrl(url(path)), /robots\.txt disallows/, path);
   }
-  assert.deepEqual([...SPORTS_REFERENCE_DISALLOWED_PATHS], ['/cbb/boxscores/index.cgi', '/cbb/req/', '/cbb/short/', '/cbb/nocdn/']);
+  assert.deepEqual([...SPORTS_REFERENCE_DISALLOWED_PATHS], ['/cbb/boxscores/index.cgi', '/cbb/req/', '/cbb/short/', '/cbb/nocdn/', '/cbb/search.cgi', '/cbb/players/']);
+  // The live file's rules that halted the first run (#162): none is left unrefused.
+  assert.deepEqual(unrefusedRobotsRules([
+    'User-agent: *', 'Disallow: /cbb/search.cgi', 'Disallow: /cbb/players/*/splits/*/?*', 'Disallow: /cbb/players/*/splits/*?*',
+    'Disallow: /cbb/players/*/splits/*', 'Disallow: /cbb/players/*/splits*', 'Disallow: /cbb/boxscores/index.cgi?*', 'Disallow: /cbb/req/',
+  ].join('\n')), []);
 });
 
 test('Sports Reference adapter refuses other hosts, providers, queries, and unpublished shapes', () => {
@@ -48,7 +54,7 @@ test('Sports Reference adapter refuses other hosts, providers, queries, and unpu
   assert.throws(() => adapter.classify(url('/cbb/schools/duke/men/2024.html?ref=nav')), /no query string/);
   for (const path of [
     '/cbb/schools', '/cbb/schools/duke/men', '/cbb/schools/duke/women/', '/cbb/schools/duke/women/2024.html',
-    '/cbb/schools/Duke/men/', '/cbb/schools/duke/men/24.html', '/cbb/players/kyle-filipowski-1.html',
+    '/cbb/schools/Duke/men/', '/cbb/schools/duke/men/24.html', '/cbb/coaches/mike-krzyzewski-1.html',
     '/cbb/boxscores/', '/cbb/boxscores/2024-01-27-duke.html', '/cbb/seasons/men/2024.html', '/cbb//schools/duke/men/',
   ]) assert.throws(() => adapter.classify(url(path)), /is not a school index, school history, season, game log, or box score page/, path);
 });
