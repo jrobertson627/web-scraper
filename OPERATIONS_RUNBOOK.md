@@ -1,6 +1,6 @@
 # Operations runbook
 
-How to run the crawler in production: start, watch, pause, resume, review what it stopped for, and upgrade a parser safely. It assumes the Render deployment in [`DEPLOYMENT.md`](DEPLOYMENT.md) and needs no knowledge of the code. Where a step needs a decision, the runbook says so.
+How to run the crawler in production: start, watch, pause, resume, review what it stopped for, and upgrade a parser safely. It assumes the deployment in [`DEPLOYMENT.md`](DEPLOYMENT.md) and needs no knowledge of the code. Where a step needs a decision, the runbook says so.
 
 Every command below runs in the crawl host's shell (the Render service shell), which already has `PERSISTENCE=postgres`, the `PG*` values, `RAW_STORE_ROOT` and `USER_AGENT`. The `:personal` variants load the checked-in private-use authorization and data contract (`config/personal-use.*.json`).
 
@@ -224,7 +224,7 @@ Full procedure: `fixtures/sports-reference/README.md`.
 
 ## Test a migration on a disposable database
 
-Never point these commands at the Render database: they create and delete tables. CI runs both on every pull request against a throwaway `postgres:16`. To run them locally with Docker:
+Never point these commands at the real (Supabase) database: they create and delete tables. CI runs both on every pull request against a throwaway `postgres:16`. To run them locally with Docker:
 
 ```sh
 docker run --rm -d --name scraper-pg -e POSTGRES_USER=scraper -e POSTGRES_PASSWORD=scraper -e POSTGRES_DB=scraper_test -p 5432:5432 postgres:16

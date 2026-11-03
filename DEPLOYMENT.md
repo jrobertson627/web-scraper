@@ -4,19 +4,19 @@ Day-to-day operation (starting, pausing, reviewing, parser upgrades) is in [`OPE
 
 The order to take it live (provisioning, the sample, the manifest, the backfill, the tracker's access) is in [`GO_LIVE_CHECKLIST.md`](GO_LIVE_CHECKLIST.md).
 
-This is the production topology on Render and the rules for configuration and secrets. It follows the decisions recorded on issue #52: the scraper only fills the database, and march-madness-tracker reads PostgreSQL directly.
+This is the production topology (the worker on Render, the database on Supabase) and the rules for configuration and secrets. It follows the decisions recorded on issue #52: the scraper only fills the database, and march-madness-tracker reads PostgreSQL directly.
 
 Nothing in this repository creates or changes Render resources by itself. `render.yaml` is a Blueprint that someone applies from the Render dashboard; until then it is documentation.
 
 ## Topology
 
 ```
-                        Render (one region, private network)
+          Render                                        Supabase
   +-----------------------------------+        +------------------------------+
-  | web-scraper-worker                |        | Render PostgreSQL            |
-  | Background Worker                 | -----> | (existing instance)          |
-  | npm run start:worker:personal     | internal|                              |
-  | disk: /var/data (raw store)       |  URL   +------------------------------+
+  | web-scraper-worker                |  TLS   | PostgreSQL                   |
+  | Background Worker                 | -----> | (session pooler, port 5432)  |
+  | npm run start:worker:personal     |        |                              |
+  | disk: /var/data (raw store)       |        +------------------------------+
   +-----------------------------------+                     ^
                                                             | read-only role
                                             march-madness-tracker (separate repo)
@@ -25,7 +25,7 @@ Nothing in this repository creates or changes Render resources by itself. `rende
 | Component | Render service | Status |
 | --- | --- | --- |
 | Crawl worker | Background Worker, `web-scraper-worker` | Required. Runs for days during a backfill. |
-| Durable store | The existing Render PostgreSQL instance | Required. Not declared in `render.yaml`, so applying the Blueprint cannot create or replace it. |
+| Durable store | A Supabase project's PostgreSQL | Required. Not a Render resource and not declared in `render.yaml`, so applying the Blueprint cannot create or replace it. |
 | Raw store | Persistent disk on the worker, mounted at `/var/data` | 1 GB for the #78 sample. The full backfill (about 8 GB) is deferred until storage is upgraded (#45). |
 | Read API (`start:api`) | Not deployed | Optional, and not needed by the tracker. See [Read API](#read-api). |
 | Operator trigger (#55) | Not deployed | Built; a web service that replaces the worker as crawl host. See [Operator trigger](#operator-trigger-55). |
@@ -44,13 +44,15 @@ The tracker is a consumer of the database, not of this service. The scraper's sc
 
 ### PostgreSQL
 
-- Use the database's **internal** connection values for the worker (same region, private network, no public exposure). Keep the **external** connection string for manual, out-of-band access only, and restrict it with the database's IP allow list.
-- The worker reads `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` and `PGSSLMODE`, not a URL. Copy each value from the database's internal connection details into the worker's environment. Leave `PGSSLMODE` unset for the internal host; external connections need `PGSSLMODE=require`.
-- The full data set will outgrow the current instance; the #78 sample fits. Upgrade the plan before the full backfill.
-- Give march-madness-tracker its own read-only role rather than the scraper's owner credentials, and let it read the **versioned views**, not the tables (`TRACKER_INTERFACE.md`, #119). Create the role as the owner, with its password set in the Render dashboard and never committed:
+- **The database is Supabase, not a Render PostgreSQL instance.** The worker and its raw-store disk stay on Render; the connection crosses the public internet, so it is always encrypted and the credentials are the only gate. Use Supabase's network restrictions if the plan has them.
+- Connect through the **session pooler** (host `aws-0-<region>.pooler.supabase.com`, port `5432`, user `postgres.<project-ref>`), not the transaction pooler (port `6543`): the migrator holds a session advisory lock and sets session `lock_timeout` and `statement_timeout`, which transaction pooling does not keep. The direct host (`db.<ref>.supabase.co`) is IPv6 only without the IPv4 add-on.
+- The worker reads `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` and `PGSSLMODE`, not a URL. Set `PGSSLMODE=no-verify`: Supabase's certificates come from its own CA, so `require` (which verifies the chain) fails. `no-verify` encrypts but does not authenticate the server.
+- **Switch the Data API off** (or confirm `public` is not exposed). Supabase grants `anon` and `authenticated` default privileges on `public` and exposes it through its REST API, and this schema has no row-level security, so with the API on, anyone with the project's publishable key could read every table. The scraper and the tracker use SQL, not the Data API. Revoking `anon` and `authenticated` in a migration is not done yet.
+- The full data set will outgrow the free plan's 500 MB; the #78 sample fits. Upgrade the plan before the full backfill. A Supabase database that exceeds its disk goes read-only.
+- Give march-madness-tracker its own read-only role rather than the scraper's owner credentials, and let it read the **versioned views**, not the tables (`TRACKER_INTERFACE.md`, #119). Create the role as the owner (Supabase's SQL editor, or `psql` through the session pooler), with its password never committed. Through the pooler the tracker logs in as `tracker_readonly.<project-ref>`:
 
   ```sql
-  CREATE ROLE tracker_readonly LOGIN PASSWORD '<set in the Render dashboard, never committed>';
+  CREATE ROLE tracker_readonly LOGIN PASSWORD '<a password you set, never committed>';
   ```
 
   then, after `npm run migrate` has created the `tracker_v<n>` schemas, run `npm run grant:tracker` (as the owner, with the `PG*` settings). It gives the role `USAGE` on the versioned schemas and `SELECT` on their views, revokes everything in `public`, and refuses a superuser or a role that can create roles or databases. `--role <name>` grants a different role and `--dry-run` prints the statements. Run it again whenever a new version of the interface is added. The views run with their owner's privileges, so the role needs no table access, and cannot see fetches, raw objects, provenance, authorization records or halts.
@@ -68,9 +70,9 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | Variable | Value | Secret |
 | --- | --- | --- |
 | `PERSISTENCE` | `postgres` | no |
-| `PGHOST`, `PGPORT`, `PGDATABASE` | the database's internal host, port and name | no, but not committed |
-| `PGUSER`, `PGPASSWORD` | the database owner credentials | yes |
-| `PGSSLMODE` | unset for the internal host | no |
+| `PGHOST`, `PGPORT`, `PGDATABASE` | Supabase's session pooler host, `5432` and `postgres` | no, but not committed |
+| `PGUSER`, `PGPASSWORD` | `postgres.<project-ref>` and the database password | yes |
+| `PGSSLMODE` | `no-verify` (see "PostgreSQL" above) | no |
 | `PG_STATEMENT_TIMEOUT_MS` | optional; server-side statement timeout (default 30000) | no |
 | `RAW_STORE_ROOT` | `/var/data/raw` | no |
 | `USER_AGENT` | transparent application name and operator contact, for example `web-scraper (+you@example.com)` | yes (it carries the operator's contact address) |
@@ -80,7 +82,7 @@ Set these on the worker service. "Secret" means it is entered in the Render dash
 | `PARSER_VERSIONS` | optional; JSON parser-version overrides, for example `{"box_score":"2"}` after a parser upgrade (see `PARSER_NORMALIZATION.md`) | no |
 | `OPERATOR_PIN` | only for the operator trigger service; at least 8 characters (see [Operator trigger](#operator-trigger-55)) | yes |
 | `OPERATOR_TRUSTED_PROXY_HOPS` | optional; proxies in front of the operator trigger, for the per-client PIN lockout (default 1 on Render; 0 when unproxied) | no |
-| `CURRENT_SEASON_ENDING_YEAR` | optional; pins the season a crawl runs under (for example `2027`), for when the site's index lists a different season than the calendar rule expects. Leave unset: the season is derived from when the school index was fetched (see `REQUEST_POLICY.md`, "Decision: the current season") | no |
+| `CURRENT_SEASON_ENDING_YEAR` | optional; pins the season a crawl runs under (for example `2027`), for when the site's index lists a different season than the calendar rule expects. Unset, the season is derived from when the school index was fetched (see `REQUEST_POLICY.md`, "Decision: the current season"). **Set to `2026` for the launch of the previous seasons (2022 to 2026) after the 1 November 2026 rollover**, and keep it set until the load is reconciled: it always wins, and an index fetched after the rollover would otherwise resolve to 2027 | no |
 | `MIN_ELIGIBLE_SCHOOLS` | optional; the fewest eligible schools a school index may yield before it fails (default 300). Leave unset for a real crawl (see `OPERATIONS_RUNBOOK.md`) | no |
 | `RAW_MIN_FREE_BYTES` | optional; the least free space the raw store's disk may have before the worker halts rather than request a page it could not keep (default 536870912, 512 MiB; `0` turns it off). Size it with the disk: the full backfill needs about 8 GB | no |
 | `WORKER_IDLE_ON_EXIT` | `true` on the Background Worker (set in `render.yaml`): stay up and idle, logging `worker.idle`, when the crawl is finished or halted, instead of exiting and being restarted. Unset for local runs | no |
@@ -128,8 +130,8 @@ The tracker does not need the API, so none is deployed. If one is wanted later, 
 
 ## Provisioning steps
 
-1. PostgreSQL: use the existing instance. Note its region; the worker must be in the same region.
-2. Apply `render.yaml` from the Render dashboard (New, then Blueprint). Render prompts for each `sync: false` value; enter the internal `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `USER_AGENT`, your reviewer id as `OPERATOR_IDS`, and the #78 sample as `CRAWL_SAMPLE` (below). The first deploy starts the worker at once, and a worker with no `CRAWL_SAMPLE` starts the full backfill, so do not leave it empty. Set the service's region to the database's region.
+1. PostgreSQL: create the Supabase project, switch the Data API off, and note the session pooler's connection values. Put the worker in the Render region nearest the database.
+2. Apply `render.yaml` from the Render dashboard (New, then Blueprint). Render prompts for each `sync: false` value; enter the session pooler's `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `USER_AGENT`, your reviewer id as `OPERATOR_IDS`, and the #78 sample as `CRAWL_SAMPLE` (below). The first deploy starts the worker at once, and a worker with no `CRAWL_SAMPLE` starts the full backfill, so do not leave it empty. Then add `PGSSLMODE=no-verify` and `CURRENT_SEASON_ENDING_YEAR=2026` to the service's environment (neither is a Blueprint prompt) before that first deploy finishes.
 3. The first deploy runs `npm ci`, then `npm run migrate`, then starts the worker. Check the deploy log for `migrate passed` and for the worker's configuration line.
 4. Check progress with the Render shell on the worker: `npm run status` (the service already has `PERSISTENCE=postgres` and the PG* values). It prints progress by page type, request pace, and projected time remaining. `npm run review:personal -- list` in the same shell lists pages stopped for review; see "Operator review" in `JOB_LIFECYCLE.md`.
 5. Create the tracker's read-only role (above), run `npm run grant:tracker`, and give march-madness-tracker those credentials through its own service's secrets.
