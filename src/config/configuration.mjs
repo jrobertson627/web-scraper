@@ -1,4 +1,4 @@
-import { ELIGIBILITY_RULE, TARGET_YEARS_RULE, assertSeasonEndingYear, seasonEndingYearAt, targetEndingYearsFor } from '../contracts/season.mjs';
+import { ELIGIBILITY_RULE, TARGET_YEARS_RULE, assertSeasonEndingYear, resolveTargetFinalEndingYear, seasonEndingYearAt, targetEndingYearsFor } from '../contracts/season.mjs';
 import { PAGE_TYPES } from '../contracts/source.mjs';
 import { validateRequestPolicy } from '../contracts/request-policy.mjs';
 import { requireAuthorization } from './authorization.mjs';
@@ -36,11 +36,21 @@ export function validateConfiguration(input, { clock = () => new Date() } = {}) 
   } catch {
     throw configError('currentSeasonEndingYear', 'is invalid', 'Expected a four-digit year', 'currentSeasonEndingYear: 2026');
   }
-  const window = targetEndingYearsFor(seasonEndingYear);
+  // The window ends at the season, or earlier when an operator sets the target
+  // final season (#165): the schools active now over the seasons before this one.
+  let targetFinalEndingYear;
+  try {
+    targetFinalEndingYear = resolveTargetFinalEndingYear({ explicit: config.targetFinalEndingYear, seasonEndingYear });
+  } catch {
+    throw configError('targetFinalEndingYear', 'is invalid', 'Expected a four-digit year no later than the current season', 'targetFinalEndingYear: 2026');
+  }
+  const window = targetEndingYearsFor(targetFinalEndingYear);
   const years = config.targetEndingYears === undefined ? [...window] : [...config.targetEndingYears].sort((a, b) => a - b);
   if (JSON.stringify(years) !== JSON.stringify(window)) {
-    throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(window)}, the five ending years up to the current season`, `targetEndingYears: ${JSON.stringify(window)}`);
+    throw configError('targetEndingYears', 'is invalid', `Expected exactly ${JSON.stringify(window)}, the five ending years up to the target final season`, `targetEndingYears: ${JSON.stringify(window)}`);
   }
+  config.targetFinalYearPinned = config.targetFinalEndingYear !== undefined;
+  config.targetFinalEndingYear = targetFinalEndingYear;
   config.seasonYearPinned = config.currentSeasonEndingYear !== undefined;
   config.currentSeasonEndingYear = seasonEndingYear;
   config.targetEndingYears = years;

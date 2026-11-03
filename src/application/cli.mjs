@@ -113,6 +113,16 @@ function configuredSeasonEndingYear(env) {
   return Number(value);
 }
 
+// TARGET_FINAL_ENDING_YEAR sets the last season of the five loaded (#165), when it
+// is earlier than the season: the schools active now over the seasons before this
+// one. Unset, the window ends at the season. Undefined when unset.
+function configuredTargetFinalEndingYear(env) {
+  const value = env.TARGET_FINAL_ENDING_YEAR;
+  if (value === undefined || value === '') return undefined;
+  if (!/^\d{4}$/.test(value)) throw new Error('invalid TARGET_FINAL_ENDING_YEAR. Expected a four-digit year no later than the season, or leave it unset. Example: TARGET_FINAL_ENDING_YEAR=2026');
+  return Number(value);
+}
+
 // CRAWL_SAMPLE restricts the crawl to a sample (#78), as JSON, for example
 // {"schools":["/cbb/schools/duke/men/"],"endingYears":[2024]}. Configuration
 // validation checks it against the full scope.
@@ -133,6 +143,7 @@ function workerConfiguration(env) {
     policy: { minIntervalMs: 6000, maxRequestsPerMinute: 10, hostConcurrency: 1, userAgent: env.USER_AGENT ?? '', maxAttempts: 5, retryBaseMs: 60_000, retryMaxMs: 600_000 },
     rawMinFreeBytes: configuredRawMinFreeBytes(env),
     eligibilityPredicate: env.ELIGIBILITY_PREDICATE ?? ELIGIBILITY_RULE, currentSeasonEndingYear: configuredSeasonEndingYear(env),
+    targetFinalEndingYear: configuredTargetFinalEndingYear(env),
     minEligibleSchools: configuredMinEligibleSchools(env),
     authorization: parseAuthorization(env.AUTHORIZATION_JSON),
     dataContract: parseDataContract(env.DATA_CONTRACT_JSON),

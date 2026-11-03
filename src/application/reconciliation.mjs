@@ -113,12 +113,15 @@ export async function buildReconciliationReport(reads, { requireCoverage = false
   const seasonRecords = [];
   const coverageRecords = [];
   // The years a history is expected to have discovered: the window of the season
-  // the index was read under. A full scope also holds the years crawled before the
-  // season rolled over (#154), which an older history has discovered and a school
-  // new since then has not, so those are allowed but not required.
+  // the index was read under, or of the scope's latest year when an operator set
+  // the target final season earlier than the season (#165). A full scope also holds
+  // the years crawled before the season rolled over (#154), which an older history
+  // has discovered and a school new since then has not, so those are allowed but
+  // not required.
   const indexSeasons = [...schoolObservations.values()].map((observation) => observation.seasonEndingYear).filter(Number.isInteger);
+  const windowEnd = Math.min(indexSeasons.length ? Math.max(...indexSeasons) : LEGACY_SEASON_ENDING_YEAR, Math.max(...scopeYears));
   const windowYears = scope.kind === 'sample' ? scopeYears
-    : targetEndingYearsFor(indexSeasons.length ? Math.max(...indexSeasons) : LEGACY_SEASON_ENDING_YEAR).filter((year) => scopeYears.includes(year));
+    : targetEndingYearsFor(windowEnd).filter((year) => scopeYears.includes(year));
   for (const batch of batches(parsedJobs('school_history'), batchSize)) {
     for (const page of (await pagesFor(batch.map((job) => job.key))).values()) {
       const linked = (page.data.seasons ?? []).filter((season) => season.url && scopeYears.includes(season.endingYear));

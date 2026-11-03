@@ -8,6 +8,7 @@ import { canTransition } from '../src/contracts/jobs.mjs';
 import { resolveSeasonEndingYear } from '../src/contracts/season.mjs';
 import { InMemoryPersistence, MemoryRawStore } from '../src/persistence/index.mjs';
 import { foundationCorpus, rolledFoundationCorpus } from '../fixtures/foundation-corpus.mjs';
+import { gameLogDocument, schoolHistoryDocument, seasonDocument } from '../src/application/fixture-documents.mjs';
 
 // #154: when the season rolls over, an operator puts the parsed school index and
 // histories back in the queue, and the next worker run reads them under the new
@@ -188,4 +189,53 @@ test('the review command refuses refresh-season for an operator who is not liste
   const unconfigured = await run({ OPERATOR_IDS: 'ops' });
   assert.equal(unconfigured.exitCode, 3);
   assert.match(unconfigured.errors.join('\n'), /review configuration rejected/);
+});
+
+// #165: the schools active in 2026-27 over the seasons before it.
+const applicationWithFinal = (shared, entries, targetFinalYear) => createFixtureApplication({
+  fixtureEntries: entries, pinSeason: null, targetFinalYear,
+  sharedState: { persistence: shared.persistence, rawStore: shared.rawStore, clock: shared.clock, sleep: shared.sleep },
+});
+
+// The rolled corpus, with school A's history also linking 2022, the oldest season of the window.
+function corpusWith2022() {
+  const entry = (path, document) => ({ url: `${ORIGIN}${path}`, body: `<!doctype html><html><body><script id="fixture-document" type="application/json">${JSON.stringify(document).replaceAll('<', '\u003c')}</script></body></html>` });
+  const added = [
+    entry('/school/a/men/', schoolHistoryDocument([2027, 2026, 2024, 2022].map((endingYear) => ({ endingYear, url: `/school/a/men/${endingYear}.html` })))),
+    entry('/school/a/men/2022.html', seasonDocument({ school: 'Fixture A', endingYear: 2022, gameLogUrl: '/school/a/men/2022-gamelogs.html', games: [] })),
+    entry('/school/a/men/2022-gamelogs.html', gameLogDocument(2022, [])),
+  ];
+  const urls = new Set(added.map((item) => item.url));
+  return [...rolledFoundationCorpus().filter((item) => !urls.has(item.url)), ...added];
+}
+
+test('a crawl started after the rollover loads the schools active now over the seasons before this one (#165)', async () => {
+  const shared = world('2026-11-03T00:00:00Z');
+  const events = [];
+  const app = createFixtureApplication({
+    fixtureEntries: corpusWith2022(), pinSeason: null, targetFinalYear: 2026,
+    events: { emit: (name, fields) => events.push([name, fields]) },
+    sharedState: { persistence: shared.persistence, rawStore: shared.rawStore, clock: shared.clock, sleep: shared.sleep },
+  });
+  await app.runWorkerOnce();
+  const { persistence } = shared;
+  assert.deepEqual(events.find(([name]) => name === 'crawl.season')?.[1], { seasonEndingYear: 2027, targetFinalEndingYear: 2026, source: 'clock' });
+  assert.deepEqual([...(await persistence.crawlScope()).endingYears], [2022, 2023, 2024, 2025, 2026]);
+  const jobs = persistence.listJobs();
+  assert.ok(jobs.every((job) => job.state === 'parsed'), `every page is parsed: ${JSON.stringify(jobs.filter((job) => job.state !== 'parsed').map((job) => [job.key, job.state]))}`);
+  const seasonYears = new Set(jobs.filter((job) => job.pageType === 'season').map((job) => Number(/(\d{4})\.html/.exec(job.sourceUrl.absoluteUrl)[1])));
+  assert.ok(seasonYears.has(2022) && seasonYears.has(2026) && !seasonYears.has(2027), `season pages ${[...seasonYears]}: 2022 and 2026 are loaded and 2027 is not`);
+  assert.equal(jobs.filter((job) => job.pageType === 'school_history').length, 2, 'the two schools active in 2026-27; the one that ended in 2025 is not crawled');
+  const report = await app.reconcile();
+  assert.deepEqual(report.checks.filter((check) => !check.passed).map((check) => [check.id, check.records.slice(0, 2)]), [], 'the store reconciles against the window it was crawled under');
+});
+
+test('refresh-season widens the scope to the season once the target final season is unset (#165)', async () => {
+  const shared = world('2026-11-03T00:00:00Z');
+  await applicationWithFinal(shared, rolledFoundationCorpus(), 2026).runWorkerOnce();
+  const rootKey = shared.persistence.listJobs().find((job) => job.pageType === 'school_index').key;
+  const kept = await refresh(shared, rootKey, { dryRun: true, force: true, targetFinalYear: 2026 });
+  assert.deepEqual(kept.addedYears, [], 'still ending at 2026, nothing is added');
+  const unset = await refresh(shared, rootKey, { dryRun: true, force: true });
+  assert.deepEqual(unset.addedYears, [2027], 'unset, the window moves on to 2027');
 });

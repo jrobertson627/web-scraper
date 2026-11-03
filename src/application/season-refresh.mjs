@@ -14,7 +14,7 @@ import { seasonEndingYearAt, targetEndingYearsFor } from '../contracts/season.mj
 // Without `force` it acts only when the season has moved on from the one the
 // stored index was fetched under, and refuses a season earlier than that.
 // `dryRun` reports what it would do and changes nothing.
-export async function refreshSeason({ persistence, rootKey, pinnedYear, clock, operatorId, reason, dryRun = false, force = false, pageSize = 200 }) {
+export async function refreshSeason({ persistence, rootKey, pinnedYear, targetFinalYear, clock, operatorId, reason, dryRun = false, force = false, pageSize = 200 }) {
   assertBoundaryPort('persistenceReview', persistence);
   assertBoundaryPort('persistenceReprocess', persistence);
   const root = await persistence.getJob(rootKey);
@@ -50,7 +50,7 @@ export async function refreshSeason({ persistence, rootKey, pinnedYear, clock, o
 
   // A full scope gains the years the window moves onto; a sample's years are its own.
   const scope = typeof persistence.crawlScope === 'function' ? await persistence.crawlScope() : null;
-  const addedYears = scope?.kind === 'full' ? targetEndingYearsFor(target).filter((year) => !scope.endingYears.includes(year)) : [];
+  const addedYears = scope?.kind === 'full' ? targetEndingYearsFor(targetFinalYear ?? target).filter((year) => !scope.endingYears.includes(year)) : [];
   const summary = { ...base, jobs: { school_index: 1, school_history: histories.length }, requests: keys.length, addedYears, pageTypes: [...REFRESH_PAGE_TYPES] };
   if (dryRun) return Object.freeze({ ...summary, status: 'dry_run', note: 'nothing was changed' });
 

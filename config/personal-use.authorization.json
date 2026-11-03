@@ -8,7 +8,7 @@
   "scope": {
     "allowedHosts": ["www.sports-reference.com"],
     "eligibilityPredicate": "To == CurrentSeasonEndingYear",
-    "targetEndingYears": "CurrentSeasonEndingYear-4..CurrentSeasonEndingYear"
+    "targetEndingYears": "TargetFinalEndingYear-4..TargetFinalEndingYear"
   },
   "contractVersion": "personal-v3",
   "contractFingerprint": "b234a3d8e3d1d96038980e0d875ad0b994f32fe62e7717920f934031ccab1915"
