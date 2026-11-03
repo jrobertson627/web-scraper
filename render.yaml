@@ -14,11 +14,8 @@ services:
     preDeployCommand: npm run migrate
     startCommand: npm run start:worker:personal
     autoDeploy: false
-    # After SIGTERM the worker lets the request on the wire finish (up to
-    # requestTimeoutMs, 30 s) and commit it before it stops, so a deploy or a
-    # suspend does not kill a job midway and charge its page a claim recovery.
-    # Render's default is 30 s, the same as the request timeout alone.
-    maxShutdownDelaySeconds: 90
+    # No maxShutdownDelaySeconds: Render rejects it for a service with a disk, so
+    # the shutdown grace is Render's 30 s default (DEPLOYMENT.md, "Worker").
     disk:
       name: raw-store
       mountPath: /var/data

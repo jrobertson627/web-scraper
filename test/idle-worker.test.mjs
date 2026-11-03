@@ -4,7 +4,6 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_IDLE_HEARTBEAT_MS, exitOrIdle, idleHeartbeatMs, idleOnExitEnabled, idleStateFor, idleUntilStopped } from '../src/application/idle.mjs';
-import { REQUEST_POLICY_DEFAULTS } from '../src/contracts/request-policy.mjs';
 
 // #126: a finished or halted worker stays up and idle instead of exiting, which a
 // Render Background Worker would restart in a loop.
@@ -109,10 +108,10 @@ for (const [label, script] of [['npm run start:worker:personal', ['scripts/perso
   });
 }
 
-test('the Render blueprint idles the worker and gives it time to finish a request on shutdown', () => {
+test('the Render blueprint idles the worker and does not set a shutdown delay Render rejects for a disk', () => {
   const blueprint = readFileSync('render.yaml', 'utf8').replaceAll('\r\n', '\n');
   assert.match(blueprint, /- key: WORKER_IDLE_ON_EXIT\n\s+value: "true"/);
-  const grace = Number(/maxShutdownDelaySeconds:\s*(\d+)/.exec(blueprint)?.[1]);
-  assert.ok(grace * 1000 > REQUEST_POLICY_DEFAULTS.requestTimeoutMs * 2, `${grace} s covers the ${REQUEST_POLICY_DEFAULTS.requestTimeoutMs / 1000} s request timeout plus commit time`);
-  assert.ok(grace <= 300, 'within what Render allows');
+  // Applying the Blueprint fails with "max shutdown delay is not supported for services with a disk".
+  assert.doesNotMatch(blueprint, /^\s*maxShutdownDelaySeconds:/m);
+  assert.match(blueprint, /^\s*disk:/m);
 });
