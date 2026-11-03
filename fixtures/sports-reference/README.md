@@ -29,7 +29,7 @@ MSYS_NO_PATHCONV=1 USER_AGENT="web-scraper (+your-contact)" node scripts/capture
 | Overtime | `/cbb/boxscores/2024-02-15-19-le-moyne.html` |
 | Unlinked (non-D-I) opponent | `/cbb/boxscores/2023-11-13-19-le-moyne.html` |
 
-Not yet covered: a canceled or rescheduled game with an explicit status label.
+Not covered, and not capturable: a canceled or rescheduled game. Sports Reference does not record one: a game known to have been canceled was checked by hand and has no entry or status label on the site. The `canceled` and `rescheduled` statuses are exercised only by the synthetic corpus, and a real run may never produce them.
 
 ## Checking the parsers against the captures
 

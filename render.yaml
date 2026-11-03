@@ -1,13 +1,15 @@
 # Render Blueprint for the crawl worker. See DEPLOYMENT.md before applying it.
-# The PostgreSQL instance already exists and is deliberately not declared here,
-# so applying this Blueprint can never create or replace the database. Values
+# The database is a Supabase project and is deliberately not declared here, so
+# applying this Blueprint can never create or replace it. Values
 # marked sync: false are entered in the Render dashboard and never committed.
 services:
   - type: worker
     name: web-scraper-worker
     runtime: node
     plan: starter
-    # Must match the database's region so the internal connection works.
+    # Pick the region nearest the Supabase project; the connection is over TLS
+    # on the public internet. Also add PGSSLMODE=no-verify and, for the previous
+    # seasons, CURRENT_SEASON_ENDING_YEAR=2026 in the dashboard (GO_LIVE_CHECKLIST.md).
     region: oregon
     buildCommand: npm ci
     preDeployCommand: npm run migrate
@@ -34,7 +36,7 @@ services:
         value: "true"
       - key: RAW_STORE_ROOT
         value: /var/data/raw
-      # Internal connection values of the existing database.
+      # Supabase session pooler values (port 5432, user postgres.<project-ref>).
       - key: PGHOST
         sync: false
       - key: PGPORT
