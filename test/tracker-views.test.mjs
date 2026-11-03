@@ -11,7 +11,12 @@ import { DEFAULT_TRACKER_ROLE, TRACKER_SCHEMA, assertRoleName, grantStatements }
 const root = process.cwd();
 const migrations = readdirSync(join(root, 'migrations')).filter((name) => /^\d{3}_.+\.sql$/.test(name)).sort();
 const text = (name) => readFileSync(join(root, 'migrations', name), 'utf8').replaceAll('\r\n', '\n');
-const V1 = text('018_tracker_v1.sql');
+// [schema, migration SQL, migration version]
+const VERSIONS = [
+  ['tracker_v1', text('018_tracker_v1.sql'), '018_tracker_v1'],
+  ['tracker_v2', text('022_tracker_v2.sql'), '022_tracker_v2'],
+];
+const [[, V1], [, V2]] = VERSIONS;
 
 const VIEWS = [
   'schools', 'seasons', 'season_team_stats', 'season_rosters', 'season_player_stats', 'game_log_rows', 'game_log_row_stats',
@@ -19,22 +24,62 @@ const VIEWS = [
 ];
 
 // Each view's SQL, from its CREATE to the semicolon that ends it.
-function definitions(sql) {
-  return new Map([...sql.matchAll(/CREATE OR REPLACE VIEW tracker_v1\.(\w+) AS\n([\s\S]*?);\n/g)].map((match) => [match[1], match[2]]));
+function definitions(sql, schema = 'tracker_v1') {
+  return new Map([...sql.matchAll(new RegExp(`CREATE OR REPLACE VIEW ${schema}\\.(\\w+) AS\\n([\\s\\S]*?);\\n`, 'g'))].map((match) => [match[1], match[2]]));
 }
 
-test('tracker_v1 defines exactly the documented views, repeat-safely', () => {
-  const found = definitions(V1);
-  assert.deepEqual([...found.keys()].sort(), [...VIEWS].sort());
-  assert.match(V1, /CREATE SCHEMA IF NOT EXISTS tracker_v1;/);
-  assert.doesNotMatch(V1, /CREATE VIEW/, 'a view is created with OR REPLACE so the migration can be applied twice');
-  assert.doesNotMatch(V1, /\bDROP\b/i);
-  assert.match(V1, /INSERT INTO schema_migrations\(version\) VALUES \('018_tracker_v1'\) ON CONFLICT \(version\) DO NOTHING;/);
+// Every definition of every version, as [schema.view, SQL].
+function allDefinitions() {
+  return VERSIONS.flatMap(([schema, sql]) => [...definitions(sql, schema)].map(([name, definition]) => [`${schema}.${name}`, definition]));
+}
+
+test('each tracker version defines exactly the documented views, repeat-safely', () => {
+  for (const [schema, sql, migration] of VERSIONS) {
+    assert.deepEqual([...definitions(sql, schema).keys()].sort(), [...VIEWS].sort(), schema);
+    assert.match(sql, new RegExp(`CREATE SCHEMA IF NOT EXISTS ${schema};`));
+    assert.doesNotMatch(sql, /CREATE VIEW/, 'a view is created with OR REPLACE so the migration can be applied twice');
+    assert.doesNotMatch(sql, /\bDROP\b/i);
+    assert.match(sql, new RegExp(`INSERT INTO schema_migrations\\(version\\) VALUES \\('${migration}'\\) ON CONFLICT \\(version\\) DO NOTHING;`));
+  }
 });
 
-test('only migration 018 may mention tracker_v1: a change to the views is a new version', () => {
-  const mentioning = migrations.filter((name) => /tracker_v1/.test(text(name)));
-  assert.deepEqual(mentioning, ['018_tracker_v1.sql']);
+test('only a version\'s own migration may mention it: a change to the views is a new version', () => {
+  for (const [schema, , migration] of VERSIONS) {
+    assert.deepEqual(migrations.filter((name) => text(name).includes(schema)), [`${migration}.sql`], schema);
+  }
+});
+
+test('tracker_v2 is tracker_v1 plus the roster\'s hometown and high school, and nothing else', () => {
+  const one = definitions(V1, 'tracker_v1');
+  const two = definitions(V2, 'tracker_v2');
+  for (const view of VIEWS.filter((name) => name !== 'season_rosters')) {
+    assert.equal(two.get(view), one.get(view).replaceAll('tracker_v1', 'tracker_v2'), `${view} is unchanged`);
+  }
+  assert.match(two.get('season_rosters'), /r\.weight, r\.hometown, r\.high_school, r\.value_states/);
+  assert.equal(two.get('season_rosters').replace('r.hometown, r.high_school, ', '').replace('tracker_v2', 'tracker_v1'), one.get('season_rosters'));
+  const frozen = (schema) => JSON.parse(readFileSync(join(root, 'fixtures', 'tracker', `${schema}.json`), 'utf8'));
+  const [before, after] = [frozen('tracker_v1'), frozen('tracker_v2')];
+  for (const view of VIEWS.filter((name) => name !== 'season_rosters')) assert.deepEqual(after[view], before[view], view);
+  assert.deepEqual(after.season_rosters.filter((column) => !before.season_rosters.some((old) => old.name === column.name)),
+    [{ name: 'hometown', type: 'text' }, { name: 'high_school', type: 'text' }]);
+  assert.deepEqual(before.season_rosters.map((column) => column.name), after.season_rosters.map((column) => column.name)
+    .filter((name) => name !== 'hometown' && name !== 'high_school'), 'the other columns keep their order');
+});
+
+test('migration 021 adds the columns and fills them from stored rows, repeat-safely', () => {
+  const sql = text('021_roster_hometown_high_school.sql');
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS hometown TEXT/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS high_school TEXT/);
+  assert.doesNotMatch(sql, /\bDROP\b|DELETE FROM/i, 'extra is kept, so nothing is lost');
+  assert.match(sql, /UPDATE season_rosters SET/);
+  assert.match(sql, /INSERT INTO schema_migrations\(version\) VALUES \('021_roster_hometown_high_school'\) ON CONFLICT \(version\) DO NOTHING;/);
+});
+
+test('a version created after migration 020 repeats its revoke of the Supabase API roles', () => {
+  assert.match(V2, /rolname IN \('anon', 'authenticated'\)/);
+  for (const statement of ['REVOKE ALL ON SCHEMA tracker_v2', 'REVOKE ALL ON ALL TABLES IN SCHEMA tracker_v2', 'ALTER DEFAULT PRIVILEGES IN SCHEMA tracker_v2 REVOKE ALL ON TABLES']) {
+    assert.ok(V2.includes(statement), statement);
+  }
 });
 
 test('the views expose domain rows and never the crawl\'s internals', () => {
@@ -45,38 +90,43 @@ test('the views expose domain rows and never the crawl\'s internals', () => {
   ];
   const allowedTables = new Set(['schools', 'school_seasons', 'team_seasons', 'team_season_stats', 'season_rosters', 'player_season_stats', 'players',
     'game_log_rows', 'game_log_row_stats', 'games', 'game_teams', 'team_game_stats', 'player_game_stats', 'crawl_scopes', 'crawl_jobs']);
-  for (const [name, sql] of definitions(V1)) {
+  for (const [name, sql] of allDefinitions()) {
     for (const pattern of forbidden) assert.doesNotMatch(sql, pattern, `${name} mentions ${pattern}`);
+    assert.doesNotMatch(sql, /\bextra\b/, `${name} leaves the parser's extra values out`);
     for (const [, table] of sql.matchAll(/\bpublic\.(\w+)/g)) assert.ok(allowedTables.has(table), `${name} reads public.${table}`);
-    if (name !== 'season_completeness') assert.doesNotMatch(sql, /crawl_jobs/, `${name} reads job states`);
+    if (!name.endsWith('.season_completeness')) assert.doesNotMatch(sql, /crawl_jobs/, `${name} reads job states`);
     assert.doesNotMatch(sql, /SELECT \*|\.\*/, `${name} names its columns, so a new column in a table never widens a view`);
   }
 });
 
 test('every view is keyed by the provider\'s own paths, not by database ids', () => {
-  for (const [name, sql] of definitions(V1)) {
+  for (const [name, sql] of allDefinitions()) {
     const columns = sql.split(/\bFROM\b/)[0];
     assert.doesNotMatch(columns, /\b\w+\.id\b(?!\s*=)(?!\s+IS\b)/, `${name} exposes an internal id`);
   }
-  assert.match(definitions(V1).get('schools'), /canonical_source_path AS school_path/);
-  assert.match(definitions(V1).get('games'), /canonical_box_score_path AS game_path/);
+  for (const [schema, migration] of VERSIONS) {
+    assert.match(definitions(migration, schema).get('schools'), /canonical_source_path AS school_path/);
+    assert.match(definitions(migration, schema).get('games'), /canonical_box_score_path AS game_path/);
+  }
 });
 
 test('season completeness is a state per season, and a settled season means parsed or failed for good', () => {
-  const sql = definitions(V1).get('season_completeness');
-  for (const state of ['unavailable', 'in_progress', 'complete']) assert.match(sql, new RegExp(`'${state}'`), state);
-  assert.match(sql, /state IN \('parse_failed', 'permanently_failed'\)/, 'a failed page counts as settled');
-  assert.doesNotMatch(sql, /operator_stop/, 'a page stopped for review is not settled');
-  for (const column of ['season_parsed', 'game_log_parsed', 'box_scores_linked', 'box_scores_parsed', 'box_scores_failed', 'box_scores_pending']) {
-    assert.match(sql, new RegExp(`AS ${column}`), column);
+  for (const [schema, migration] of VERSIONS) {
+    const sql = definitions(migration, schema).get('season_completeness');
+    for (const state of ['unavailable', 'in_progress', 'complete']) assert.match(sql, new RegExp(`'${state}'`), state);
+    assert.match(sql, /state IN \('parse_failed', 'permanently_failed'\)/, 'a failed page counts as settled');
+    assert.doesNotMatch(sql, /operator_stop/, 'a page stopped for review is not settled');
+    for (const column of ['season_parsed', 'game_log_parsed', 'box_scores_linked', 'box_scores_parsed', 'box_scores_failed', 'box_scores_pending']) {
+      assert.match(sql, new RegExp(`AS ${column}`), column);
+    }
+    // A link whose box-score job does not exist yet still counts as pending.
+    assert.match(sql, /LEFT JOIN public\.crawl_jobs/);
   }
-  // A link whose box-score job does not exist yet still counts as pending.
-  assert.match(sql, /LEFT JOIN public\.crawl_jobs/);
 });
 
 test('each version has a frozen column snapshot, and every snapshot has its views', () => {
   const versions = [...new Set(migrations.flatMap((name) => [...text(name).matchAll(/\b(tracker_v[1-9]\d*)\b/g)].map((match) => match[1])))];
-  assert.deepEqual(versions, ['tracker_v1']);
+  assert.deepEqual(versions, ['tracker_v1', 'tracker_v2']);
   for (const version of versions) {
     const file = join(root, 'fixtures', 'tracker', `${version}.json`);
     assert.ok(existsSync(file), `${version} needs fixtures/tracker/${version}.json`);

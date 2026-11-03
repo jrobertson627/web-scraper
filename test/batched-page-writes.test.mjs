@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeNormalizedPage } from '../src/persistence/postgres-domain.mjs';
 import { boxScoreDocument, seasonDocument, statLine } from '../src/application/fixture-documents.mjs';
+import { blank, present, unavailable } from '../src/contracts/value-state.mjs';
 
 const PROVIDER = 'fixture-provider';
 
@@ -92,5 +93,35 @@ test('committing a season issues a fixed number of statements whatever the roste
   assert.equal(large.length, small.length);
   assert.ok(small.length <= 14, `${small.length} statements`);
   const rosterValues = large.filter(({ text }) => /INSERT INTO season_rosters/.test(text)).reduce((total, { values }) => total + values.length, 0);
-  assert.equal(rosterValues, 30 * 12);
+  assert.equal(rosterValues, 30 * 14);
+});
+
+test('a roster row stores its hometown and high school as columns, with the reason when there is none', async () => {
+  const client = recordingClient();
+  const job = { id: 9, provider_id: PROVIDER, canonical_path: 'fixture.example/school/a/men/2026.html', page_type: 'season',
+    source_url: 'https://fixture.example/school/a/men/2026.html', school_source_path: `${PROVIDER}:fixture.example/school/a` };
+  const bio = [
+    { ...players(1)[0], name: 'Both', playerPath: '/players/both.html', rosterExtra: { hometown: present('Durham, NC'), high_school: present('Riverside (NC)'), rsci: blank() } },
+    { ...players(1)[0], name: 'Empty', playerPath: '/players/empty.html', rosterExtra: { hometown: blank(), high_school: blank(), rsci: unavailable('not_published') } },
+    { ...players(1)[0], name: 'Unlisted', playerPath: null, rosterExtra: { hometown: unavailable('not_published'), high_school: unavailable('not_published') } },
+    { ...players(1)[0], name: 'Unread', playerPath: '/players/unread.html' },
+  ];
+  const data = seasonDocument({ school: 'A', endingYear: 2026, gameLogUrl: null, players: bio, games: [] });
+  await writeNormalizedPage(client, job, { jobKey: `${PROVIDER}:${job.canonical_path}:season`, kind: 'season', identity: `${PROVIDER}:${job.canonical_path}:season`, data },
+    { parserName: 'season', parserVersion: '1' }, '5');
+  const rows = new Map(client.statements.filter(({ text }) => /INSERT INTO season_rosters/.test(text)).flatMap(({ text, values }) => {
+    const columns = text.slice(text.indexOf('(') + 1, text.indexOf(')')).split(',');
+    return chunk(values, columns.length).map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index]])))
+      .map((row) => [row.player_name, row]);
+  }));
+  const states = (name) => JSON.parse(rows.get(name).value_states);
+  assert.deepEqual([rows.get('Both').hometown, rows.get('Both').high_school], ['Durham, NC', 'Riverside (NC)']);
+  assert.deepEqual(states('Both'), { heightIn: { state: 'unavailable', reason: 'not_in_fixture' }, weight: { state: 'unavailable', reason: 'not_in_fixture' } });
+  assert.deepEqual([rows.get('Empty').hometown, rows.get('Empty').high_school], [null, null]);
+  assert.deepEqual([states('Empty').hometown, states('Empty').highSchool], [{ state: 'blank' }, { state: 'blank' }]);
+  assert.deepEqual([rows.get('Unlisted').hometown, rows.get('Unlisted').high_school], [null, null], 'an unlinked row is written too');
+  assert.deepEqual(states('Unlisted').highSchool, { state: 'unavailable', reason: 'not_published' });
+  assert.deepEqual([rows.get('Unread').hometown, rows.get('Unread').high_school], [null, null]);
+  assert.ok(!('hometown' in states('Unread')) && !('highSchool' in states('Unread')), 'no value state when the parser read neither');
+  assert.equal(JSON.parse(rows.get('Both').extra).rsci.state, 'blank', 'extra is kept as it was');
 });

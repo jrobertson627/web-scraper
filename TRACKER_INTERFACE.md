@@ -1,23 +1,32 @@
 # The tracker interface
 
-march-madness-tracker reads this database directly (`DEPLOYMENT.md`). What it reads is a set of **versioned views**, not the tables: migrations may change the tables, and the tracker must not break when they do (#119, #132). The views live in the schema `tracker_v1`; a change that would alter any of their columns is a new schema, `tracker_v2`, next to it, and the tracker moves when it is ready.
+march-madness-tracker reads this database directly (`DEPLOYMENT.md`). What it reads is a set of **versioned views**, not the tables: migrations may change the tables, and the tracker must not break when they do (#119, #132). The views live in versioned schemas (`tracker_v1` and `tracker_v2`); a change that would alter any of their columns is a new schema, next to the old ones, and the tracker moves when it is ready.
+
+## Versions
+
+| Schema | Migration | What it is |
+| --- | --- | --- |
+| `tracker_v1` | `018_tracker_v1` | the first interface; unchanged, kept until the tracker has moved |
+| `tracker_v2` | `022_tracker_v2` | `tracker_v1` plus `season_rosters.hometown` and `season_rosters.high_school`, after `weight`; every other view is identical |
+
+To move from v1 to v2, point the tracker's queries at `tracker_v2`; nothing else changes. Run `npm run grant:tracker` once after `npm run migrate` so the role can read the new schema. Drop `tracker_v1` (a migration, and its snapshot) only when the tracker no longer reads it.
 
 ## Rules
 
 - **The role reads the views and nothing else.** `npm run grant:tracker` gives the tracker's login role `USAGE` on the `tracker_v<n>` schemas and `SELECT` on their views, and revokes everything in `public`. The views run with their owner's privileges, so the role needs no table access. It cannot write, and it cannot see fetches, raw objects, parse runs, provenance, authorization records or halts. It should be an ordinary login role (the script refuses a superuser or a role that can create roles or databases).
-- **A version is frozen.** `fixtures/tracker/tracker_v1.json` lists every view's columns (name and type, in order). The PostgreSQL CI job compares the live schema to it, and a static test allows only migration `018_tracker_v1.sql` to mention `tracker_v1`. Adding a column, removing one, renaming one or changing a type therefore fails CI until the change is made as a new version with its own snapshot. Adding a whole new view to an existing version is also a shape change and is not done: it goes in the next version.
+- **A version is frozen.** `fixtures/tracker/tracker_v<n>.json` lists every view's columns (name and type, in order). The PostgreSQL CI job compares each live schema to its snapshot, and a static test allows only a version's own migration (`018_tracker_v1.sql`, `022_tracker_v2.sql`) to mention it. Adding a column, removing one, renaming one or changing a type therefore fails CI until the change is made as a new version with its own snapshot. Adding a whole new view to an existing version is also a shape change and is not done: it goes in the next version.
 - **Retiring a version** is a decision, not a side effect: drop `tracker_v1` in a migration only after the tracker has moved, and remove its snapshot in the same change.
 - **Only retained fields.** The views expose the fields the data contract retains (`config/personal-use.data-contract.json`), which the normalizer already limits what is stored to. The publication decision is recorded in `AUTHORIZATION_CONTRACT.md`.
 - **Keys are the provider's own paths**, never database ids: `school_path` (for example `www.sports-reference.com/cbb/schools/duke/men`), `ending_year`, `game_path` (the box score's path), `player_path` and `team_path` (which may be null when the source publishes no link).
 
-## Views in `tracker_v1`
+## Views in `tracker_v1` and `tracker_v2`
 
 | View | One row per | Notes |
 | --- | --- | --- |
 | `schools` | school | name, city, state, first and last season, whether it is eligible, source URL, aggregate fields |
 | `seasons` | school and ending year | `coverage_status` (`linked` or `unavailable`), record, conference, coach, SRS, SOS, ratings, NCAA seed, region and games |
 | `season_team_stats` | season and side (`team` or `opponent`) | the sixteen counting stats |
-| `season_rosters` | roster row | name, jersey number, class, position, height, weight |
+| `season_rosters` | roster row | name, jersey number, class, position, height (`height_in`, inches), weight; in `tracker_v2` also `hometown` and `high_school` (text, as the roster table prints them) |
 | `season_player_stats` | season player row | games, games started, the counting stats, `advanced` |
 | `game_log_rows` | game log row | date, location, opponent, result, status, overtimes, scores, `game_path` to the box score when there is one; `source_row_index` keys it |
 | `game_log_row_stats` | game log row and side | the team totals the log carries |
@@ -29,6 +38,8 @@ march-madness-tracker reads this database directly (`DEPLOYMENT.md`). What it re
 | `season_completeness` | school and ending year | see below |
 
 Stat columns are `NULL` when the source value is not present, and `value_states` (JSON) says why for the ones that are not: `blank`, `unavailable` or `null`. Percentages are fractions and minutes are decimal minutes. A join between views is on the path columns, for example `game_log_rows.game_path = games.game_path`.
+
+On a roster row, a `NULL` in `hometown` or `high_school` with a `hometown` or `highSchool` key in `value_states` means the roster table printed nothing there (`blank`) or has no such column (`unavailable`). A `NULL` with no such key means the page was stored before the parser read the column and has not been read again.
 
 ## Complete and partial seasons
 

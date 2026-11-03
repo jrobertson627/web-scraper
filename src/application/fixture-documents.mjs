@@ -98,6 +98,7 @@ export function seasonDocument({ school, endingYear, gameLogUrl, games = [], pla
     roster: players.map((player) => ({
       name: player.name, playerPath: player.playerPath ?? null, number: null, class: null, position: null,
       heightIn: unavailable('not_in_fixture'), weight: unavailable('not_in_fixture'),
+      ...(player.rosterExtra ? { extra: player.rosterExtra } : {}),
     })),
     teamTotals: {
       team: { games: present(finals.length), stats: sumStatLines(finals.map((game) => game.teamStats)) },

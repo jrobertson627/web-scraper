@@ -188,15 +188,21 @@ async function writeSeason(client, job, page, provenance, { replace = false } = 
 
   const playerId = await upsertPlayers(client, job, [...data.roster, ...data.players], provenance);
 
+  // Hometown and high school come from the roster table's optional extra columns;
+  // a roster row without them leaves both NULL with no value state.
   const roster = data.roster.map((player, index) => {
     const path = linkedPath(job.provider_id, player.playerPath, job.source_url);
+    const hometown = player.extra?.hometown;
+    const highSchool = player.extra?.high_school;
     return { path, row: [seasonId, index, path, player.name, player.number, player.class, player.position,
-      presentValue(player.heightIn), presentValue(player.weight), JSON.stringify(player.extra ?? {}),
-      JSON.stringify(valueStates({ heightIn: player.heightIn, weight: player.weight })), JSON.stringify(provenance)] };
+      presentValue(player.heightIn), presentValue(player.weight), presentValue(hometown), presentValue(highSchool),
+      JSON.stringify(player.extra ?? {}),
+      JSON.stringify(valueStates({ heightIn: player.heightIn, weight: player.weight, hometown, highSchool })), JSON.stringify(provenance)] };
   });
   const rosterTable = { table: 'season_rosters', columns: ['school_season_id', 'source_row_index', 'player_source_path', 'player_name',
-    'jersey_number', 'class', 'position', 'height_in', 'weight', 'extra', 'value_states', 'provenance'],
-  update: ['source_row_index', 'player_name', 'jersey_number', 'class', 'position', 'height_in', 'weight', 'extra', 'value_states', 'provenance'] };
+    'jersey_number', 'class', 'position', 'height_in', 'weight', 'hometown', 'high_school', 'extra', 'value_states', 'provenance'],
+  update: ['source_row_index', 'player_name', 'jersey_number', 'class', 'position', 'height_in', 'weight', 'hometown', 'high_school',
+    'extra', 'value_states', 'provenance'] };
   await upsertRows(client, { ...rosterTable, conflict: '(school_season_id,player_source_path) WHERE player_source_path IS NOT NULL',
     rows: lastByKey(roster.filter((entry) => entry.path), (entry) => entry.path).map((entry) => entry.row) });
   await upsertRows(client, { ...rosterTable, conflict: '(school_season_id,source_row_index) WHERE player_source_path IS NULL',

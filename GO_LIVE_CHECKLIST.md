@@ -55,7 +55,7 @@ The service starts as soon as it is created, and a worker with no `CRAWL_SAMPLE`
 ## 5. The tracker's access
 
 - [ ] As the database owner (the SQL editor, or `psql` through the session pooler): `CREATE ROLE tracker_readonly LOGIN PASSWORD '<a password you set, never committed>';`. The tracker connects as `tracker_readonly.<project-ref>` through the same pooler host.
-- [ ] On the worker's shell: `npm run grant:tracker -- --dry-run`, read the statements, then `npm run grant:tracker`. It gives the role the `tracker_v1` views and nothing in `public`, and refuses a role that is a superuser or can create roles or databases. Run it again whenever a new `tracker_v<n>` version ships.
+- [ ] On the worker's shell: `npm run grant:tracker -- --dry-run`, read the statements, then `npm run grant:tracker`. It gives the role the `tracker_v1` and `tracker_v2` views and nothing in `public`, and refuses a role that is a superuser or can create roles or databases. Run it again whenever a new `tracker_v<n>` version ships.
 - [ ] Give march-madness-tracker the role's credentials through its own service's secrets (`TRACKER_INTERFACE.md`). Its display stays behind your own authentication; it is private use, not publication (`AUTHORIZATION_CONTRACT.md`).
 - [ ] From the tracker's side: the views read, `public.*` does not, nothing can be written. `crawl_scope` says the store holds a sample, and `season_completeness` says which seasons are done.
 
