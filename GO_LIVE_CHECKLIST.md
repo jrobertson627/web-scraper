@@ -35,7 +35,7 @@ The service starts as soon as it is created, and a worker with no `CRAWL_SAMPLE`
   - **`CRAWL_SAMPLE`: the #78 sample. Do not leave it empty.** `{"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}`
   - `OPERATOR_IDS`: your reviewer id, for example `jessica`. Nothing can be reviewed or refreshed without it.
 - [ ] Leave `MIN_ELIGIBLE_SCHOOLS` and `CRAWL_STAGE` unset.
-- [ ] Before the first deploy finishes, check the worker's region is the one nearest the database and the disk is 1 GB (enough for the sample only).
+- [ ] Before the first deploy finishes, check the worker's region is the one nearest the database and the disk is 15 GB (`render.yaml`; the sample needs about 20 MB, but a Render disk only grows, so the size is chosen once).
 - [ ] **First deploy log:** `npm ci`, then `migrate passed` (every file in `migrations/` recorded, each with a checksum), then the worker's configuration line. The worker refuses to start on a missing migration, a rejected configuration (exit 3) or a missing parser (exit 4); with `WORKER_IDLE_ON_EXIT` it then logs `worker.idle` instead of restarting in a loop.
 - [ ] Raw store: the first worker records its identity (`raw_store_identity`, `.raw-store-id` on the disk). **Never point a worker on another machine at this database**; it will refuse, and a copy of the raw store without its marker is a different store.
 
@@ -69,7 +69,7 @@ The service starts as soon as it is created, and a worker with no `CRAWL_SAMPLE`
 
 Render disks only grow, so choose the size deliberately.
 
-- [ ] **Raw store disk: at least 10 GB** (about 8 GB of raw HTML is projected; `manifest.txt` has the estimate). Change `sizeGB` in `render.yaml` and apply it, or resize in the dashboard. A larger disk is what lets the worker keep writing: it halts when free space falls under `RAW_MIN_FREE_BYTES` (default 512 MiB), so set that in proportion if you like.
+- [ ] **Raw store disk: 15 GB** (`render.yaml` sets it). The manifest projects 7.9 GB of raw HTML, most of it box scores whose count is an estimate, so 15 GB leaves room for it to be off; 10 GB would be thin. If the disk in Render is still smaller, apply the Blueprint or resize it in the dashboard, and keep `render.yaml` in step so a later sync does not try to shrink it (Render disks only grow). A larger disk is what lets the worker keep writing: it halts when free space falls under `RAW_MIN_FREE_BYTES` (default 512 MiB), so set that in proportion if you like.
 - [ ] **Supabase plan** raised to fit the full load. A Supabase database that fills up goes read-only, which the worker would report as a halt.
 
 ## 7. The full backfill (#45), 60 to 70 hours

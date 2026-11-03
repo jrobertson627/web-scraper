@@ -19,8 +19,10 @@ services:
     disk:
       name: raw-store
       mountPath: /var/data
-      # Enough for the #78 sample; resize before the full backfill (#45).
-      sizeGB: 1
+      # The manifest dry run (#44) projects 7.9 GB of raw HTML for the full backfill
+      # (#45), most of it box scores, whose count is an estimate. 15 GB leaves room
+      # for that to be off. A Render disk can only grow, never shrink.
+      sizeGB: 15
     envVars:
       - key: NODE_VERSION
         value: "22"
@@ -58,7 +60,7 @@ services:
       - key: USER_AGENT
         sync: false
       # The #78 sample, entered when the Blueprint is applied: without it the
-      # first deploy would start the full 60-70 hour backfill on a 1 GB disk.
+      # first deploy would start the full 60-70 hour backfill at once.
       # Managed in the dashboard after that: clear it for the full backfill.
       # For example {"schools":["/cbb/schools/duke/men/","/cbb/schools/le-moyne/men/"],"endingYears":[2024]}
       - key: CRAWL_SAMPLE

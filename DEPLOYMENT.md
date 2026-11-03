@@ -26,7 +26,7 @@ Nothing in this repository creates or changes Render resources by itself. `rende
 | --- | --- | --- |
 | Crawl worker | Background Worker, `web-scraper-worker` | Required. Runs for days during a backfill. |
 | Durable store | A Supabase project's PostgreSQL | Required. Not a Render resource and not declared in `render.yaml`, so applying the Blueprint cannot create or replace it. |
-| Raw store | Persistent disk on the worker, mounted at `/var/data` | 1 GB for the #78 sample. The full backfill (about 8 GB) is deferred until storage is upgraded (#45). |
+| Raw store | Persistent disk on the worker, mounted at `/var/data` | 15 GB (`render.yaml`): the manifest dry run projects 7.9 GB of raw HTML for the full backfill (#45), and a disk only grows. |
 | Read API (`start:api`) | Not deployed | Optional, and not needed by the tracker. See [Read API](#read-api). |
 | Operator trigger (#55) | Not deployed | Built; a web service that replaces the worker as crawl host. See [Operator trigger](#operator-trigger-55). |
 
@@ -61,7 +61,7 @@ The tracker is a consumer of the database, not of this service. The scraper's sc
 
 - `RAW_STORE_ROOT=/var/data/raw` on the worker's persistent disk. Raw objects are the immutable evidence behind every parse and are needed for 304 reuse and repair (`RAW_STORAGE.md`); on ephemeral storage they would be lost on every deploy, and a later 304 would stop for operator review.
 - The database records which raw store its objects live in (`raw_store_identity`, from the first worker), and objects are recorded by a reference that does not name the path (`RAW_STORAGE.md`). So a worker run from any other machine against this database refuses to start, and the raw store can be moved to a new root or a bigger disk by copying it, `.raw-store-id` included.
-- 1 GB covers the #78 sample (about 75 requests, 15–20 MB). For the full backfill, resize the disk to at least 10 GB or move the raw store to object storage; object-store credentials would then be secrets like the database password.
+- The #78 sample is about 75 requests and 15–20 MB. The full backfill is projected at 7.9 GB (the manifest dry run, #44), so `render.yaml` sets the disk to 15 GB. A disk can only grow; to go beyond that, resize it, or move the raw store to object storage, whose credentials would then be secrets like the database password.
 
 ## Environment variables
 
