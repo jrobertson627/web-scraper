@@ -12,6 +12,9 @@ test('the Render blueprint commits no secret values and cannot create a database
   for (const key of ['CRAWL_SAMPLE', 'OPERATOR_IDS']) {
     assert.match(blueprint, new RegExp(`- key: ${key}\\n\\s+sync: false`), `${key} is entered in the dashboard`);
   }
+  // Supabase needs no-verify, and the launch is pinned to the previous seasons before the first deploy starts the worker.
+  assert.match(blueprint, /- key: PGSSLMODE\n\s+value: no-verify/);
+  assert.match(blueprint, /- key: CURRENT_SEASON_ENDING_YEAR\n\s+value: "2026"/);
   assert.doesNotMatch(blueprint, /^databases:/m);
   assert.doesNotMatch(blueprint, /fromDatabase|connectionString|postgres(ql)?:\/\//);
   assert.doesNotMatch(blueprint, /type: (web|pserv)/, 'the unauthenticated read API is not deployed');

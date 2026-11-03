@@ -8,8 +8,7 @@ services:
     runtime: node
     plan: starter
     # Pick the region nearest the Supabase project; the connection is over TLS
-    # on the public internet. Also add PGSSLMODE=no-verify and, for the previous
-    # seasons, CURRENT_SEASON_ENDING_YEAR=2026 in the dashboard (GO_LIVE_CHECKLIST.md).
+    # on the public internet.
     region: oregon
     buildCommand: npm ci
     preDeployCommand: npm run migrate
@@ -36,6 +35,16 @@ services:
         value: "true"
       - key: RAW_STORE_ROOT
         value: /var/data/raw
+      # Supabase's certificates come from its own CA, so a verifying mode fails;
+      # no-verify still encrypts (DEPLOYMENT.md, "PostgreSQL").
+      - key: PGSSLMODE
+        value: no-verify
+      # The launch loads the previous seasons, 2022 to 2026. Set here, not in the
+      # dashboard afterwards: the first deploy starts the worker, and the school
+      # index it fetches fixes the season. Keep it until the load is reconciled;
+      # unset it only to move on to 2026-27 (GO_LIVE_CHECKLIST.md, steps 0 and 9).
+      - key: CURRENT_SEASON_ENDING_YEAR
+        value: "2026"
       # Supabase session pooler values (port 5432, user postgres.<project-ref>).
       - key: PGHOST
         sync: false
