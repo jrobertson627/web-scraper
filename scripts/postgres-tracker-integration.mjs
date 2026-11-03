@@ -114,25 +114,32 @@ test('the views carry a crawled store, one row per row, and say which seasons ha
     assert.equal(await count(`SELECT count(*)::int AS n FROM tracker_v1.season_completeness WHERE state = 'complete'`), done.filter((row) => row.state === 'complete').length);
 
     // The one-to-one views lose no row to their joins.
-    for (const [view, table] of [
-      ['schools', 'schools'], ['seasons', 'school_seasons'], ['season_team_stats', 'team_season_stats'], ['season_rosters', 'season_rosters'],
-      ['season_player_stats', 'player_season_stats'], ['game_log_rows', 'game_log_rows'], ['game_log_row_stats', 'game_log_row_stats'],
-      ['games', 'games'], ['game_teams', 'game_teams'], ['team_game_stats', 'team_game_stats'], ['player_game_stats', 'player_game_stats'],
-    ]) {
-      assert.equal(await count(`SELECT count(*)::int AS n FROM tracker_v1.${view}`), await count(`SELECT count(*)::int AS n FROM public.${table}`), `${view} has a row for every ${table} row`);
+    for (const schema of ['tracker_v1', 'tracker_v2']) {
+      for (const [view, table] of [
+        ['schools', 'schools'], ['seasons', 'school_seasons'], ['season_team_stats', 'team_season_stats'], ['season_rosters', 'season_rosters'],
+        ['season_player_stats', 'player_season_stats'], ['game_log_rows', 'game_log_rows'], ['game_log_row_stats', 'game_log_row_stats'],
+        ['games', 'games'], ['game_teams', 'game_teams'], ['team_game_stats', 'team_game_stats'], ['player_game_stats', 'player_game_stats'],
+      ]) {
+        assert.equal(await count(`SELECT count(*)::int AS n FROM ${schema}.${view}`), await count(`SELECT count(*)::int AS n FROM public.${table}`), `${schema}.${view} has a row for every ${table} row`);
+      }
+      assert.ok(await count(`SELECT count(*)::int AS n FROM ${schema}.games`) > 0, 'the crawl stored games');
+      // Keyed by paths, not ids: a game joins to its game log row by path.
+      assert.ok(await count(`SELECT count(*)::int AS n FROM ${schema}.game_log_rows r JOIN ${schema}.games g ON g.game_path = r.game_path`) > 0);
     }
-    assert.ok(await count('SELECT count(*)::int AS n FROM tracker_v1.games') > 0, 'the crawl stored games');
-    // Keyed by paths, not ids: a game joins to its game log row by path.
-    assert.ok(await count('SELECT count(*)::int AS n FROM tracker_v1.game_log_rows r JOIN tracker_v1.games g ON g.game_path = r.game_path') > 0);
+    // tracker_v2 carries the roster's hometown and high school next to the other bio columns.
+    const roster = await client.query('SELECT player_name, hometown, high_school, value_states FROM tracker_v2.season_rosters ORDER BY school_path, ending_year, source_row_index');
+    assert.ok(roster.rowCount > 0);
+    assert.ok(roster.rows.every((row) => row.hometown === null && row.high_school === null), 'the fixture corpus lists neither, so both are NULL');
   } finally { await pool.end(); }
   await reset();
 });
 
 test('the views hold nothing that is not in the data contract', async () => {
-  const live = { ...(await liveColumns('tracker_v1')) };
-  const names = Object.values(live).flat().map((column) => column.name);
-  for (const forbidden of ['provenance', 'checksum', 'raw_object_path', 'lease_generation', 'claim_owner', 'store_id', 'extra']) {
-    assert.ok(!names.includes(forbidden), `no view exposes ${forbidden}`);
+  for (const schema of ['tracker_v1', 'tracker_v2']) {
+    const names = Object.values(await liveColumns(schema)).flat().map((column) => column.name);
+    for (const forbidden of ['provenance', 'checksum', 'raw_object_path', 'lease_generation', 'claim_owner', 'store_id', 'extra']) {
+      assert.ok(!names.includes(forbidden), `no ${schema} view exposes ${forbidden}`);
+    }
   }
   assert.ok(existsSync(join(root, 'TRACKER_INTERFACE.md')));
 });
