@@ -51,9 +51,12 @@ function teamTable(kind, slug, stats, rows, totals) {
 function boxHtml({
   awayScore = '61', lineScore = [['30', '25', '4', '2', '61'], ['28', '27', '4', '5', '64']], periods = ['1', '2', 'OT', '2OT'],
   meta = ['January 2, 2026', '', 'Attendance: 1,234'], homeSlug = 'home-u', homeFourFactorOrb = '31.9', tfoot = true,
+  // List the home team first in the line score and the four factors (#167), or name a school that is not in the game.
+  swapLineScore = false, swapFourFactors = false, fourFactorsHomeLink = HOME_LINK,
 } = {}) {
-  const lineRows = [['Visitors', null], ['Home U', HOME_LINK]].map(([name, href], index) => `<tr><th data-stat="team">${href ? `<a href='${href}'>${name}</a>` : name}</th>${cells([...periods, 'T'], lineScore[index])}</tr>`).join('');
-  const fourRows = [['Visitors', null, ['68.0', '.450', '12.0', '20.0', '.300', '89.7']], ['Home U', HOME_LINK, ['68.0', '.480', '10.5', homeFourFactorOrb, '.250', '94.1']]]
+  const inOrder = (rows, swap) => (swap ? [...rows].reverse() : rows);
+  const lineRows = inOrder([['Visitors', null, 0], ['Home U', HOME_LINK, 1]], swapLineScore).map(([name, href, index]) => `<tr><th data-stat="team">${href ? `<a href='${href}'>${name}</a>` : name}</th>${cells([...periods, 'T'], lineScore[index])}</tr>`).join('');
+  const fourRows = inOrder([['Visitors', null, ['68.0', '.450', '12.0', '20.0', '.300', '89.7']], ['Home U', fourFactorsHomeLink, ['68.0', '.480', '10.5', homeFourFactorOrb, '.250', '94.1']]], swapFourFactors)
     .map(([name, href, values]) => `<tr><th data-stat="school_name">${href ? `<a href="${href}">${name}</a>` : name}</th>${cells(FOUR_FACTORS, values)}</tr>`).join('');
   const home = [
     ['Linked Starter', '/cbb/players/linked-starter-1.html', ['32:30', '7', '12', '.583', '0', '3', '4', '5', '1', '6', '7', '3', '0', '1', '2', '3', '18', '14.2']],
@@ -135,6 +138,20 @@ test('box_score@1 stores printed percentage points as fractions and joins four f
   assert.deepEqual([home.stats.minutes, home.stats.pts, home.stats.extra.game_score], [p(225), p(64), BLANK]);
 });
 
+test('box_score@1 matches the line score and four factors to their teams whichever order the tables print them (#167)', () => {
+  const normal = parse(boxHtml());
+  assert.equal(normal.kind, 'valid', normal.error);
+  for (const options of [{ swapFourFactors: true }, { swapLineScore: true }, { swapFourFactors: true, swapLineScore: true }]) {
+    const swapped = parse(boxHtml(options));
+    assert.equal(swapped.kind, 'valid', `${JSON.stringify(options)}: ${swapped.error}`);
+    assert.deepEqual(swapped.document, normal.document, `${JSON.stringify(options)} reads the same game`);
+  }
+  // Each team's own figures, not the other's, whatever the printed order.
+  const [away, home] = parse(boxHtml({ swapFourFactors: true, swapLineScore: true })).document.teams;
+  assert.deepEqual([away.lineScore, home.lineScore], [[p(30), p(25), p(4), p(2)], [p(28), p(27), p(4), p(5)]]);
+  assert.deepEqual([away.advanced.team_off_rtg, home.advanced.team_off_rtg], [p(89.7), p(94.1)]);
+});
+
 test('box_score@1 marks unpublished attendance, blank venue and missing totals without inventing values', () => {
   const parsed = parse(boxHtml({ meta: ['January 2, 2026', 'Home Arena, Town, State', 'Conference Tournament'], tfoot: false }));
   assert.equal(parsed.kind, 'valid', parsed.error);
@@ -160,6 +177,9 @@ test('box_score@1 fails closed when the page contradicts itself or its tables do
     [{ homeSlug: 'other-u' }, /home team Home U has table #box-score-basic-other-u/],
     [{ periods: ['1', '2', 'Q3', 'OT'] }, /line score period is unexpected: Q3/],
     [{ meta: ['Sometime', ''] }, /scorebox date is unexpected: Sometime/],
+    // The tables may be in either order, but a school that is not in the game is still a layout failure (#167).
+    [{ fourFactorsHomeLink: '/cbb/schools/other-u/men/2026.html' }, /table #four-factors row \d is Home U, expected Visitors or Home U/],
+    [{ swapFourFactors: true, fourFactorsHomeLink: '/cbb/schools/other-u/men/2026.html' }, /table #four-factors row \d is Home U, expected Visitors or Home U/],
   ];
   for (const [options, expected] of cases) {
     const parsed = parse(boxHtml(options));

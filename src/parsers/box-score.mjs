@@ -195,20 +195,38 @@ function scoreboxMeta($, scorebox) {
   };
 }
 
-// Rows of a two-team summary table, matched to the scorebox teams by position
-// and checked against their links.
+// Rows of a two-team summary table, matched to the scorebox teams by school link
+// and returned in the scorebox's order (#167). The tables do not always list the
+// teams in the scorebox's order: two neutral-site games printed them the other way
+// round. A linked row claims the team with that link; the unlinked rows fill the
+// unlinked teams in order. A row for a school that is not in the game, or two rows
+// for one team, is still a layout failure.
 function teamRowsByPosition($, tableId, requiredStats, teams, snapshot) {
   const table = sportsReferenceTable($, tableId);
   assertTableLayout($, table, tableId, requiredStats);
   const nameStat = requiredStats[0];
   const rows = tableDataRows($, table);
   if (rows.length !== 2) throw new Error(`table #${tableId} has ${rows.length} team rows; expected two`);
-  rows.forEach((row, index) => {
+  const mismatch = (row, index) => new Error(`table #${tableId} row ${index} is ${row.name}, expected ${teams.map((team) => team.name).join(' or ')}`);
+  const described = rows.map((row, index) => {
     const cell = requiredCell($, row, nameStat, tableId);
-    const path = schoolPathOf(cell.find('a').attr('href'), snapshot, text(cell));
-    if (path !== teams[index].schoolPath) throw new Error(`table #${tableId} row ${index} is ${text(cell)}, expected ${teams[index].name}`);
+    const name = text(cell);
+    return { row, index, name, path: schoolPathOf(cell.find('a').attr('href'), snapshot, name) };
   });
-  return { table, rows };
+  const ordered = new Array(teams.length).fill(null);
+  for (const entry of described.filter((candidate) => candidate.path)) {
+    const teamIndex = teams.findIndex((team) => team.schoolPath === entry.path);
+    if (teamIndex < 0 || ordered[teamIndex]) throw mismatch(entry, entry.index);
+    ordered[teamIndex] = entry;
+  }
+  const freeTeams = teams.map((team, index) => index).filter((index) => !ordered[index]);
+  const freeRows = described.filter((entry) => !entry.path);
+  if (freeTeams.length !== freeRows.length) throw mismatch(freeRows[0] ?? described[0], (freeRows[0] ?? described[0]).index);
+  freeRows.forEach((entry, position) => {
+    if (teams[freeTeams[position]].schoolPath) throw mismatch(entry, entry.index);
+    ordered[freeTeams[position]] = entry;
+  });
+  return { table, rows: ordered.map((entry) => entry.row) };
 }
 
 function lineScores($, teams, snapshot) {
