@@ -94,12 +94,27 @@ function rating($, lines, label) {
   return numericSourceValue(match[1], `season ${label}`);
 }
 
-function record($, lines, snapshot) {
+// The Record line: `W-L (cw-cl, nth in Conference)`. Two further shapes are read
+// (#172). A record Sports Reference changed after the season (vacated or forfeited
+// games) says so before the parenthesis: `16-16 Overall W-L adjusted to 0-16,
+// conference W-L adjusted to 0-10 (8-10, 8th in A-10 MBB)`. The headline figures
+// and the printed conference record are stored as they stand, and each adjustment
+// is a parse warning, since there is no column for it. An independent has no
+// conference record: `11-20 (Independent)`.
+const RECORD = new RegExp('^(\\d+)-(\\d+)'
+  + '(?: Overall W-L adjusted to (\\d+)-(\\d+))?'
+  + '(?:,? [Cc]onference W-L adjusted to (\\d+)-(\\d+))?'
+  + '(?: \\((?:(\\d+)-(\\d+), (\\d+(?:st|nd|rd|th)) in (.+)|Independent)\\))?$');
+
+function record($, lines, snapshot, warnings) {
   const line = lines.get('Record');
   if (!line) throw new Error('season summary has no Record line');
   const text = valueText($, line);
-  const match = /^(\d+)-(\d+)(?: \((\d+)-(\d+), (\d+(?:st|nd|rd|th)) in (.+)\))?$/.exec(text);
-  if (!match) throw new Error(`season record is unexpected: ${text}`);
+  const [, wins, losses, adjWins, adjLosses, adjConfWins, adjConfLosses, confWins, confLosses, finish, conferenceText] = RECORD.exec(text) ?? [];
+  if (wins === undefined) throw new Error(`season record is unexpected: ${text}`);
+  const match = [null, wins, losses, confWins, confLosses, finish, conferenceText];
+  if (adjWins !== undefined) warnings.push(`season record is adjusted: overall W-L adjusted to ${adjWins}-${adjLosses}; the page's ${wins}-${losses} is stored`);
+  if (adjConfWins !== undefined) warnings.push(`season record is adjusted: conference W-L adjusted to ${adjConfWins}-${adjConfLosses}${confWins === undefined ? '' : `; the printed ${confWins}-${confLosses} is stored`}`);
   const links = line.find('a');
   if (links.length > 1) throw new Error('season record links more than one conference');
   const conferenceName = match[6] ? squash(links.first().text() || match[6]) : null;
@@ -179,10 +194,17 @@ function gameLogUrl($, snapshot, slug, endingYear) {
 
 function textValue(text) { return text ? present(text) : blank(); }
 
-function heightInches(text, label) {
+// `F-I`. A half inch (`6-3.5`) cannot be stored: heightIn is a whole number of
+// inches in the contract, the database and the tracker views. It is unavailable,
+// with a warning, so one player's height does not fail the whole page (#172).
+function heightInches(text, label, warnings) {
   if (!text) return blank();
-  const match = /^(\d+)-(\d+)$/.exec(text);
+  const match = /^(\d+)-(\d+)(\.\d+)?$/.exec(text);
   if (!match || Number(match[2]) > 11) throw new Error(`${label} height is not feet-inches: ${text}`);
+  if (match[3]) {
+    warnings.push(`${label} height ${text} is not whole inches; heightIn is unavailable`);
+    return unavailable('not_whole_inches');
+  }
   return present(Number(match[1]) * 12 + Number(match[2]));
 }
 
@@ -194,7 +216,7 @@ function playerLink($, cell, snapshot, table) {
   return { name, playerPath: sitePath(snapshot, links.first().attr('href'), /^\/cbb\/players\/[^/]+\.html$/, `player ${name}`) };
 }
 
-function rosterRow($, row, snapshot, headers) {
+function rosterRow($, row, snapshot, headers, warnings) {
   const { name, playerPath } = playerLink($, requiredCell($, row, 'player', ROSTER), snapshot, ROSTER);
   const text = (stat) => squash(requiredCell($, row, stat, ROSTER).text());
   return {
@@ -202,7 +224,7 @@ function rosterRow($, row, snapshot, headers) {
     number: text('number') || null,
     class: text('class') || null,
     position: text('pos') || null,
-    heightIn: heightInches(text('height'), name),
+    heightIn: heightInches(text('height'), name, warnings),
     weight: numericSourceValue(text('weight'), `${name} weight`, { integer: true }),
     extra: Object.fromEntries(ROSTER_EXTRAS.map((stat) => [stat, headers.has(stat) ? textValue(text(stat)) : NOT_PUBLISHED])),
   };
@@ -282,11 +304,11 @@ function players($, snapshot) {
   return list;
 }
 
-function roster($, snapshot) {
+function roster($, snapshot, warnings) {
   const table = sportsReferenceTable($, ROSTER);
   assertTableLayout($, table, ROSTER, ROSTER_STATS);
   const headers = tableHeaderStats($, table);
-  return tableDataRows($, table).map((row) => rosterRow($, row, snapshot, headers));
+  return tableDataRows($, table).map((row) => rosterRow($, row, snapshot, headers, warnings));
 }
 
 function seasonDocument(snapshot, warnings) {
@@ -294,7 +316,7 @@ function seasonDocument(snapshot, warnings) {
   const $ = loadSportsReferenceHtml(snapshot);
   if ($('#info').length !== 1) throw new Error('season page has no single #info summary');
   const lines = infoLines($);
-  const { confFinish, conference, ...wins } = record($, lines, snapshot);
+  const { confFinish, conference, ...wins } = record($, lines, snapshot, warnings);
   return {
     school: heading($, endingYear),
     endingYear,
@@ -310,7 +332,7 @@ function seasonDocument(snapshot, warnings) {
       ncaaTournament: ncaaTournament($, lines),
       extra: { conf_finish: confFinish, ap_final_rank: apFinalRank($, lines) },
     },
-    roster: roster($, snapshot),
+    roster: roster($, snapshot, warnings),
     teamTotals: teamTotals($),
     players: players($, snapshot),
   };
