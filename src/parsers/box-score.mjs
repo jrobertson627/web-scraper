@@ -1,3 +1,4 @@
+import { createParseResult } from '../contracts/boundaries.mjs';
 import { decimalMinutes } from '../contracts/parsed-documents.mjs';
 import { blank, present, unavailable } from '../contracts/value-state.mjs';
 import {
@@ -229,11 +230,15 @@ function teamRowsByPosition($, tableId, requiredStats, teams, snapshot) {
   return { table, rows: ordered.map((entry) => entry.row) };
 }
 
-function lineScores($, teams, snapshot) {
+// A game Sports Reference holds no period scores for prints the line score as a
+// team and a total only (#174). The total is still checked against the scorebox,
+// the line score is empty, and the overtime count, which the periods would have
+// given, is unknown (null), not zero.
+function lineScores($, teams, snapshot, warnings) {
   const { table, rows } = teamRowsByPosition($, 'line-score', ['team', 'T'], teams, snapshot);
   const periods = headerStats($, table).filter((stat) => stat !== 'team' && stat !== 'T');
   for (const period of periods) if (!/^(\d+|\d*OT)$/.test(period)) throw new Error(`line score period is unexpected: ${period}`);
-  if (!periods.length) throw new Error('line score has no periods');
+  if (!periods.length) warnings.push('line score has no period columns; lineScore is empty and overtimes is null');
   const lines = rows.map((row, index) => {
     const label = `${teams[index].name} line score`;
     const lineScore = periods.map((period) => numericSourceValue(text(requiredCell($, row, period, 'line-score')), `${label} ${period}`, { integer: true }));
@@ -242,13 +247,13 @@ function lineScores($, teams, snapshot) {
     if (total.state === 'present' && finalScore.state === 'present' && total.value !== finalScore.value) {
       throw new Error(`${label} total ${total.value} differs from the final score ${finalScore.value}`);
     }
-    if (total.state === 'present' && lineScore.every((entry) => entry.state === 'present')
+    if (total.state === 'present' && lineScore.length && lineScore.every((entry) => entry.state === 'present')
       && lineScore.reduce((sum, entry) => sum + entry.value, 0) !== total.value) {
       throw new Error(`${label} periods do not add up to ${total.value}`);
     }
     return lineScore;
   });
-  return { lines, overtimes: periods.filter((period) => period.endsWith('OT')).length };
+  return { lines, overtimes: periods.length ? periods.filter((period) => period.endsWith('OT')).length : null };
 }
 
 // Four-factor figures join the team's advanced totals. Where both tables print
@@ -273,13 +278,14 @@ export class BoxScoreParser {
   pageType() { return 'box_score'; }
   version() { return '1'; }
   parse(snapshot) {
-    return sportsReferenceParse(this.pageType(), () => {
+    const warnings = [];
+    const parsed = sportsReferenceParse(this.pageType(), () => {
       const $ = loadSportsReferenceHtml(snapshot);
       const scorebox = $('.scorebox');
       if (scorebox.length !== 1) throw new Error(`expected one scorebox, found ${scorebox.length}`);
       const sides = [0, 1].map((index) => scoreboxTeam($, scorebox, index, snapshot));
       const meta = scoreboxMeta($, scorebox);
-      const { lines, overtimes } = lineScores($, sides, snapshot);
+      const { lines, overtimes } = lineScores($, sides, snapshot, warnings);
       const teams = withFourFactors($, sides.map((team, index) => ({
         ...team, lineScore: lines[index], ...teamTables($, index, team, snapshot),
       })), snapshot);
@@ -297,5 +303,6 @@ export class BoxScoreParser {
         })),
       };
     });
+    return parsed.kind === 'valid' && warnings.length ? createParseResult({ ...parsed, warnings }) : parsed;
   }
 }

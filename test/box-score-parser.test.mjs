@@ -169,6 +169,35 @@ test('box_score@1 reports a game without both final scores as incomplete', () =>
   assert.deepEqual(parsed.document.teams[0].lineScore, [BLANK, BLANK, BLANK, BLANK]);
 });
 
+test('box_score@1 reads a game whose line score is only a team and a total, with no period scores (#174)', () => {
+  const totalOnly = { periods: [], lineScore: [['61'], ['64']] };
+  const parsed = parse(boxHtml(totalOnly));
+  assert.equal(parsed.kind, 'valid', parsed.error);
+  assert.equal(parsed.document.status, 'final');
+  // The periods would have given the overtime count, so without them it is unknown, not zero.
+  assert.equal(parsed.document.overtimes, null);
+  assert.deepEqual(parsed.document.teams.map((team) => [team.finalScore, team.lineScore]), [[p(61), []], [p(64), []]]);
+  assert.deepEqual(parsed.warnings, ['line score has no period columns; lineScore is empty and overtimes is null']);
+  // Everything else on the page is read as usual.
+  const withPeriods = parse(boxHtml());
+  assert.deepEqual(parsed.document.teams.map((team) => team.players), withPeriods.document.teams.map((team) => team.players));
+  assert.deepEqual(parsed.document.teams.map((team) => team.stats), withPeriods.document.teams.map((team) => team.stats));
+  assert.deepEqual(withPeriods.warnings, []);
+});
+
+test('box_score@1 still checks a total-only line score against the scorebox and still needs the other tables (#174)', () => {
+  const contradicted = parse(boxHtml({ periods: [], lineScore: [['60'], ['64']] }));
+  assert.equal(contradicted.kind, 'structural_failure');
+  assert.match(contradicted.error, /total 60 differs from the final score 61/);
+  const swapped = parse(boxHtml({ periods: [], lineScore: [['61'], ['64']], swapLineScore: true }));
+  assert.equal(swapped.kind, 'valid', swapped.error);
+  assert.deepEqual(swapped.document.teams.map((team) => team.finalScore), [p(61), p(64)]);
+  const incomplete = parse(boxHtml({ awayScore: '', periods: [], lineScore: [[''], ['64']] }));
+  assert.equal(incomplete.kind, 'valid', incomplete.error);
+  assert.equal(incomplete.document.status, 'incomplete');
+  assert.equal(incomplete.document.overtimes, null);
+});
+
 test('box_score@1 fails closed when the page contradicts itself or its tables do not match the scorebox', () => {
   const cases = [
     [{ lineScore: [['30', '25', '4', '1', '61'], ['28', '27', '4', '5', '64']] }, /Visitors line score periods do not add up to 61/],
