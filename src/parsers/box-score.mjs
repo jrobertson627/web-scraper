@@ -79,15 +79,21 @@ function statLine(values) {
 
 function sectionOf(label) { return label === 'Starters' ? true : label === 'Reserves' ? false : null; }
 
+// Some pages print a player's stat line with an empty name cell (Navy, #176). The
+// name column is required, so the row is kept, with its real stat line, under this
+// label, and the parse carries a warning. The row's position keys it, not its name.
+const UNNAMED_PLAYER = 'Unnamed player';
+
 function playerIdentity($, row, tableId, snapshot) {
   const cell = requiredCell($, row, 'player', tableId);
-  const name = text(cell);
-  if (!name) throw new Error(`table #${tableId} has a player row with no name`);
+  const printed = text(cell);
+  const name = printed || UNNAMED_PLAYER;
+  const unnamed = !printed;
   const href = cell.find('a').attr('href');
-  if (!href) return { name, playerPath: null };
+  if (!href) return { name, playerPath: null, unnamed };
   const source = snapshot.sourceUrlFrom(href);
   if (!/^\/cbb\/players\/[^/]+\.html$/.test(source.path)) throw new Error(`player ${name} has an unexpected link: ${source.path}`);
-  return { name, playerPath: source.path };
+  return { name, playerPath: source.path, unnamed };
 }
 
 // Player rows in source order with their starter designation, and the School
@@ -107,7 +113,7 @@ function teamRows($, table, tableId, snapshot) {
   return { players, totals: totals[0] ?? null };
 }
 
-function teamTables($, index, team, snapshot) {
+function teamTables($, index, team, snapshot, warnings) {
   const [basicIds, advancedIds] = ['box-score-basic-', 'box-score-advanced-'].map((prefix) => {
     const ids = sportsReferenceTableIds($, prefix);
     if (ids.length !== 2) throw new Error(`expected two ${prefix}<team> tables, found ${ids.length}`);
@@ -138,6 +144,7 @@ function teamTables($, index, team, snapshot) {
       throw new Error(`table #${advancedId} row ${row} is ${other.name}, expected ${player.name}`);
     }
     const label = `${team.name} ${player.name}`;
+    if (player.unnamed) warnings.push(`${team.name} player row ${row} has no name; it is stored as "${UNNAMED_PLAYER}" with its stat line`);
     return {
       name: player.name,
       playerPath: player.playerPath,
@@ -287,7 +294,7 @@ export class BoxScoreParser {
       const meta = scoreboxMeta($, scorebox);
       const { lines, overtimes } = lineScores($, sides, snapshot, warnings);
       const teams = withFourFactors($, sides.map((team, index) => ({
-        ...team, lineScore: lines[index], ...teamTables($, index, team, snapshot),
+        ...team, lineScore: lines[index], ...teamTables($, index, team, snapshot, warnings),
       })), snapshot);
       return {
         date: meta.date,

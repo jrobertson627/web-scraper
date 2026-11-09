@@ -53,6 +53,8 @@ function boxHtml({
   meta = ['January 2, 2026', '', 'Attendance: 1,234'], homeSlug = 'home-u', homeFourFactorOrb = '31.9', tfoot = true,
   // List the home team first in the line score and the four factors (#167), or name a school that is not in the game.
   swapLineScore = false, swapFourFactors = false, fourFactorsHomeLink = HOME_LINK,
+  // A player row with a real stat line but an empty name cell (#176); `unnamedAdvancedToo: false` leaves the name only in the advanced table.
+  unnamedPlayer = false, unnamedAdvancedToo = true,
 } = {}) {
   const inOrder = (rows, swap) => (swap ? [...rows].reverse() : rows);
   const lineRows = inOrder([['Visitors', null, 0], ['Home U', HOME_LINK, 1]], swapLineScore).map(([name, href, index]) => `<tr><th data-stat="team">${href ? `<a href='${href}'>${name}</a>` : name}</th>${cells([...periods, 'T'], lineScore[index])}</tr>`).join('');
@@ -62,12 +64,14 @@ function boxHtml({
     ['Linked Starter', '/cbb/players/linked-starter-1.html', ['32:30', '7', '12', '.583', '0', '3', '4', '5', '1', '6', '7', '3', '0', '1', '2', '3', '18', '14.2']],
     ['Reserves'],
     ['Zero Reserve', '/cbb/players/zero-reserve-1.html', ['2', '0', '0', '', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0.0']],
+    ...(unnamedPlayer ? [['', null, ['23', '0', '6', '.000', '0', '2', '0', '0', '1', '2', '3', '0', '0', '0', '1', '2', '0', '-3.1']]] : []),
     ['Bench Walk-On', null, 'Did Not Play'],
   ];
   const homeAdvanced = [
     ['Linked Starter', '/cbb/players/linked-starter-1.html', ['32:30', '.620', '.583', '', '24.5', '3.1']],
     ['Reserves'],
     ['Zero Reserve', '/cbb/players/zero-reserve-1.html', ['2', '', '', '', '', '-1.0']],
+    ...(unnamedPlayer ? [[unnamedAdvancedToo ? '' : 'Walk-On Name', null, ['23', '.000', '.000', '10.0', '15.0', '-3.1']]] : []),
     ['Bench Walk-On', null, 'Did Not Play'],
   ];
   const away = [['Unlinked Guard', null, ['40', '20', '45', '.444', '5', '15', '16', '20', '10', '25', '35', '12', '6', '2', '14', '18', '61', '']]];
@@ -196,6 +200,30 @@ test('box_score@1 still checks a total-only line score against the scorebox and 
   assert.equal(incomplete.kind, 'valid', incomplete.error);
   assert.equal(incomplete.document.status, 'incomplete');
   assert.equal(incomplete.document.overtimes, null);
+});
+
+test('box_score@1 keeps a player row whose name cell is empty, with its stat line, under a placeholder name (#176)', () => {
+  const parsed = parse(boxHtml({ unnamedPlayer: true }));
+  assert.equal(parsed.kind, 'valid', parsed.error);
+  const home = parsed.document.teams[1].players;
+  assert.deepEqual(home.map((player) => player.name), ['Linked Starter', 'Zero Reserve', 'Unnamed player', 'Bench Walk-On']);
+  const unnamed = home[2];
+  assert.equal(unnamed.playerPath, null);
+  assert.equal(unnamed.starter, false);
+  assert.deepEqual([unnamed.stats.fga, unnamed.stats.pts, unnamed.stats.trb], [p(6), p(0), p(3)]);
+  assert.equal(unnamed.stats.minutes.state, 'present');
+  assert.equal(unnamed.advanced.bpm.value, -3.1);
+  assert.deepEqual(parsed.warnings, ['Home U player row 2 has no name; it is stored as "Unnamed player" with its stat line']);
+  // The other rows and the team totals read as they do on a page with every name.
+  const named = parse(boxHtml());
+  assert.deepEqual(home.filter((player) => player !== unnamed), named.document.teams[1].players);
+  assert.deepEqual(parsed.document.teams[1].stats, named.document.teams[1].stats);
+});
+
+test('box_score@1 still fails when the same row has a name in one table and none in the other (#176)', () => {
+  const parsed = parse(boxHtml({ unnamedPlayer: true, unnamedAdvancedToo: false }));
+  assert.equal(parsed.kind, 'structural_failure');
+  assert.match(parsed.error, /table #box-score-advanced-home-u row 2 is Walk-On Name, expected Unnamed player/);
 });
 
 test('box_score@1 fails closed when the page contradicts itself or its tables do not match the scorebox', () => {
