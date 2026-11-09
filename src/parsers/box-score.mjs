@@ -248,7 +248,7 @@ function lineScores($, teams, snapshot, warnings) {
   const periods = headerStats($, table).filter((stat) => stat !== 'team' && stat !== 'T');
   for (const period of periods) if (!/^(\d+|\d*OT)$/.test(period)) throw new Error(`line score period is unexpected: ${period}`);
   if (!periods.length) warnings.push('line score has no period columns; lineScore is empty and overtimes is null');
-  const lines = rows.map((row, index) => {
+  const read = rows.map((row, index) => {
     const label = `${teams[index].name} line score`;
     const lineScore = periods.map((period) => numericSourceValue(text(requiredCell($, row, period, 'line-score')), `${label} ${period}`, { integer: true }));
     const total = numericSourceValue(text(requiredCell($, row, 'T', 'line-score')), `${label} total`, { integer: true });
@@ -256,13 +256,24 @@ function lineScores($, teams, snapshot, warnings) {
     if (total.state === 'present' && finalScore.state === 'present' && total.value !== finalScore.value) {
       throw new Error(`${label} total ${total.value} differs from the final score ${finalScore.value}`);
     }
+    return { label, lineScore, total };
+  });
+  // Where Sports Reference has no period scores it may print a 0 in every period cell
+  // of both teams under real totals (#180). Zeros that cannot make a total are
+  // placeholders, not scores: read the periods as absent, as for a total-only table.
+  const placeholders = periods.length && read.some(({ total }) => total.state === 'present' && total.value > 0)
+    && read.every(({ lineScore }) => lineScore.every((entry) => entry.state === 'present' && entry.value === 0));
+  if (placeholders) {
+    warnings.push('line score periods are all 0 under non-zero totals; they are placeholders, so lineScore is empty and overtimes is null');
+    return { lines: read.map(() => []), overtimes: null };
+  }
+  for (const { label, lineScore, total } of read) {
     if (total.state === 'present' && lineScore.length && lineScore.every((entry) => entry.state === 'present')
       && lineScore.reduce((sum, entry) => sum + entry.value, 0) !== total.value) {
       throw new Error(`${label} periods do not add up to ${total.value}`);
     }
-    return lineScore;
-  });
-  return { lines, overtimes: periods.length ? periods.filter((period) => period.endsWith('OT')).length : null };
+  }
+  return { lines: read.map(({ lineScore }) => lineScore), overtimes: periods.length ? periods.filter((period) => period.endsWith('OT')).length : null };
 }
 
 // Four-factor figures join the team's advanced totals. Where both tables print
