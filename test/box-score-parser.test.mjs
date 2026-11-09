@@ -191,6 +191,25 @@ test('box_score@1 reads a game whose line score is only a team and a total, with
   assert.deepEqual(withPeriods.warnings, []);
 });
 
+test('box_score@1 reads all-zero period cells under real totals as absent periods, not as scores (#180)', () => {
+  const zeros = { periods: ['1', '2'], lineScore: [['0', '0', '61'], ['0', '0', '64']] };
+  const parsed = parse(boxHtml(zeros));
+  assert.equal(parsed.kind, 'valid', parsed.error);
+  assert.equal(parsed.document.overtimes, null);
+  assert.deepEqual(parsed.document.teams.map((team) => [team.finalScore, team.lineScore]), [[p(61), []], [p(64), []]]);
+  assert.deepEqual(parsed.warnings, ['line score periods are all 0 under non-zero totals; they are placeholders, so lineScore is empty and overtimes is null']);
+  // Real zeros in a real line score, and anything else that does not add up, still read or fail as before.
+  const real = parse(boxHtml({ periods: ['1', '2'], lineScore: [['0', '61', '61'], ['0', '64', '64']] }));
+  assert.equal(real.kind, 'valid', real.error);
+  assert.deepEqual(real.document.teams[0].lineScore, [p(0), p(61)]);
+  assert.deepEqual(real.warnings, []);
+  for (const lineScore of [[['0', '0', '61'], ['30', '34', '64']], [['0', '0', '61'], ['30', '33', '64']], [['0', '1', '61'], ['0', '0', '64']]]) {
+    const failed = parse(boxHtml({ periods: ['1', '2'], lineScore }));
+    assert.equal(failed.kind, 'structural_failure', JSON.stringify(lineScore));
+    assert.match(failed.error, /periods do not add up to/);
+  }
+});
+
 test('box_score@1 still checks a total-only line score against the scorebox and still needs the other tables (#174)', () => {
   const contradicted = parse(boxHtml({ periods: [], lineScore: [['60'], ['64']] }));
   assert.equal(contradicted.kind, 'structural_failure');
