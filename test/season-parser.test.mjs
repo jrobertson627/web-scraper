@@ -44,10 +44,10 @@ const info = {
     <br>Lost West Second Round (<a href="/cbb/boxscores/y.html">80-66</a>) versus #4 Beta</p>`,
 };
 
-function seasonHtml({ noTotals = false, ...overrides } = {}) {
+function seasonHtml({ noTotals = false, rosterHeight = '6-2', ...overrides } = {}) {
   const parts = { ...info, ...overrides };
   const roster = table('roster', ['player', 'number', 'class', 'pos', 'height', 'weight', 'hometown', 'high_school'], [
-    { player: owl, number: '0', class: 'FR', pos: 'G', height: '6-2', weight: '0', hometown: 'Here, NY', high_school: '' },
+    { player: owl, number: '0', class: 'FR', pos: 'G', height: rosterHeight, weight: '0', hometown: 'Here, NY', high_school: '' },
     { player: 'Walk On', number: '', class: '', pos: '', height: '', weight: '' },
   ]);
   const totals = table('season-total_totals', ['entity', 'games', ...statColumns], [
@@ -89,6 +89,51 @@ test('season@1 reads the #info summary, including the NCAA seed, region and roun
     },
     extra: { conf_finish: present(1), ap_final_rank: NOT_PUBLISHED },
   });
+});
+
+test('season@1 reads adjusted and independent record lines, storing the headline figures and warning about each adjustment (#172)', () => {
+  const conference = '<a href="/cbb/conferences/a-10/men/2026.html">A-10 MBB</a>';
+  const record = (html) => ({ record: `<p><strong>Record:</strong> ${html}</p>` });
+  const summaryOf = (html) => {
+    const parsed = parse(seasonHtml(record(html)));
+    assert.equal(parsed.kind, 'valid', `${html}: ${parsed.error}`);
+    return { summary: parsed.document.summary, warnings: parsed.warnings };
+  };
+  const both = summaryOf(`16-16 Overall W-L adjusted to 0-16, conference W-L adjusted to 0-10 (8-10, 8th in ${conference})`);
+  assert.deepEqual([both.summary.wins, both.summary.losses, both.summary.confWins, both.summary.confLosses], [present(16), present(16), present(8), present(10)]);
+  assert.deepEqual(both.summary.conference, { name: 'A-10 MBB', path: '/cbb/conferences/a-10/men/2026.html' });
+  assert.deepEqual(both.summary.extra.conf_finish, present(8));
+  assert.deepEqual(both.warnings, [
+    "season record is adjusted: overall W-L adjusted to 0-16; the page's 16-16 is stored",
+    'season record is adjusted: conference W-L adjusted to 0-10; the printed 8-10 is stored',
+  ]);
+  const confOnly = summaryOf(`23-8 Conference W-L adjusted to 13-5 (12-5, 5th in ${conference})`);
+  assert.deepEqual([confOnly.summary.wins, confOnly.summary.confWins, confOnly.summary.confLosses], [present(23), present(12), present(5)]);
+  assert.deepEqual(confOnly.warnings, ['season record is adjusted: conference W-L adjusted to 13-5; the printed 12-5 is stored']);
+  // An independent has no conference record and no conference.
+  const independent = summaryOf('11-20 (Independent)');
+  assert.deepEqual([independent.summary.wins, independent.summary.losses, independent.summary.confWins, independent.summary.confLosses, independent.summary.conference, independent.summary.extra.conf_finish],
+    [present(11), present(20), NOT_PUBLISHED, NOT_PUBLISHED, null, NOT_PUBLISHED]);
+  assert.deepEqual(independent.warnings, []);
+  // Anything else is still a layout failure.
+  for (const html of ['3-1 (Mystery)', '3-1 Overall record adjusted to 0-1', '3-x', '3-1 (1-0, 1st)']) {
+    const parsed = parse(seasonHtml(record(html)));
+    assert.equal(parsed.kind, 'structural_failure', html);
+    assert.match(parsed.error, /season record is unexpected/);
+  }
+});
+
+test('season@1 stores a half-inch height as unavailable with a warning instead of failing the page (#172)', () => {
+  const parsed = parse(seasonHtml({ rosterHeight: '6-3.5' }));
+  assert.equal(parsed.kind, 'valid', parsed.error);
+  assert.deepEqual(parsed.document.roster[0].heightIn, { state: 'unavailable', reason: 'not_whole_inches' });
+  assert.deepEqual(parsed.warnings, ['Sam Owl height 6-3.5 is not whole inches; heightIn is unavailable']);
+  assert.deepEqual(parsed.document.roster[1].heightIn, BLANK, 'the other rows are unchanged');
+  for (const height of ['6-12', 'tall', '6-3.', '6-3.5.5']) {
+    const failed = parse(seasonHtml({ rosterHeight: height }));
+    assert.equal(failed.kind, 'structural_failure', height);
+    assert.match(failed.error, /height is not feet-inches/);
+  }
 });
 
 test('season@1 keeps blanks, zeros and unlinked players distinct in the roster and player tables', () => {
