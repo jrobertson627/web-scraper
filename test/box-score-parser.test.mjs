@@ -55,6 +55,8 @@ function boxHtml({
   swapLineScore = false, swapFourFactors = false, fourFactorsHomeLink = HOME_LINK,
   // A player row with a real stat line but an empty name cell (#176); `unnamedAdvancedToo: false` leaves the name only in the advanced table.
   unnamedPlayer = false, unnamedAdvancedToo = true,
+  // The real pages printed an empty link on the unnamed row in the advanced table (#178), and may in the basic one.
+  unnamedBasicLink = null, unnamedAdvancedLink = null,
 } = {}) {
   const inOrder = (rows, swap) => (swap ? [...rows].reverse() : rows);
   const lineRows = inOrder([['Visitors', null, 0], ['Home U', HOME_LINK, 1]], swapLineScore).map(([name, href, index]) => `<tr><th data-stat="team">${href ? `<a href='${href}'>${name}</a>` : name}</th>${cells([...periods, 'T'], lineScore[index])}</tr>`).join('');
@@ -64,14 +66,14 @@ function boxHtml({
     ['Linked Starter', '/cbb/players/linked-starter-1.html', ['32:30', '7', '12', '.583', '0', '3', '4', '5', '1', '6', '7', '3', '0', '1', '2', '3', '18', '14.2']],
     ['Reserves'],
     ['Zero Reserve', '/cbb/players/zero-reserve-1.html', ['2', '0', '0', '', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0.0']],
-    ...(unnamedPlayer ? [['', null, ['23', '0', '6', '.000', '0', '2', '0', '0', '1', '2', '3', '0', '0', '0', '1', '2', '0', '-3.1']]] : []),
+    ...(unnamedPlayer ? [['', unnamedBasicLink, ['23', '0', '6', '.000', '0', '2', '0', '0', '1', '2', '3', '0', '0', '0', '1', '2', '0', '-3.1']]] : []),
     ['Bench Walk-On', null, 'Did Not Play'],
   ];
   const homeAdvanced = [
     ['Linked Starter', '/cbb/players/linked-starter-1.html', ['32:30', '.620', '.583', '', '24.5', '3.1']],
     ['Reserves'],
     ['Zero Reserve', '/cbb/players/zero-reserve-1.html', ['2', '', '', '', '', '-1.0']],
-    ...(unnamedPlayer ? [[unnamedAdvancedToo ? '' : 'Walk-On Name', null, ['23', '.000', '.000', '10.0', '15.0', '-3.1']]] : []),
+    ...(unnamedPlayer ? [[unnamedAdvancedToo ? '' : 'Walk-On Name', unnamedAdvancedLink, ['23', '.000', '.000', '10.0', '15.0', '-3.1']]] : []),
     ['Bench Walk-On', null, 'Did Not Play'],
   ];
   const away = [['Unlinked Guard', null, ['40', '20', '45', '.444', '5', '15', '16', '20', '10', '25', '35', '12', '6', '2', '14', '18', '61', '']]];
@@ -213,11 +215,25 @@ test('box_score@1 keeps a player row whose name cell is empty, with its stat lin
   assert.deepEqual([unnamed.stats.fga, unnamed.stats.pts, unnamed.stats.trb], [p(6), p(0), p(3)]);
   assert.equal(unnamed.stats.minutes.state, 'present');
   assert.equal(unnamed.advanced.bpm.value, -3.1);
-  assert.deepEqual(parsed.warnings, ['Home U player row 2 has no name; it is stored as "Unnamed player" with its stat line']);
+  assert.deepEqual(parsed.warnings, ['Home U player row 2 has no name; it is stored as "Unnamed player" with its stat line and no player link']);
   // The other rows and the team totals read as they do on a page with every name.
   const named = parse(boxHtml());
   assert.deepEqual(home.filter((player) => player !== unnamed), named.document.teams[1].players);
   assert.deepEqual(parsed.document.teams[1].stats, named.document.teams[1].stats);
+});
+
+test('box_score@1 stores an unnamed row without a player link, whichever table prints an empty link (#178)', () => {
+  const link = '/cbb/players/walk-on-1.html';
+  const named = parse(boxHtml());
+  for (const options of [{ unnamedAdvancedLink: link }, { unnamedBasicLink: link }, { unnamedBasicLink: link, unnamedAdvancedLink: link }]) {
+    const parsed = parse(boxHtml({ unnamedPlayer: true, ...options }));
+    assert.equal(parsed.kind, 'valid', `${JSON.stringify(options)}: ${parsed.error}`);
+    const unnamed = parsed.document.teams[1].players[2];
+    assert.deepEqual([unnamed.name, unnamed.playerPath], ['Unnamed player', null], JSON.stringify(options));
+    assert.equal(unnamed.stats.fga.value, 6);
+    assert.deepEqual(parsed.warnings, ['Home U player row 2 has no name; it is stored as "Unnamed player" with its stat line and no player link']);
+    assert.deepEqual(parsed.document.teams[1].players.filter((player) => player !== unnamed), named.document.teams[1].players);
+  }
 });
 
 test('box_score@1 still fails when the same row has a name in one table and none in the other (#176)', () => {

@@ -82,18 +82,20 @@ function sectionOf(label) { return label === 'Starters' ? true : label === 'Rese
 // Some pages print a player's stat line with an empty name cell (Navy, #176). The
 // name column is required, so the row is kept, with its real stat line, under this
 // label, and the parse carries a warning. The row's position keys it, not its name.
+// It carries no player link either, even where the page prints an empty one (only
+// the advanced table did, #178): a linked player's display name is written from the
+// name on the row, which must not become this label.
 const UNNAMED_PLAYER = 'Unnamed player';
 
 function playerIdentity($, row, tableId, snapshot) {
   const cell = requiredCell($, row, 'player', tableId);
   const printed = text(cell);
-  const name = printed || UNNAMED_PLAYER;
-  const unnamed = !printed;
+  if (!printed) return { name: UNNAMED_PLAYER, playerPath: null, unnamed: true };
   const href = cell.find('a').attr('href');
-  if (!href) return { name, playerPath: null, unnamed };
+  if (!href) return { name: printed, playerPath: null, unnamed: false };
   const source = snapshot.sourceUrlFrom(href);
-  if (!/^\/cbb\/players\/[^/]+\.html$/.test(source.path)) throw new Error(`player ${name} has an unexpected link: ${source.path}`);
-  return { name, playerPath: source.path, unnamed };
+  if (!/^\/cbb\/players\/[^/]+\.html$/.test(source.path)) throw new Error(`player ${printed} has an unexpected link: ${source.path}`);
+  return { name: printed, playerPath: source.path, unnamed: false };
 }
 
 // Player rows in source order with their starter designation, and the School
@@ -144,7 +146,7 @@ function teamTables($, index, team, snapshot, warnings) {
       throw new Error(`table #${advancedId} row ${row} is ${other.name}, expected ${player.name}`);
     }
     const label = `${team.name} ${player.name}`;
-    if (player.unnamed) warnings.push(`${team.name} player row ${row} has no name; it is stored as "${UNNAMED_PLAYER}" with its stat line`);
+    if (player.unnamed) warnings.push(`${team.name} player row ${row} has no name; it is stored as "${UNNAMED_PLAYER}" with its stat line and no player link`);
     return {
       name: player.name,
       playerPath: player.playerPath,
