@@ -39,7 +39,7 @@ The sixteen core counting stats, each a source value:
 
 **`game_log.games[]`**: `gameNumber`, `date`, `location` (`home`/`away`/`neutral`/`null`), `opponent: { name, schoolPath }`, `gameType`, `result` (`W`/`L`/`null`), `status`, `overtimes`, `teamScore`, `opponentScore`, `teamStats`, `opponentStats` (stat lines, or `null` when the row has no stat cells), `boxScoreUrl`.
 
-**`box_score.teams[]`**: exactly one `away` and one `home` entry, each with `side`, `name`, `schoolPath`, `finalScore`, `lineScore[]` (points per period; empty when the page prints only a team and a total, in which case the document's `overtimes` is `null`, not `0`, and the parse carries a warning), `stats` (team totals stat line or `null`), `advanced{}`, and `players[]` (`name`, `playerPath`, `starter`, `stats`, `advanced{}`; a row the page prints with an empty name keeps its stat line under the name `Unnamed player`, with a parse warning).
+**`box_score.teams[]`**: exactly one `away` and one `home` entry, each with `side`, `name`, `schoolPath`, `finalScore`, `lineScore[]` (points per period; empty when the page prints only a team and a total, in which case the document's `overtimes` is `null`, not `0`, and the parse carries a warning), `stats` (team totals stat line or `null`), `advanced{}`, and `players[]` (`name`, `playerPath`, `starter`, `stats`, `advanced{}`; a row the page prints with an empty name keeps its stat line under the name `Unnamed player`, with no player link and a parse warning).
 
 `status` is one of `scheduled`, `final`, `canceled`, `rescheduled`, `incomplete`. A box score sets `context` only when the page states it. Sports Reference box scores do not, so neutral-site context comes from the `location` of the game-log rows that link the box score.
 
